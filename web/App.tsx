@@ -354,18 +354,29 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
     return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
   }, [pollingCode, doPoll])
 
-  // Re-poll when app returns to foreground OR browser is closed
+  // Re-poll when app returns to foreground (three independent mechanisms)
   useEffect(() => {
     if (!pollingCode) return
     let cleanupState: (() => void) | undefined
     let cleanupBrowser: (() => void) | undefined
+
+    // 1. Capacitor lifecycle (fires when activity goes background → foreground)
     CapApp.addListener("appStateChange", ({ isActive }) => {
       if (isActive && pollingCode) doPoll(pollingCode)
     }).then((h) => { cleanupState = () => h.remove() })
+
+    // 2. Browser plugin event (for iOS SFSafariViewController / in-app browser close)
     Browser.addListener("browserFinished", () => {
       if (pollingCode) doPoll(pollingCode)
     }).then((h) => { cleanupBrowser = () => h.remove() })
-    return () => { cleanupState?.(); cleanupBrowser?.() }
+
+    // 3. Standard DOM visibility (most reliable in Android WebView — fires on resume)
+    const onVisible = () => {
+      if (!document.hidden && pollingCode) doPoll(pollingCode)
+    }
+    document.addEventListener("visibilitychange", onVisible)
+
+    return () => { cleanupState?.(); cleanupBrowser?.(); document.removeEventListener("visibilitychange", onVisible) }
   }, [pollingCode, doPoll])
 
   // Parse QR text: extract server URL and optional pair code
@@ -506,8 +517,9 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
             const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
             savePollingCode(code)
             setStatus(t("app.waitingForBrowserLogin"))
-            // Use Capacitor Browser plugin for reliable browserFinished event
-            Browser.open({ url: authUrl }).catch(() => window.open(authUrl, "_system"))
+            // Use _system to open real Chrome — Browser.open() uses Chrome Custom Tab
+            // which Google blocks with disallowed_useragent for OAuth flows
+            window.open(authUrl, "_system")
           }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
