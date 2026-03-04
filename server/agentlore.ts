@@ -2,7 +2,15 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { randomBytes } from "node:crypto"
-import open from "open"
+import { exec } from "node:child_process"
+
+function openBrowser(url: string) {
+  const cmd =
+    process.platform === "win32" ? `start "" "${url}"` :
+    process.platform === "darwin" ? `open "${url}"` :
+    `xdg-open "${url}"`
+  exec(cmd, () => {})
+}
 
 const CONFIG_DIR = join(homedir(), ".agentrune")
 const CONFIG_PATH = join(CONFIG_DIR, "agentlore.json")
@@ -51,7 +59,7 @@ export async function initAgentLore(PORT: number): Promise<AgentLoreConfig | nul
   console.log(`  請在瀏覽器完成授權：${data.verifyUrl}\n`)
 
   // Auto-open browser
-  open(data.verifyUrl).catch(() => {})
+  openBrowser(data.verifyUrl)
 
   const token = await pollUntilAuthorized(data.code, deviceId)
   if (!token) {
