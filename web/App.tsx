@@ -306,27 +306,32 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
   const [status, setStatus] = useState("")
   const [error, setError] = useState("")
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [pollingCode, setPollingCode] = useState<string | null>(null)
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Listen for deep link after AgentLore OAuth — token saved → reload skips ConnectScreen
+  // Polling: check if mobile auth session was confirmed in the browser
   useEffect(() => {
-    let cleanup: (() => void) | undefined
-    import("@capacitor/app").then(({ App: CapApp }) => {
-      CapApp.addListener("appUrlOpen", ({ url }) => {
-        if (url.startsWith("agentrune://auth")) {
-          const u = new URL(url)
-          const token = u.searchParams.get("token")
-          const userId = u.searchParams.get("userId")
-          if (token) {
-            localStorage.setItem("agentrune_phone_token", token)
-            if (userId) localStorage.setItem("agentrune_user_id", userId)
-            // Reload to re-evaluate needsServerSetup() — will skip to LaunchPad
-            window.location.reload()
-          }
+    if (!pollingCode) return
+    pollingRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`https://agentlore.vercel.app/api/agentrune/mobile-auth/poll?code=${pollingCode}`)
+        const data = await res.json()
+        if (data.data?.status === "confirmed") {
+          clearInterval(pollingRef.current!)
+          setPollingCode(null)
+          localStorage.setItem("agentrune_phone_token", data.data.token)
+          if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
+          window.location.reload()
+        } else if (data.data?.status === "expired") {
+          clearInterval(pollingRef.current!)
+          setPollingCode(null)
+          setError(t("app.loginExpired"))
+          setStatus("")
         }
-      }).then((h) => { cleanup = () => h.remove() })
-    })
-    return () => { cleanup?.() }
-  }, [])
+      } catch { /* network error, retry next tick */ }
+    }, 3000)
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
+  }, [pollingCode, t])
 
   // Parse QR text: extract server URL and optional pair code
   const parseQrUrl = (text: string): { serverUrl: string; pairCode: string | null } | null => {
@@ -442,28 +447,55 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
           {t("app.connectToComputer")}
         </div>
 
-        {/* AgentLore Login — Primary */}
+        {/* AgentLore Login — Polling-based (no deep link) */}
         <button
-          onClick={() => {
-            import("@capacitor/browser").then(({ Browser }) =>
-              Browser.open({ url: "https://agentlore.vercel.app/api/agentrune/phone-auth" })
-                .catch(() => window.open("https://agentlore.vercel.app/api/agentrune/phone-auth", "_blank"))
-            )
+          disabled={!!pollingCode}
+          onClick={async () => {
+            setError("")
+            setStatus(t("app.openingBrowser"))
+            try {
+              const res = await fetch("https://agentlore.vercel.app/api/agentrune/mobile-auth/start", { method: "POST" })
+              const data = await res.json()
+              if (!data.data?.code) { setError(t("app.loginStartFailed")); setStatus(""); return }
+              window.open(data.data.authUrl, "_system")
+              setPollingCode(data.data.code)
+              setStatus(t("app.waitingForBrowserLogin"))
+            } catch {
+              setError(t("app.loginStartFailed"))
+              setStatus("")
+            }
           }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
             width: "100%", padding: "16px", borderRadius: 14, marginBottom: 12,
             border: "1.5px solid rgba(59,130,246,0.5)",
-            background: "rgba(59,130,246,0.12)",
+            background: pollingCode ? "rgba(59,130,246,0.06)" : "rgba(59,130,246,0.12)",
             color: "var(--accent-primary)", fontSize: 16, fontWeight: 700,
-            cursor: "pointer",
+            cursor: pollingCode ? "default" : "pointer", opacity: pollingCode ? 0.7 : 1,
           }}
         >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
-          </svg>
-          {t("settings.loginAgentLore")}
+          {pollingCode ? (
+            <>
+              <span style={{ width: 18, height: 18, border: "2px solid rgba(59,130,246,0.4)", borderTopColor: "rgba(59,130,246,0.9)", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+              {t("app.waitingForBrowserLogin")}
+            </>
+          ) : (
+            <>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+              </svg>
+              {t("settings.loginAgentLore")}
+            </>
+          )}
         </button>
+        {pollingCode && (
+          <button
+            onClick={() => { setPollingCode(null); setStatus(""); }}
+            style={{ fontSize: 12, color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer", marginBottom: 8, opacity: 0.6 }}
+          >
+            {t("app.cancel")}
+          </button>
+        )}
 
         <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 20, opacity: 0.7, lineHeight: 1.5 }}>
           {t("app.loginAgentLoreHint")}
