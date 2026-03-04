@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession } from "./lib/types"
+import type { AgentEvent } from "../shared/types"
 import { getLastProject, saveLastProject } from "./lib/storage"
 import { LaunchPad } from "./components/LaunchPad"
 import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
+import { DiffPanel } from "./components/DiffPanel"
 import { App as CapApp } from "@capacitor/app"
 import { useLocale } from "./lib/i18n/index.js"
 
@@ -714,6 +716,7 @@ export function App() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<"board" | "terminal">("board")
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
+  const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
@@ -933,6 +936,11 @@ export function App() {
               onOpenSessionTerminal={handleOpenSessionTerminal}
               theme={theme}
               toggleTheme={toggleTheme}
+              onEventDiff={(e) => setDiffEvent(e)}
+            />
+            <DiffPanel
+              event={diffEvent}
+              onClose={() => setDiffEvent(null)}
             />
           </div>
         </>

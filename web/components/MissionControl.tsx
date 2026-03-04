@@ -33,6 +33,7 @@ interface MissionControlProps {
   onOpenSessionTerminal: (sessionId: string) => void
   theme?: "light" | "dark"
   toggleTheme?: () => void
+  onEventDiff?: (event: AgentEvent) => void
 }
 
 // Session label helpers (localStorage-backed)
@@ -60,6 +61,7 @@ export function MissionControl({
   onOpenSessionTerminal,
   theme,
   toggleTheme,
+  onEventDiff,
 }: MissionControlProps) {
   const { t } = useLocale()
   const [events, setEvents] = useState<AgentEvent[]>([])
@@ -1077,6 +1079,7 @@ export function MissionControl({
                   onDecision={event.decision ? (input) => handleDecision(event.id, input) : undefined}
                   onQuote={handleQuote}
                   onSaveObsidian={(text) => handleSaveObsidian(text, event)}
+                  onViewDiff={onEventDiff}
                 />
               ))}
               {mainEvents.length === 0 && (
