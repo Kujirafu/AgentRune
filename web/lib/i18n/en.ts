@@ -28,6 +28,9 @@ export const en: Record<string, string> = {
   "launchpad.launchAgent": "Launch Agent",
   "launchpad.activeSessions": "Active Sessions",
   "launchpad.resume": "Resume",
+  "launchpad.quickConnect": "Quick Connect",
+  "launchpad.tapToConnect": "Tap to connect",
+  "launchpad.noCloudDevices": "Run npx agentrune on your computer to appear here",
 
   // Settings
   "settings.title": "Settings",
@@ -50,6 +53,9 @@ export const en: Record<string, string> = {
   "settings.profile": "Profile",
   "settings.notLoggedIn": "Not logged in",
   "settings.loginHint": "Login to auto-encrypt connections between phone and computer",
+  "settings.loginAgentLore": "Login with AgentLore",
+  "settings.logoutAgentLore": "Logout",
+  "settings.loggedInAs": "Logged in",
 
   // InputBar
   "input.placeholder": "Type a command...",
@@ -161,6 +167,9 @@ export const en: Record<string, string> = {
   "file.file": "File",
   "file.usePath": "Use this path",
   "file.copy": "Copy",
+  "file.newFolder": "New Folder",
+  "file.folderName": "Folder name",
+  "file.create": "Create",
 
   // TerminalView
   "terminal.sessionEnded": "Session ended",

@@ -28,6 +28,9 @@ export const zhTW: Record<string, string> = {
   "launchpad.launchAgent": "啟動智能體",
   "launchpad.activeSessions": "執行中的工作階段",
   "launchpad.resume": "繼續",
+  "launchpad.quickConnect": "快速連線",
+  "launchpad.tapToConnect": "點擊連線",
+  "launchpad.noCloudDevices": "在電腦終端機執行 npx agentrune 後即可顯示",
 
   // 設定
   "settings.title": "設定",
@@ -50,6 +53,9 @@ export const zhTW: Record<string, string> = {
   "settings.profile": "個人資料",
   "settings.notLoggedIn": "未登入",
   "settings.loginHint": "登入後即可自動加密手機與電腦之間的連線",
+  "settings.loginAgentLore": "登入 AgentLore",
+  "settings.logoutAgentLore": "登出",
+  "settings.loggedInAs": "已登入",
 
   // 輸入列
   "input.placeholder": "輸入指令...",
@@ -161,6 +167,9 @@ export const zhTW: Record<string, string> = {
   "file.file": "檔案",
   "file.usePath": "使用此路徑",
   "file.copy": "複製",
+  "file.newFolder": "新增資料夾",
+  "file.folderName": "資料夾名稱",
+  "file.create": "建立",
 
   // 終端機
   "terminal.sessionEnded": "工作階段已結束",

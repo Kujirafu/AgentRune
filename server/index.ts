@@ -2,13 +2,19 @@ import express from "express"
 import { createServer as createHttpServer } from "node:http"
 import { createServer as createHttpsServer } from "node:https"
 import { WebSocketServer, WebSocket } from "ws"
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs"
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile } from "node:fs"
 import { join, basename, dirname } from "node:path"
-import { networkInterfaces } from "node:os"
+import { networkInterfaces, homedir } from "node:os"
 import { execSync } from "node:child_process"
+import { fileURLToPath } from "node:url"
+import { createHash } from "node:crypto"
 import { SessionManager, type Project } from "./sessions.js"
 import { AuthManager, type AuthMode } from "./auth.js"
 import { ParseEngine } from "./parse-engine.js"
+import type { AgentEvent } from "../shared/types.js"
+import { EventStore } from "./event-store.js"
+import { printConnectionInfo } from "./qr-terminal.js"
+import { initAgentLore, registerDevice, getLocalIp } from "./agentlore.js"
 
 const PORT = parseInt(process.env.PORT || "3456")
 const AUTH_MODE = (process.env.AGENTRUNE_AUTH || "pairing") as AuthMode
@@ -30,17 +36,18 @@ function issueSessionToken(): string {
 
 // ─── Self-signed HTTPS cert ──────────────────────────────────────
 
+const CERT_DIR = join(homedir(), ".agentrune", "certs")
+
 function ensureCerts(): { key: string; cert: string } | null {
-  const certDir = join(process.cwd(), ".certs")
-  const keyPath = join(certDir, "key.pem")
-  const certPath = join(certDir, "cert.pem")
+  const keyPath = join(CERT_DIR, "key.pem")
+  const certPath = join(CERT_DIR, "cert.pem")
 
   if (existsSync(keyPath) && existsSync(certPath)) {
     return { key: readFileSync(keyPath, "utf-8"), cert: readFileSync(certPath, "utf-8") }
   }
 
   try {
-    mkdirSync(certDir, { recursive: true })
+    mkdirSync(CERT_DIR, { recursive: true })
     execSync(
       `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" -days 365 -nodes -subj "/CN=AgentRune"`,
       { stdio: "ignore" },
@@ -55,13 +62,12 @@ function ensureCerts(): { key: string; cert: string } | null {
 // ─── Create server ───────────────────────────────────────────────
 
 const certs = ensureCerts()
-const server = certs
-  ? createHttpsServer({ key: certs.key, cert: certs.cert }, app)
-  : createHttpServer(app)
+const server = certs ? createHttpsServer(certs, app) : createHttpServer(app)
 const protocol = certs ? "https" : "http"
 
 const wss = new WebSocketServer({ server })
 const sessions = new SessionManager()
+const eventStore = new EventStore()
 
 // ─── Load projects config ────────────────────────────────────────
 
@@ -81,17 +87,25 @@ const projects = loadProjects()
 
 // ─── Serve static files ─────────────────────────────────────────
 
-const distPath = join(process.cwd(), "dist")
+// Support both: local dev (process.cwd()/dist) and npx (dist/ next to dist-server/)
+const __dirname_server = dirname(fileURLToPath(import.meta.url))
+const distPath = existsSync(join(process.cwd(), "dist"))
+  ? join(process.cwd(), "dist")
+  : join(__dirname_server, "../dist")
+
 if (existsSync(distPath)) {
   app.use(express.static(distPath))
 }
 
 // ─── CORS for native app ─────────────────────────────────────────
 
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*")
   res.header("Access-Control-Allow-Headers", "Content-Type")
-  res.header("Access-Control-Allow-Methods", "GET, POST")
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200)
+  }
   next()
 })
 
@@ -261,6 +275,26 @@ app.get("/api/browse", (req, res) => {
   }
 })
 
+// ─── Create directory ────────────────────────────────────────────
+
+app.post("/api/mkdir", (req, res) => {
+  const { path: dirPath } = req.body
+  if (!dirPath || typeof dirPath !== "string") {
+    return res.status(400).json({ error: "Missing path" })
+  }
+
+  if (existsSync(dirPath)) {
+    return res.status(409).json({ error: "Path already exists" })
+  }
+
+  try {
+    mkdirSync(dirPath, { recursive: true })
+    res.json({ path: dirPath, name: basename(dirPath) })
+  } catch (err) {
+    res.status(400).json({ error: "Cannot create directory" })
+  }
+})
+
 // ─── Image upload ───────────────────────────────────────────────
 
 app.post("/api/upload", (req, res) => {
@@ -283,6 +317,82 @@ app.post("/api/upload", (req, res) => {
   res.json({ path: filePath, filename: name })
 })
 
+// Session history API
+app.get("/api/history/:projectId", (req, res) => {
+  res.json(eventStore.getSessionsByProject(req.params.projectId))
+})
+
+app.get("/api/history/:projectId/:sessionId", (req, res) => {
+  const events = eventStore.getSessionEvents(req.params.sessionId)
+  res.json(events)
+})
+
+// ─── QR pairing page ────────────────────────────────────────────
+
+// QR pairing page — serves a simple HTML page with auto-pair functionality
+app.get("/pair", (req, res) => {
+  const code = req.query.pair as string || ""
+  res.send(`<!DOCTYPE html>
+<html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentRune Pair</title>
+<style>
+  body { background: #0f172a; color: #e2e8f0; font-family: system-ui;
+         display: flex; align-items: center; justify-content: center;
+         min-height: 100vh; margin: 0; }
+  .card { text-align: center; padding: 40px; border-radius: 24px;
+          background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+          backdrop-filter: blur(32px); max-width: 360px; }
+  h1 { font-family: Georgia, serif; font-size: 28px; margin: 0 0 8px; }
+  .sub { font-size: 12px; color: rgba(255,255,255,0.3); text-transform: uppercase;
+         letter-spacing: 2px; margin-bottom: 32px; }
+  .status { font-size: 14px; color: rgba(96,165,250,0.8); margin-top: 24px; }
+  .code { font-family: monospace; font-size: 36px; font-weight: 700; letter-spacing: 8px;
+          color: #60a5fa; margin: 20px 0; }
+  .btn { padding: 12px 24px; border-radius: 12px; border: 1px solid rgba(96,165,250,0.3);
+         background: rgba(96,165,250,0.1); color: #60a5fa; font-size: 16px; font-weight: 600;
+         cursor: pointer; margin-top: 16px; }
+  .success { color: #4ade80; }
+  .error { color: #f87171; }
+</style>
+</head><body>
+<div class="card">
+  <h1>AgentRune</h1>
+  <div class="sub">Device Pairing</div>
+  ${code ? `
+    <div class="code">${code}</div>
+    <div class="status" id="status">Pairing...</div>
+    <script>
+      fetch("/api/auth/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: "${code}", deviceName: navigator.userAgent.match(/(iPhone|iPad|Android|Mac|Windows)/)?.[1] || "Phone" })
+      }).then(r => r.json()).then(data => {
+        if (data.authenticated) {
+          localStorage.setItem("agentrune_device_id", data.deviceId);
+          localStorage.setItem("agentrune_device_token", data.deviceToken);
+          document.getElementById("status").className = "status success";
+          document.getElementById("status").textContent = "Paired! Redirecting...";
+          setTimeout(() => window.location.href = "/", 1000);
+        } else {
+          document.getElementById("status").className = "status error";
+          document.getElementById("status").textContent = "Invalid code. Try again.";
+        }
+      }).catch(() => {
+        document.getElementById("status").className = "status error";
+        document.getElementById("status").textContent = "Connection failed.";
+      });
+    </script>
+  ` : `
+    <div class="status">Open this page with a pairing code:</div>
+    <div style="font-size:12px;color:rgba(255,255,255,0.3);margin-top:12px;">
+      {server-url}/pair?pair={code}
+    </div>
+  `}
+</div>
+</body></html>`)
+})
+
 // SPA fallback
 app.get("/{*splat}", (_req, res) => {
   const indexPath = join(distPath, "index.html")
@@ -297,6 +407,11 @@ app.get("/{*splat}", (_req, res) => {
 
 const clientSessions = new Map<WebSocket, string>()
 const clientEngines = new Map<WebSocket, ParseEngine>()
+const clientEventSessions = new Map<WebSocket, string>()
+
+// Per-PTY-session state (survives WS reconnects)
+const sessionEngines = new Map<string, ParseEngine>()
+const sessionRecentEvents = new Map<string, AgentEvent[]>()
 
 wss.on("connection", (ws, req) => {
   // Auth check for WebSocket
@@ -327,25 +442,56 @@ wss.on("connection", (ws, req) => {
           return
         }
 
-        const session = sessions.create(project)
+        const agentId = (msg.agentId as string) || "terminal"
+        const requestedSessionId = msg.sessionId as string | undefined
+
+        // Resume existing session by ID, or create a new one
+        const alreadyExisted = requestedSessionId ? sessions.get(requestedSessionId) !== undefined : false
+        const session = sessions.create(project, agentId, requestedSessionId)
         clientSessions.set(ws, session.id)
 
-        const agentId = (msg.agentId as string) || "terminal"
-        const engine = new ParseEngine(agentId, projectId)
+        // Reuse ParseEngine per PTY session (survives WS reconnects)
+        let engine = sessionEngines.get(session.id)
+        if (!engine) {
+          engine = new ParseEngine(agentId, projectId)
+          sessionEngines.set(session.id, engine)
+          sessionRecentEvents.set(session.id, [])
+        }
         clientEngines.set(ws, engine)
 
-        const scrollback = sessions.getScrollback(session.id)
+        // Reuse event store session or create new one
+        if (!clientEventSessions.has(ws)) {
+          const eventSessionId = eventStore.startSession(projectId, agentId)
+          clientEventSessions.set(ws, eventSessionId)
+        }
+
+        // Send capped scrollback (~80KB) instead of full history
+        const scrollback = sessions.getRecentScrollback(session.id)
         if (scrollback) {
           ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
         }
 
-        ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name }))
+        // Replay stored events so MissionControl shows them immediately
+        const storedEvents = sessionRecentEvents.get(session.id) || []
+        if (storedEvents.length > 0) {
+          ws.send(JSON.stringify({ type: "events_replay", events: storedEvents }))
+        }
+
+        ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted }))
         break
       }
 
       case "input": {
         const sessionId = clientSessions.get(ws)
-        if (sessionId) sessions.write(sessionId, msg.data as string)
+        const inputData = msg.data as string
+        const preview = inputData.length > 80 ? inputData.slice(0, 80) + "..." : inputData
+        const hex = [...inputData].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ")
+        console.log(`[INPUT] session=${sessionId || "NONE"} len=${inputData.length} text=${JSON.stringify(preview)} hex=${hex}`)
+        if (sessionId) {
+          sessions.write(sessionId, inputData)
+        } else {
+          console.log(`[INPUT] DROPPED — no session mapping for this WS`)
+        }
         break
       }
 
@@ -363,22 +509,77 @@ wss.on("connection", (ws, req) => {
   })
 
   ws.on("close", () => {
+    const esId = clientEventSessions.get(ws)
+    if (esId) eventStore.endSession(esId)
+    clientEventSessions.delete(ws)
     clientSessions.delete(ws)
     clientEngines.delete(ws)
   })
 })
 
+// PTY data log file for debugging (only when AGENTRUNE_DEBUG=1)
+const ptyLogPath = join(process.cwd(), "pty-debug.log")
+const ptyLogEnabled = process.env.AGENTRUNE_DEBUG === "1"
+let ptyLogSize = 0
+const PTY_LOG_MAX = 10 * 1024 * 1024  // 10MB cap
+if (ptyLogEnabled) {
+  try {
+    writeFileSync(ptyLogPath, `=== PTY Debug Log started ${new Date().toISOString()} ===\n`)
+    console.log(`  PTY debug log: ${ptyLogPath}`)
+  } catch { /* ignore */ }
+}
+
 sessions.on("data", (sessionId: string, data: string) => {
+  // Feed the session-level engine once (not per-client)
+  const engine = sessionEngines.get(sessionId)
+  const events = engine ? engine.feed(data) : []
+
+  // DEBUG: log raw PTY data to file for analysis (async, capped)
+  const stripped = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\(B/g, "")
+  const preview = stripped.replace(/[\x00-\x1f]/g, " ").trim().slice(0, 150)
+  if (ptyLogEnabled && preview.length > 2 && ptyLogSize < PTY_LOG_MAX) {
+    const hex = [...data.slice(0, 200)].map(c => {
+      const code = c.charCodeAt(0)
+      return code < 32 || code > 126 ? `\\x${code.toString(16).padStart(2, "0")}` : c
+    }).join("")
+    const logEntry =
+      `[${new Date().toISOString()}] session=${sessionId} engine=${!!engine} events=${events.length}\n` +
+      `  preview: "${preview}"\n` +
+      `  hex200: "${hex}"\n` +
+      (events.length > 0 ? events.map(e => `  EVENT: type=${e.type} title="${e.title}"\n`).join("") : "")
+    ptyLogSize += logEntry.length
+    appendFile(ptyLogPath, logEntry, () => {})  // async, fire-and-forget
+  }
+  if (preview.length > 2) {
+    console.log(`[PARSE] session=${sessionId} engine=${!!engine} events=${events.length} preview="${preview}"`)
+    for (const e of events) {
+      console.log(`  [EVENT] type=${e.type} status=${e.status} title="${e.title}" detail="${(e.detail || "").slice(0, 80)}"`)
+    }
+  }
+
+  // Store events in per-session list (cap at 100)
+  if (events.length > 0) {
+    const list = sessionRecentEvents.get(sessionId)
+    if (list) {
+      list.push(...events)
+      if (list.length > 100) list.splice(0, list.length - 100)
+    }
+  }
+
   for (const [client, sid] of clientSessions) {
     if (sid === sessionId && client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({ type: "output", data }))
 
-      // Feed Parse Engine and emit events
-      const engine = clientEngines.get(client)
-      if (engine) {
-        const events = engine.feed(data)
+      // Send detected events to client
+      for (const event of events) {
+        client.send(JSON.stringify({ type: "event", event }))
+      }
+
+      // Persist events to event store
+      const eventSessionId = clientEventSessions.get(client)
+      if (eventSessionId) {
         for (const event of events) {
-          client.send(JSON.stringify({ type: "event", event }))
+          eventStore.addEvent(eventSessionId, event)
         }
       }
     }
@@ -386,6 +587,10 @@ sessions.on("data", (sessionId: string, data: string) => {
 })
 
 sessions.on("exit", (sessionId: string) => {
+  // Clean up per-session state
+  sessionEngines.delete(sessionId)
+  sessionRecentEvents.delete(sessionId)
+
   for (const [client, sid] of clientSessions) {
     if (sid === sessionId && client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({ type: "exit", sessionId }))
@@ -395,7 +600,7 @@ sessions.on("exit", (sessionId: string) => {
 
 // ─── Start ───────────────────────────────────────────────────────
 
-server.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, "0.0.0.0", async () => {
   console.log(`\n  AgentRune running at:`)
   console.log(`    Local:   ${protocol}://localhost:${PORT}`)
 
@@ -407,9 +612,23 @@ server.listen(PORT, "0.0.0.0", () => {
 
   auth.printAuthInfo()
 
-  if (!certs) {
-    console.log(`    HTTPS:   Not available (install openssl to enable)`)
+  if (auth.mode === "pairing") {
+    const pairingCode = auth.getCurrentCode?.()
+    if (lan && pairingCode) {
+      printConnectionInfo(`${protocol}://${lan.address}:${PORT}`, pairingCode)
+    }
   }
 
   console.log()
+
+  // AgentLore device registration
+  const agentLoreConfig = await initAgentLore(PORT)
+  if (agentLoreConfig) {
+    const localIp = getLocalIp()
+    const certFp = certs
+      ? createHash("sha256").update(certs.cert).digest("hex")
+      : undefined
+    await registerDevice(agentLoreConfig, localIp, PORT, certFp)
+    setInterval(() => registerDevice(agentLoreConfig, localIp, PORT, certFp), 2 * 60 * 1000)
+  }
 })

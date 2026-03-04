@@ -1,0 +1,65 @@
+{
+  "name": "agentrune",
+  "version": "0.1.0",
+  "description": "Agent-agnostic mobile command center for Web 4 — direct any AI agent from your phone with a human-friendly interface",
+  "type": "module",
+  "bin": {
+    "agentrune": "dist-server/index.js"
+  },
+  "files": [
+    "dist/",
+    "dist-server/",
+    "shared/"
+  ],
+  "scripts": {
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite --host",
+    "build": "vite build",
+    "build:server": "tsup",
+    "build:all": "npm run build && npm run build:server",
+    "start": "cross-env AGENTRUNE_AUTH=pairing tsx server/index.ts",
+    "start:pair": "cross-env AGENTRUNE_AUTH=pairing tsx server/index.ts",
+    "start:totp": "cross-env AGENTRUNE_AUTH=totp tsx server/index.ts",
+    "start:open": "cross-env AGENTRUNE_AUTH=none tsx server/index.ts",
+    "prod": "npm run build && npm start",
+    "cap:sync": "npx cap sync android",
+    "cap:build": "npm run build && npx cap sync android",
+    "cap:open": "npx cap open android",
+    "typecheck": "npx tsc --noEmit"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.1.0",
+    "@capacitor/app": "^8.0.1",
+    "@capacitor/cli": "^8.1.0",
+    "@capacitor/clipboard": "^8.0.1",
+    "@capacitor/core": "^8.1.0",
+    "@capacitor/ios": "^8.1.0",
+    "@capacitor/keyboard": "^8.0.1",
+    "@capacitor/splash-screen": "^8.0.1",
+    "@capacitor/status-bar": "^8.0.1",
+    "express": "^5.1.0",
+    "html5-qrcode": "^2.3.8",
+    "node-pty": "^1.0.0",
+    "open": "^11.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "tsup": "^8.5.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@types/express": "^5.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.5.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "cross-env": "^10.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.3.0"
+  }
+}

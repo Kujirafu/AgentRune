@@ -1,5 +1,7 @@
+import { useState, useEffect } from "react"
 import type { ProjectSettings } from "../lib/types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
+import { App } from "@capacitor/app"
 
 interface SettingsSheetProps {
   open: boolean
@@ -16,8 +18,33 @@ const SUBSCRIBE_URLS = {
   trust: "https://agentlore.lemonsqueezy.com/checkout/buy/98a2b87b-971d-4ca1-a3ae-b05c4c3e5acb",
 }
 
+const AGENTLORE_PHONE_AUTH_URL = "https://agentlore.vercel.app/api/agentrune/phone-auth"
+
 export function SettingsSheet({ open, settings, agentId, onChange, onClose }: SettingsSheetProps) {
   const { t, locale, setLocale } = useLocale()
+  const [phoneToken, setPhoneToken] = useState<string | null>(null)
+
+  useEffect(() => {
+    setPhoneToken(localStorage.getItem("agentrune_phone_token"))
+  }, [open])
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined
+    App.addListener("appUrlOpen", ({ url }) => {
+      if (url.startsWith("agentrune://auth")) {
+        const u = new URL(url)
+        const token = u.searchParams.get("token")
+        const userId = u.searchParams.get("userId")
+        if (token) {
+          localStorage.setItem("agentrune_phone_token", token)
+          if (userId) localStorage.setItem("agentrune_user_id", userId)
+          setPhoneToken(token)
+        }
+      }
+    }).then((h) => { cleanup = () => h.remove() })
+    return () => { cleanup?.() }
+  }, [])
+
   if (!open) return null
 
   const models = ["sonnet", "opus", "haiku"] as const
@@ -76,9 +103,6 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
         <div style={{ marginBottom: 24 }}>
           <div style={sectionLabelStyle}>{t("settings.profile")}</div>
           <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 16,
             padding: "16px 20px",
             borderRadius: 20,
             border: "1px solid var(--glass-border)",
@@ -87,32 +111,79 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
             WebkitBackdropFilter: "blur(20px)",
             boxShadow: "var(--glass-shadow)",
           }}>
-            {/* Avatar circle */}
-            <div style={{
-              width: 52,
-              height: 52,
-              borderRadius: 16,
-              background: "var(--icon-bg)",
-              border: "1.5px solid var(--glass-border)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-              color: "var(--text-secondary)",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
-            }}>
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                <circle cx="12" cy="7" r="4" />
-              </svg>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              {/* Avatar circle */}
+              <div style={{
+                width: 52,
+                height: 52,
+                borderRadius: 16,
+                background: phoneToken ? "var(--accent-primary-bg)" : "var(--icon-bg)",
+                border: phoneToken ? "1.5px solid var(--accent-primary)" : "1.5px solid var(--glass-border)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                color: phoneToken ? "var(--accent-primary)" : "var(--text-secondary)",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
+              }}>
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)", marginBottom: 2 }}>
+                  {phoneToken ? t("settings.loggedInAs") : t("settings.notLoggedIn")}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)", fontWeight: 500, lineHeight: 1.4 }}>
+                  {phoneToken ? "AgentLore" : t("settings.loginHint")}
+                </div>
+              </div>
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)", marginBottom: 2 }}>
-                {t("settings.notLoggedIn")}
-              </div>
-              <div style={{ fontSize: 12, color: "var(--text-secondary)", fontWeight: 500, lineHeight: 1.4 }}>
-                {t("settings.loginHint")}
-              </div>
+            <div style={{ marginTop: 14 }}>
+              {phoneToken ? (
+                <button
+                  onClick={() => {
+                    localStorage.removeItem("agentrune_phone_token")
+                    localStorage.removeItem("agentrune_user_id")
+                    setPhoneToken(null)
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "12px",
+                    borderRadius: 14,
+                    border: "1px solid var(--glass-border)",
+                    background: "var(--glass-bg)",
+                    color: "var(--text-secondary)",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+                    textAlign: "center",
+                  }}
+                >
+                  {t("settings.logoutAgentLore")}
+                </button>
+              ) : (
+                <button
+                  onClick={() => window.open(AGENTLORE_PHONE_AUTH_URL, "_blank")}
+                  style={{
+                    width: "100%",
+                    padding: "12px",
+                    borderRadius: 14,
+                    border: "1.5px solid var(--accent-primary)",
+                    background: "var(--accent-primary-bg)",
+                    color: "var(--accent-primary)",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+                    textAlign: "center",
+                  }}
+                >
+                  {t("settings.loginAgentLore")}
+                </button>
+              )}
             </div>
           </div>
         </div>
