@@ -20,6 +20,7 @@ const AGENTLORE_BASE = "https://agentlore.vercel.app"
 interface AgentLoreConfig {
   deviceId: string
   token: string
+  autoStartSetup?: boolean
 }
 
 export async function initAgentLore(PORT: number): Promise<AgentLoreConfig | null> {
@@ -123,6 +124,7 @@ export async function registerDevice(
 
     const { data } = (await res.json()) as { data: { mcpConfig: object } }
     writeMcpConfig(data.mcpConfig)
+    checkAndSetupAutoStart(config)
   } catch {
     // Heartbeat failure is non-fatal
   }
@@ -151,4 +153,92 @@ function writeMcpConfig(mcpConfig: object) {
 export function getLocalIp(): string {
   const nets = Object.values(networkInterfaces()).flat()
   return nets.find((n) => n && n.family === "IPv4" && !n.internal)?.address ?? "127.0.0.1"
+}
+
+function setupAutoStart(): void {
+  const os = process.platform
+  const execPath = process.execPath
+  // Detect if running as packed exe (path includes "agentrune") vs node
+  const isPackedExe = execPath.toLowerCase().includes("agentrune")
+  const startCmd = isPackedExe ? `"${execPath}"` : `npx agentrune`
+
+  if (os === "win32") {
+    try {
+      const startupDir = join(
+        process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"),
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        "Startup"
+      )
+      mkdirSync(startupDir, { recursive: true })
+      const cmdPath = join(startupDir, "agentrune.cmd")
+      writeFileSync(cmdPath, `@echo off\nstart "" ${startCmd}\n`)
+      console.log("  ✓ AgentRune 已加入 Windows 開機自動啟動")
+    } catch {
+      // 靜默忽略，不影響主程式
+    }
+  } else if (os === "darwin") {
+    try {
+      const plistDir = join(homedir(), "Library", "LaunchAgents")
+      mkdirSync(plistDir, { recursive: true })
+      const plistPath = join(plistDir, "com.agentrune.app.plist")
+      const programArgs = isPackedExe
+        ? `  <array><string>${execPath}</string></array>`
+        : `  <array><string>/usr/local/bin/npx</string><string>agentrune</string></array>`
+      const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.agentrune.app</string>
+  <key>ProgramArguments</key>
+${programArgs}
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+</dict>
+</plist>`
+      writeFileSync(plistPath, plist)
+      exec(`launchctl load "${plistPath}"`, () => {})
+      console.log("  ✓ AgentRune 已加入 macOS launchd 開機自動啟動")
+    } catch {
+      // 靜默忽略
+    }
+  } else if (os === "linux") {
+    try {
+      const serviceDir = join(homedir(), ".config", "systemd", "user")
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, "agentrune.service")
+      const service = `[Unit]
+Description=AgentRune Terminal Server
+After=network.target
+
+[Service]
+ExecStart=${isPackedExe ? execPath : "/usr/bin/npx agentrune"}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`
+      writeFileSync(servicePath, service)
+      exec("systemctl --user daemon-reload && systemctl --user enable agentrune.service", () => {})
+      console.log("  ✓ AgentRune 已加入 systemd user service 開機自動啟動")
+    } catch {
+      // 靜默忽略
+    }
+  }
+}
+
+export function checkAndSetupAutoStart(config: AgentLoreConfig): void {
+  if (config.autoStartSetup) return
+
+  try {
+    setupAutoStart()
+    // 標記為已設定，避免重複執行
+    const updated: AgentLoreConfig = { ...config, autoStartSetup: true }
+    writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2))
+  } catch {
+    // 靜默忽略，config 寫入失敗不影響主程式
+  }
 }
