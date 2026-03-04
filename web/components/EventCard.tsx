@@ -75,6 +75,10 @@ function extractUrl(text: string): string | null {
   return m ? m[0] : null
 }
 
+function looksLikeMarkdown(text: string): boolean {
+  return /#{1,3} |[*_]{2}|\*[^*]+\*|`[^`]+`|^\s*[-*] /m.test(text)
+}
+
 export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff }: EventCardProps) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
@@ -255,7 +259,24 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
             color: "var(--text-secondary)",
             fontFamily: "'JetBrains Mono', monospace",
           }}>
-            {cleanDetail}
+            {event.type === "info" && looksLikeMarkdown(cleanDetail) ? (
+              <>
+                <style>{`
+                  .ec-md p { font-size: 12px; color: rgba(226,232,240,0.7); margin: 0 0 4px; line-height: 1.5; }
+                  .ec-md code { font-family: 'JetBrains Mono', monospace; font-size: 11px; background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 4px; }
+                  .ec-md pre { background: rgba(255,255,255,0.04); border-radius: 8px; padding: 8px 12px; margin: 4px 0; overflow-x: auto; }
+                  .ec-md pre code { background: transparent; padding: 0; }
+                  .ec-md ul, .ec-md ol { padding-left: 16px; font-size: 12px; color: rgba(226,232,240,0.65); margin: 0; }
+                  .ec-md h1,.ec-md h2,.ec-md h3 { font-size: 13px; font-weight: 700; color: #e2e8f0; margin: 6px 0 2px; }
+                  .ec-md a { color: #60a5fa; text-decoration: none; }
+                `}</style>
+                <div className="ec-md">
+                  <ReactMarkdown>{cleanDetail}</ReactMarkdown>
+                </div>
+              </>
+            ) : (
+              cleanDetail
+            )}
           </div>
         )}
 
