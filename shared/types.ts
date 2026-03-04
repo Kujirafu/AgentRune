@@ -19,6 +19,11 @@ export interface AgentEvent {
   title: string
   detail?: string
   raw?: string
+  diff?: {
+    filePath: string
+    before: string
+    after: string
+  }
   decision?: {
     options: DecisionOption[]
   }
