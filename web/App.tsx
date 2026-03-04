@@ -8,6 +8,7 @@ import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
 import { DiffPanel } from "./components/DiffPanel"
 import { App as CapApp } from "@capacitor/app"
+import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
 
 // ─── Server URL helpers ──────────────────────────────────────────
@@ -353,16 +354,18 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
     return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
   }, [pollingCode, doPoll])
 
-  // Re-poll when app returns to foreground (AppState change)
+  // Re-poll when app returns to foreground OR browser is closed
   useEffect(() => {
     if (!pollingCode) return
-    let cleanup: (() => void) | undefined
-    import("@capacitor/app").then(({ App: CapApp }) => {
-      CapApp.addListener("appStateChange", ({ isActive }) => {
-        if (isActive && pollingCode) doPoll(pollingCode)
-      }).then((h) => { cleanup = () => h.remove() })
-    })
-    return () => { cleanup?.() }
+    let cleanupState: (() => void) | undefined
+    let cleanupBrowser: (() => void) | undefined
+    CapApp.addListener("appStateChange", ({ isActive }) => {
+      if (isActive && pollingCode) doPoll(pollingCode)
+    }).then((h) => { cleanupState = () => h.remove() })
+    Browser.addListener("browserFinished", () => {
+      if (pollingCode) doPoll(pollingCode)
+    }).then((h) => { cleanupBrowser = () => h.remove() })
+    return () => { cleanupState?.(); cleanupBrowser?.() }
   }, [pollingCode, doPoll])
 
   // Parse QR text: extract server URL and optional pair code
@@ -498,15 +501,13 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
           disabled={!!pollingCode}
           onClick={() => {
             setError("")
-            // Generate code client-side so window.open is called synchronously
-            // within the user gesture — async await would trigger popup blocker
             const code = Array.from(crypto.getRandomValues(new Uint8Array(16)))
               .map(b => b.toString(16).padStart(2, "0")).join("")
             const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
-            // Must be synchronous — called directly in click handler, not after await
-            window.open(authUrl, "_system")
             savePollingCode(code)
             setStatus(t("app.waitingForBrowserLogin"))
+            // Use Capacitor Browser plugin for reliable browserFinished event
+            Browser.open({ url: authUrl }).catch(() => window.open(authUrl, "_system"))
           }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
