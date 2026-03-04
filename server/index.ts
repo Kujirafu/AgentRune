@@ -3,7 +3,7 @@ import { createServer as createHttpServer } from "node:http"
 import { WebSocketServer, WebSocket } from "ws"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile, writeSync } from "node:fs"
 import { join, basename, dirname } from "node:path"
-import { networkInterfaces, homedir } from "node:os"
+import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { SessionManager, type Project } from "./sessions.js"
 import { AuthManager, type AuthMode } from "./auth.js"
@@ -592,18 +592,17 @@ server.listen(PORT, "0.0.0.0", async () => {
   console.log(`\n  AgentRune running at:`)
   console.log(`    Local:   ${protocol}://localhost:${PORT}`)
 
-  const nets = Object.values(networkInterfaces()).flat()
-  const lan = nets.find((n) => n && n.family === "IPv4" && !n.internal)
-  if (lan) {
-    console.log(`    Phone:   ${protocol}://${lan.address}:${PORT}`)
+  const localIpAddr = getLocalIp()
+  if (localIpAddr !== "127.0.0.1") {
+    console.log(`    Phone:   ${protocol}://${localIpAddr}:${PORT}`)
   }
 
   auth.printAuthInfo()
 
   if (auth.mode === "pairing") {
     const pairingCode = auth.getCurrentCode?.()
-    if (lan && pairingCode) {
-      printConnectionInfo(`${protocol}://${lan.address}:${PORT}`, pairingCode)
+    if (localIpAddr !== "127.0.0.1" && pairingCode) {
+      printConnectionInfo(`${protocol}://${localIpAddr}:${PORT}`, pairingCode)
     }
   }
 

@@ -96,7 +96,6 @@ export async function registerDevice(
   config: AgentLoreConfig,
   localIp: string,
   PORT: number,
-  certFingerprint?: string
 ) {
   try {
     const res = await fetch(`${AGENTLORE_BASE}/api/agentrune/register`, {
@@ -110,7 +109,7 @@ export async function registerDevice(
         localIp,
         port: PORT,
         platform: process.platform,
-        certFingerprint,
+        protocol: "http",
       }),
     })
 
@@ -154,9 +153,15 @@ export function getLocalIp(): string {
   const nets = Object.values(networkInterfaces()).flat().filter(
     (n) => n && n.family === "IPv4" && !n.internal
   ) as { address: string }[]
-  // Prefer private routable addresses (WiFi/LAN) over link-local (169.254.x.x)
-  const preferred = nets.find((n) => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(n.address))
-  return (preferred ?? nets[0])?.address ?? "127.0.0.1"
+  // Priority: 192.168.x.x (home WiFi) > 10.x.x.x > 172.16-31.x.x > anything else
+  // NordVPN (10.5.x.x), WSL (172.x.x.x), Tailscale (169.254.x.x) are all wrong for LAN
+  const wifi = nets.find((n) => /^192\.168\./.test(n.address))
+  if (wifi) return wifi.address
+  const ten = nets.find((n) => /^10\./.test(n.address))
+  if (ten) return ten.address
+  const priv = nets.find((n) => /^172\.(1[6-9]|2\d|3[01])\./.test(n.address))
+  if (priv) return priv.address
+  return nets[0]?.address ?? "127.0.0.1"
 }
 
 function setupAutoStart(): void {
