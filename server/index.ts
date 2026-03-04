@@ -66,6 +66,19 @@ const server = certs ? createHttpsServer(certs, app) : createHttpServer(app)
 const protocol = certs ? "https" : "http"
 
 const wss = new WebSocketServer({ server })
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.log(`\n  AgentRune is already running — open ${protocol}://localhost:${PORT}\n`)
+    process.exit(0)
+  }
+  throw err
+})
+wss.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") process.exit(0)
+  throw err
+})
+
 const sessions = new SessionManager()
 const eventStore = new EventStore()
 
