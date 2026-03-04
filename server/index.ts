@@ -2,7 +2,7 @@ import express from "express"
 import { createServer as createHttpServer } from "node:http"
 import { createServer as createHttpsServer } from "node:https"
 import { WebSocketServer, WebSocket } from "ws"
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile } from "node:fs"
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile, writeSync } from "node:fs"
 import { join, basename, dirname } from "node:path"
 import { networkInterfaces, homedir } from "node:os"
 import { execSync } from "node:child_process"
@@ -69,13 +69,14 @@ const wss = new WebSocketServer({ server })
 
 server.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE") {
-    console.log(`\n  AgentRune is already running — open ${protocol}://localhost:${PORT}\n`)
+    process.stderr.write(`\n  AgentRune is already running — open ${protocol}://localhost:${PORT}\n\n`)
+    writeSync(1, `\n  AgentRune is already running — open ${protocol}://localhost:${PORT}\n\n`)
     process.exit(0)
   }
   throw err
 })
 wss.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EADDRINUSE") process.exit(0)
+  if (err.code === "EADDRINUSE") { process.exit(0); return }
   throw err
 })
 
