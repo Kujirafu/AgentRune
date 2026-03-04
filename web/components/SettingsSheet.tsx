@@ -340,6 +340,11 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
               lineHeight: 1.5,
             }}>
               {t("settings.supportDesc")}
+              {locale === "zh-TW" && (
+                <span style={{ display: "block", marginTop: 4, fontSize: 11, opacity: 0.7 }}>
+                  以美元（USD）計費
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               {DONATE_AMOUNTS.map((amount) => (
@@ -362,7 +367,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
                     textAlign: "center",
                   }}
                 >
-                  ${amount}
+                  {locale === "zh-TW" ? `US$${amount}` : `$${amount}`}
                 </button>
               ))}
             </div>

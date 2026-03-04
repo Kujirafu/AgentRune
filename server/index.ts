@@ -1,13 +1,10 @@
 import express from "express"
 import { createServer as createHttpServer } from "node:http"
-import { createServer as createHttpsServer } from "node:https"
 import { WebSocketServer, WebSocket } from "ws"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile, writeSync } from "node:fs"
 import { join, basename, dirname } from "node:path"
 import { networkInterfaces, homedir } from "node:os"
-import { execSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { createHash } from "node:crypto"
 import { SessionManager, type Project } from "./sessions.js"
 import { AuthManager, type AuthMode } from "./auth.js"
 import { ParseEngine } from "./parse-engine.js"
@@ -34,36 +31,13 @@ function issueSessionToken(): string {
   return token
 }
 
-// ─── Self-signed HTTPS cert ──────────────────────────────────────
-
-const CERT_DIR = join(homedir(), ".agentrune", "certs")
-
-function ensureCerts(): { key: string; cert: string } | null {
-  const keyPath = join(CERT_DIR, "key.pem")
-  const certPath = join(CERT_DIR, "cert.pem")
-
-  if (existsSync(keyPath) && existsSync(certPath)) {
-    return { key: readFileSync(keyPath, "utf-8"), cert: readFileSync(certPath, "utf-8") }
-  }
-
-  try {
-    mkdirSync(CERT_DIR, { recursive: true })
-    execSync(
-      `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" -days 365 -nodes -subj "/CN=AgentRune"`,
-      { stdio: "ignore" },
-    )
-    console.log("  Generated self-signed HTTPS certificate")
-    return { key: readFileSync(keyPath, "utf-8"), cert: readFileSync(certPath, "utf-8") }
-  } catch {
-    return null
-  }
-}
-
 // ─── Create server ───────────────────────────────────────────────
+// HTTP only — self-signed HTTPS certs are blocked by Android WebView's
+// network security config and cause fetch() to fail for FileBrowser/API calls.
+// LAN security is provided by the device pairing auth system, not SSL.
 
-const certs = ensureCerts()
-const server = certs ? createHttpsServer(certs, app) : createHttpServer(app)
-const protocol = certs ? "https" : "http"
+const server = createHttpServer(app)
+const protocol = "http"
 
 const wss = new WebSocketServer({ server })
 
@@ -639,10 +613,7 @@ server.listen(PORT, "0.0.0.0", async () => {
   const agentLoreConfig = await initAgentLore(PORT)
   if (agentLoreConfig) {
     const localIp = getLocalIp()
-    const certFp = certs
-      ? createHash("sha256").update(certs.cert).digest("hex")
-      : undefined
-    await registerDevice(agentLoreConfig, localIp, PORT, certFp)
-    setInterval(() => registerDevice(agentLoreConfig, localIp, PORT, certFp), 2 * 60 * 1000)
+    await registerDevice(agentLoreConfig, localIp, PORT)
+    setInterval(() => registerDevice(agentLoreConfig, localIp, PORT), 2 * 60 * 1000)
   }
 })
