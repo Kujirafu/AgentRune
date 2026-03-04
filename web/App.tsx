@@ -19,9 +19,11 @@ function isCapacitor(): boolean {
 }
 
 function needsServerSetup(): boolean {
-  // Always require a local server URL — cloud device discovery not yet implemented.
-  // Cloud login (phone token) just shows a status badge in ConnectScreen.
-  return isCapacitor() && !localStorage.getItem("agentrune_server")
+  if (!isCapacitor()) return false
+  // Cloud mode: phone logged in to AgentLore — go directly to LaunchPad,
+  // user taps a device in Quick Connect to set the server URL.
+  if (localStorage.getItem("agentrune_phone_token")) return false
+  return !localStorage.getItem("agentrune_server")
 }
 
 function getServerUrl(): string {
@@ -1038,7 +1040,10 @@ export function App() {
       }}
       theme={theme}
       toggleTheme={toggleTheme}
-      onCloudConnect={() => window.location.reload()}
+      onCloudConnect={(url) => {
+        localStorage.setItem("agentrune_server", url)
+        window.location.reload()
+      }}
     />
   )
 }
