@@ -1,5 +1,6 @@
 // web/components/EventCard.tsx
 import { useState, useRef, useCallback } from "react"
+import ReactMarkdown from "react-markdown"
 import { useLocale } from "../lib/i18n/index.js"
 import type { AgentEvent } from "../../shared/types"
 
@@ -8,6 +9,7 @@ interface EventCardProps {
   onDecision?: (input: string) => void
   onQuote?: (text: string) => void
   onSaveObsidian?: (text: string) => void
+  onViewDiff?: (event: AgentEvent) => void
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -73,7 +75,7 @@ function extractUrl(text: string): string | null {
   return m ? m[0] : null
 }
 
-export function EventCard({ event, onDecision, onQuote, onSaveObsidian }: EventCardProps) {
+export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff }: EventCardProps) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -254,6 +256,27 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian }: EventC
             fontFamily: "'JetBrains Mono', monospace",
           }}>
             {cleanDetail}
+          </div>
+        )}
+
+        {/* View diff chip — only for file events */}
+        {(event.type === "file_edit" || event.type === "file_create") && onViewDiff && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              onClick={(e) => { e.stopPropagation(); onViewDiff(event) }}
+              style={{
+                padding: "3px 10px",
+                borderRadius: 6,
+                border: "1px solid rgba(96,165,250,0.25)",
+                background: "rgba(96,165,250,0.07)",
+                color: "rgba(96,165,250,0.8)",
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              ◈ View diff
+            </button>
           </div>
         )}
 
