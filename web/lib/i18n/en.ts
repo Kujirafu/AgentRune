@@ -177,6 +177,8 @@ export const en: Record<string, string> = {
   "file.newFolder": "New Folder",
   "file.folderName": "Folder name",
   "file.create": "Create",
+  "file.loadError": "Could not load folder. Make sure your computer is connected.",
+  "file.retry": "Retry",
 
   // TerminalView
   "terminal.sessionEnded": "Session ended",

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 
@@ -21,29 +21,61 @@ export function FileBrowser({ open, onClose, onSelectPath, initialPath }: FileBr
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [parentPath, setParentPath] = useState("")
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState(false)
   const [copied, setCopied] = useState("")
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState("")
 
+  // Keep refs so the back-button handler always sees the latest values
+  const onCloseRef = useRef(onClose)
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
+
   useEffect(() => {
-    if (open) loadDir(currentPath || undefined)
+    if (open) {
+      setLoadError(false)
+      loadDir(currentPath || undefined)
+    }
+  }, [open])
+
+  // Intercept Android hardware back button when overlay is visible
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: Event) => {
+      e.preventDefault() // cancels the event so App.tsx won't minimizeApp()
+      onCloseRef.current()
+    }
+    document.addEventListener("app:back", handler)
+    return () => document.removeEventListener("app:back", handler)
   }, [open])
 
   const loadDir = async (path?: string) => {
+    const base = getApiBase()
+    if (!base) {
+      setLoadError(true)
+      setLoading(false)
+      return
+    }
+    setLoadError(false)
     setLoading(true)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 8000)
     try {
-      const base = getApiBase()
       const url = path
         ? `${base}/api/browse?path=${encodeURIComponent(path)}`
         : `${base}/api/browse`
-      const res = await fetch(url)
+      const res = await fetch(url, { signal: controller.signal })
       if (res.ok) {
         const data = await res.json()
         setCurrentPath(data.path)
         setParentPath(data.parent)
         setEntries(data.entries)
+      } else {
+        setLoadError(true)
       }
-    } catch {}
+    } catch {
+      setLoadError(true)
+    }
+    clearTimeout(timeout)
     setLoading(false)
   }
 
@@ -261,6 +293,29 @@ export function FileBrowser({ open, onClose, onSelectPath, initialPath }: FileBr
         {loading ? (
           <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)", opacity: 0.5 }}>
             {t("file.loading")}
+          </div>
+        ) : loadError ? (
+          <div style={{ textAlign: "center", padding: 40 }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+              {t("file.loadError")}
+            </div>
+            <button
+              onClick={() => loadDir(currentPath || undefined)}
+              style={{
+                marginTop: 16,
+                padding: "10px 20px",
+                borderRadius: 12,
+                border: "1px solid var(--glass-border)",
+                background: "var(--glass-bg)",
+                color: "var(--accent-primary)",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {t("file.retry")}
+            </button>
           </div>
         ) : (
           <>

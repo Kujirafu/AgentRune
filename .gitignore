@@ -53,3 +53,5 @@ icons/*.png
 /media__*.png
 /screenshot*.png
 dist-exe/
+*.exe
+*.exe

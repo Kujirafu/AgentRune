@@ -177,6 +177,8 @@ export const zhTW: Record<string, string> = {
   "file.newFolder": "新增資料夾",
   "file.folderName": "資料夾名稱",
   "file.create": "建立",
+  "file.loadError": "無法載入資料夾。請確認電腦已連線。",
+  "file.retry": "重試",
 
   // 終端機
   "terminal.sessionEnded": "工作階段已結束",
