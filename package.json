@@ -4,7 +4,7 @@
   "description": "Agent-agnostic mobile command center for Web 4 — direct any AI agent from your phone with a human-friendly interface",
   "type": "module",
   "bin": {
-    "agentrune": "dist-server/index.js"
+    "agentrune": "dist-server/index.cjs"
   },
   "files": [
     "dist/",
@@ -26,7 +26,7 @@
     "cap:build": "npm run build && npx cap sync android",
     "cap:open": "npx cap open android",
     "typecheck": "npx tsc --noEmit",
-    "build:exe": "node -e \"require('fs').mkdirSync('dist-exe',{recursive:true})\" && pkg dist-server/index.js --config pkg.json"
+    "build:exe": "node -e \"require('fs').mkdirSync('dist-exe',{recursive:true})\" && pkg dist-server/index.cjs --config pkg.json --output dist-exe/agentrune-win-x64.exe"
   },
   "pkg": {
     "assets": [

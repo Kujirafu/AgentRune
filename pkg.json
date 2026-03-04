@@ -1,4 +1,6 @@
 {
+  "targets": ["node18-win-x64"],
+  "output": "dist-exe/agentrune-win-x64.exe",
   "assets": [
     "dist/**/*",
     "node_modules/node-pty/build/Release/**"
