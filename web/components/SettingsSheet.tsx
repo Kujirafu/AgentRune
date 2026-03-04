@@ -12,7 +12,7 @@ interface SettingsSheetProps {
 }
 
 const DONATE_AMOUNTS = [1, 10, 20, 100]
-const DONATE_URL = "https://agentlore.lemonsqueezy.com"
+const DONATE_CHECKOUT = "https://agentlore.lemonsqueezy.com/checkout/buy/fed5b03f-701b-44d0-b6e5-7edf8c08823d"
 const SUBSCRIBE_URLS = {
   pro:   "https://agentlore.lemonsqueezy.com/checkout/buy/049d9d42-13ce-4b65-ba59-3c35bb24af6c",
   trust: "https://agentlore.lemonsqueezy.com/checkout/buy/98a2b87b-971d-4ca1-a3ae-b05c4c3e5acb",
@@ -50,8 +50,11 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
   const models = ["sonnet", "opus", "haiku"] as const
   const isClaudeAgent = agentId === "claude"
 
-  const handleDonate = (_amount: number | "custom") => {
-    window.open(DONATE_URL, "_blank")
+  const handleDonate = (amount: number | "custom") => {
+    const url = amount === "custom"
+      ? DONATE_CHECKOUT
+      : `${DONATE_CHECKOUT}?checkout[custom_price]=${amount * 100}`
+    window.open(url, "_system")
   }
 
   const handleSubscribe = (plan: "pro" | "trust") => {

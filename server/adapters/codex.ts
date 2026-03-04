@@ -6,7 +6,7 @@ import { makeEventId } from "./types.js"
 export const codexAdapter: AgentAdapter = {
   id: "codex",
   name: "Codex CLI",
-  icon: "\u26A1",
+  icon: ">_",
   capabilities: ["file_edit", "command_run", "decision_request"],
 
   parse(chunk: string, ctx: ParseContext): AgentEvent[] {

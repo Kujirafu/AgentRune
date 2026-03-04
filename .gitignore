@@ -1,0 +1,54 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-server
+
+# Android build
+android/app/build
+android/.gradle
+android/build
+android/capacitor-cordova-android-plugins/build
+android/capacitor-cordova-android-plugins/src/main/assets
+android/app/src/main/assets/public
+
+# Signing keys (NEVER commit)
+*.keystore
+*.jks
+keystore.properties
+
+# Certificates
+.certs
+
+# Environment
+.env
+.env.*
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug logs
+pty-debug.log
+*.log
+
+# Project config (user-specific)
+projects.json
+
+# Runtime data
+.agentrune/
+.airterm/
+
+# Large source images (keep webp icons, exclude raw PNGs in icons/)
+icons/*.png
+
+# Media / temp
+/media__*.png
+/screenshot*.png

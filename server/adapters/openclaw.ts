@@ -6,7 +6,7 @@ import { makeEventId } from "./types.js"
 export const openclawAdapter: AgentAdapter = {
   id: "openclaw",
   name: "OpenClaw",
-  icon: "\u{1F99E}",
+  icon: ">_",
   capabilities: ["command_run", "decision_request", "info"],
 
   parse(chunk: string, ctx: ParseContext): AgentEvent[] {

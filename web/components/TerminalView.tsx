@@ -4,8 +4,9 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, ProjectSettings, SmartAction } from "../lib/types"
 import { AGENTS } from "../lib/types"
-import { getSettings, saveSettings, addRecentCommand, getRecentCommands } from "../lib/storage"
+import { getSettings, saveSettings, addRecentCommand, getRecentCommands, getApiBase } from "../lib/storage"
 import { detectPromptActions, isIdle, isMobile } from "../lib/detect"
+import { commandSent } from "../lib/command-sent"
 import { AnsiParser } from "../lib/ansi-parser"
 import { SettingsSheet } from "./SettingsSheet"
 import { SmartSuggestions } from "./SmartSuggestions"
@@ -13,13 +14,15 @@ import { QuickActions } from "./QuickActions"
 import { InputBar } from "./InputBar"
 import { DetailPanel } from "./DetailPanel"
 import { FileBrowser } from "./FileBrowser"
+import { useLocale } from "../lib/i18n/index.js"
 
 interface TerminalViewProps {
   project: Project
   agentId: string
+  sessionId?: string
   sessionToken: string
-  send: (msg: Record<string, unknown>) => void
-  on: (type: string, handler: (msg: Record<string, unknown>) => void) => void
+  send: (msg: Record<string, unknown>) => boolean
+  on: (type: string, handler: (msg: Record<string, unknown>) => void) => (() => void)
   onBack: () => void
 }
 
@@ -30,7 +33,8 @@ interface IdleSuggestion {
   icon?: string
 }
 
-export function TerminalView({ project, agentId, send, on, onBack }: TerminalViewProps) {
+export function TerminalView({ project, agentId, sessionId, send, on, onBack }: TerminalViewProps) {
+  const { t } = useLocale()
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
   const [showSettings, setShowSettings] = useState(false)
   const [showDetail, setShowDetail] = useState(false)
@@ -38,7 +42,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
   const [smartActions, setSmartActions] = useState<SmartAction[]>([])
   const [idleSuggestions, setIdleSuggestions] = useState<IdleSuggestion[]>([])
   const [sugMode, setSugMode] = useState<"prompt" | "idle" | "hidden">("hidden")
-  const [kbHeight, setKbHeight] = useState(0)
+  const [viewH, setViewH] = useState(window.innerHeight)
   const termRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -50,6 +54,17 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
   const [, setParserTick] = useState(0)
 
   const agent = AGENTS.find((a) => a.id === agentId)
+
+  // Track viewport height (keyboard-aware via visualViewport)
+  useEffect(() => {
+    const update = () => setViewH(window.visualViewport?.height ?? window.innerHeight)
+    window.visualViewport?.addEventListener("resize", update)
+    window.addEventListener("resize", update)
+    return () => {
+      window.visualViewport?.removeEventListener("resize", update)
+      window.removeEventListener("resize", update)
+    }
+  }, [])
 
   // Swipe-to-open detail panel
   const touchStartRef = useRef({ x: 0, y: 0 })
@@ -64,18 +79,6 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
       setShowDetail(true)
     }
   }
-
-  // Keyboard height detection
-  useEffect(() => {
-    if (!isMobile || !window.visualViewport) return
-    const vv = window.visualViewport
-    const onResize = () => {
-      const diff = window.innerHeight - vv.height
-      setKbHeight(diff > 50 ? diff : 0)
-    }
-    vv.addEventListener("resize", onResize)
-    return () => vv.removeEventListener("resize", onResize)
-  }, [])
 
   const handleSettingsChange = useCallback((newSettings: ProjectSettings) => {
     setSettings(newSettings)
@@ -102,14 +105,20 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
       sendInput(text)
       return
     }
-    sendInput(text + "\n")
+    if (!text.trim()) return  // Don't send empty commands
+    // Send text first, then Enter separately after a delay.
+    // TUI apps like Claude Code process input as a stream — if text+\r arrives
+    // as one chunk, \r gets treated as a newline in the input buffer instead of
+    // triggering submission. Splitting them ensures \r is handled as Enter.
+    sendInput(text)
+    setTimeout(() => sendInput("\r"), 30)
     addRecentCommand(project.id, text)
   }, [sendInput, project.id])
 
   // Image paste handler
   const handleImagePaste = useCallback(async (base64: string, filename: string) => {
     try {
-      const res = await fetch("/api/upload", {
+      const res = await fetch(`${getApiBase()}/api/upload`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId: project.id, data: base64, filename }),
@@ -122,24 +131,18 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
     } catch {}
   }, [project.id, sendInput])
 
-  // Voice placeholder
-  const handleVoice = useCallback(() => {
-    // TODO: Integrate with Claude Voice API when available
-    alert("Voice input coming soon — waiting for Claude Voice API")
-  }, [])
-
   const buildIdleSuggestions = useCallback(async () => {
     const suggestions: IdleSuggestion[] = []
 
     if (agentId === "terminal") {
       suggestions.push(
-        { label: "claude", description: "Start Claude Code", command: "claude", icon: "🤖" },
-        { label: "codex", description: "Start Codex CLI", command: "codex", icon: "⚡" },
+        { label: "claude", description: "Start Claude Code", command: "claude", icon: ">" },
+        { label: "codex", description: "Start Codex CLI", command: "codex", icon: ">" },
       )
     }
 
     try {
-      const res = await fetch(`/api/projects/${project.id}/scripts`)
+      const res = await fetch(`${getApiBase()}/api/projects/${project.id}/scripts`)
       if (res.ok) {
         const data = await res.json()
         const scripts = data.scripts || {}
@@ -149,7 +152,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
               label: `npm run ${key}`,
               description: scripts[key],
               command: `npm run ${key}`,
-              icon: "📦",
+              icon: "$",
             })
           }
         }
@@ -159,14 +162,14 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
     const recent = getRecentCommands(project.id)
     for (const cmd of recent.slice(0, 3)) {
       if (!suggestions.find((s) => s.command === cmd)) {
-        suggestions.push({ label: cmd, command: cmd, icon: "🕒" })
+        suggestions.push({ label: cmd, command: cmd, icon: "~" })
       }
     }
 
     for (const gc of [
-      { label: "git status", command: "git status", icon: "📋" },
-      { label: "git pull", command: "git pull", icon: "⬇" },
-      { label: "git push", command: "git push", icon: "⬆" },
+      { label: "git status", command: "git status", icon: "+" },
+      { label: "git pull", command: "git pull", icon: "v" },
+      { label: "git push", command: "git push", icon: "^" },
     ]) {
       if (!suggestions.find((s) => s.command === gc.command)) {
         suggestions.push(gc)
@@ -184,6 +187,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
       cursorBlink: true,
       fontSize: isMobile ? 12 : 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+      disableStdin: isMobile,  // On mobile, InputBar handles all input
       theme: {
         background: "#0f172a",
         foreground: "#e2e8f0",
@@ -233,23 +237,11 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
     }
   }, [send])
 
-  // Refit on keyboard change
-  useEffect(() => {
-    if (fitRef.current) {
-      setTimeout(() => {
-        try {
-          fitRef.current?.fit()
-          if (xtermRef.current) {
-            send({ type: "resize", cols: xtermRef.current.cols, rows: xtermRef.current.rows })
-          }
-        } catch {}
-      }, 100)
-    }
-  }, [kbHeight, send])
-
   // Handle WS messages
   useEffect(() => {
-    on("output", (msg) => {
+    const unsubs: (() => void)[] = []
+
+    unsubs.push(on("output", (msg) => {
       const data = msg.data as string
       xtermRef.current?.write(data)
 
@@ -282,22 +274,27 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
           }, 500)
         }
       }, 100)
-    })
+    }))
 
-    on("scrollback", (msg) => {
+    unsubs.push(on("scrollback", (msg) => {
       xtermRef.current?.write(msg.data as string)
-    })
+    }))
 
-    on("attached", () => {
+    unsubs.push(on("attached", (msg) => {
       if (!isMobile) xtermRef.current?.focus()
 
-      if (agent) {
+      // Don't send auto-command if session already existed on server (resumed)
+      if (msg.resumed) return
+
+      if (agent && sessionId && !commandSent.has(sessionId)) {
         const cmd = agent.command(settings)
         if (cmd) {
+          commandSent.mark(sessionId)
           const tryToSend = (attempts: number) => {
             if (promptReadyRef.current || attempts >= 10) {
               setTimeout(() => {
-                send({ type: "input", data: cmd + "\n" })
+                send({ type: "input", data: cmd })
+                setTimeout(() => send({ type: "input", data: "\r" }), 30)
               }, 100)
             } else {
               setTimeout(() => tryToSend(attempts + 1), 200)
@@ -313,24 +310,48 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
           setSugMode("idle")
         }
       }, 1500)
-    })
+    }))
 
-    on("exit", () => {
-      xtermRef.current?.write("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
+    unsubs.push(on("exit", () => {
+      xtermRef.current?.write(`\r\n\x1b[33m[${t("terminal.sessionEnded")}]\x1b[0m\r\n`)
       setSugMode("hidden")
-    })
+    }))
 
-    on("error", (msg) => {
-      xtermRef.current?.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m\r\n`)
-    })
+    unsubs.push(on("error", (msg) => {
+      xtermRef.current?.write(`\r\n\x1b[31m[${t("terminal.error")}: ${msg.message}]\x1b[0m\r\n`)
+    }))
+
+    return () => { for (const u of unsubs) u() }
   }, [on, send, agent, settings, buildIdleSuggestions])
 
-  // Attach on mount
+  // Android back button — close overlays first
+  useEffect(() => {
+    const handler = (e: Event) => {
+      if (showBrowser) { setShowBrowser(false); e.preventDefault(); return }
+      if (showSettings) { setShowSettings(false); e.preventDefault(); return }
+      if (showDetail) { setShowDetail(false); e.preventDefault(); return }
+    }
+    document.addEventListener("app:back", handler)
+    return () => document.removeEventListener("app:back", handler)
+  }, [showBrowser, showSettings, showDetail])
+
+  // Attach on mount + re-attach on WS reconnect
   useEffect(() => {
     promptReadyRef.current = false
     parserRef.current.clear()
-    send({ type: "attach", projectId: project.id, agentId })
-  }, [project.id, send])
+    const didAttach = send({ type: "attach", projectId: project.id, agentId, sessionId })
+
+    // When WS reconnects, server loses session mapping — must re-attach
+    // Skip if we already attached above (first connect)
+    let firstOpen = !didAttach
+    const unsub = on("__ws_open__", () => {
+      if (firstOpen) {
+        send({ type: "attach", projectId: project.id, agentId, sessionId })
+      }
+      firstOpen = true
+    })
+    return unsub
+  }, [project.id, agentId, sessionId, send, on])
 
   const thinkingBlocks = parserRef.current.getThinkingBlocks()
   const codeBlocks = parserRef.current.getCodeBlocks()
@@ -342,13 +363,25 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
       style={{
-        height: kbHeight > 0 ? `calc(100dvh - ${kbHeight}px)` : "100dvh",
+        position: "fixed",
+        top: 0,
+        left: 0,
+        height: viewH,
+        width: "100vw",
         display: "flex",
         flexDirection: "column",
         background: "#0f172a",
+        zIndex: 1,
         color: "#e2e8f0",
-        transition: "height 0.1s",
-      }}
+        // Force dark CSS vars so QuickActions/InputBar are visible on dark bg
+        "--text-primary": "#f8fafc",
+        "--text-secondary": "#94a3b8",
+        "--glass-bg": "rgba(30, 41, 59, 0.3)",
+        "--glass-border": "rgba(255, 255, 255, 0.08)",
+        "--glass-shadow": "0 4px 24px rgba(0, 0, 0, 0.3)",
+        "--accent-primary": "#38bdf8",
+        "--icon-bg": "rgba(255, 255, 255, 0.03)",
+      } as React.CSSProperties}
     >
       {/* Top bar */}
       <div style={{
@@ -356,6 +389,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
         alignItems: "center",
         gap: 8,
         padding: "10px 14px",
+        paddingTop: "calc(10px + env(safe-area-inset-top, 0px))",
         background: "rgba(30,41,59,0.75)",
         backdropFilter: "blur(24px)",
         WebkitBackdropFilter: "blur(24px)",
@@ -393,7 +427,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
             {project.name}
             <span style={{ color: "rgba(255,255,255,0.25)", margin: "0 6px", fontWeight: 300 }}>{"·"}</span>
             <span style={{ color: "rgba(255,255,255,0.5)", fontWeight: 400 }}>
-              {agent?.name || "Terminal"}
+              {agent?.name || t("agent.terminal.name")}
             </span>
           </div>
         </div>
@@ -408,7 +442,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
             color: "#fbbf24",
             fontWeight: 600,
           }}>
-            {"⚡"} Bypass
+            {t("mc.bypass")}
           </span>
         )}
 
@@ -427,7 +461,7 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
               cursor: "pointer",
             }}
           >
-            {"💭"} {thinkingBlocks.length + codeBlocks.length}
+            {"..."} {thinkingBlocks.length + codeBlocks.length}
           </button>
         )}
 
@@ -444,7 +478,10 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
             cursor: "pointer",
           }}
         >
-          {"⚙"}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
         </button>
       </div>
 
@@ -469,15 +506,16 @@ export function TerminalView({ project, agentId, send, on, onBack }: TerminalVie
       <InputBar
         onSend={handleSendCommand}
         onImagePaste={handleImagePaste}
-        onVoice={handleVoice}
         onBrowse={() => setShowBrowser(true)}
         autoFocus={isMobile}
+        slashCommands={agent?.slashCommands}
       />
 
       {/* Overlays */}
       <SettingsSheet
         open={showSettings}
         settings={settings}
+        agentId={agentId}
         onChange={handleSettingsChange}
         onClose={() => setShowSettings(false)}
       />

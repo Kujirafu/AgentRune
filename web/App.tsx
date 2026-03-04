@@ -1,21 +1,27 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import "@xterm/xterm/css/xterm.css"
-import type { Project } from "./lib/types"
+import type { Project, AppSession } from "./lib/types"
 import { getLastProject, saveLastProject } from "./lib/storage"
 import { LaunchPad } from "./components/LaunchPad"
 import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
+import { App as CapApp } from "@capacitor/app"
+import { useLocale } from "./lib/i18n/index.js"
 
 // ─── Server URL helpers ──────────────────────────────────────────
 
+function isCapacitor(): boolean {
+  return typeof window !== "undefined" &&
+    !!(window as any).Capacitor &&
+    (window as any).Capacitor.isNativePlatform?.() === true
+}
+
+function needsServerSetup(): boolean {
+  return isCapacitor() && !localStorage.getItem("agentrune_server")
+}
+
 function getServerUrl(): string {
-  if (
-    typeof window !== "undefined" &&
-    !window.location.href.startsWith("capacitor://") &&
-    !window.location.href.startsWith("http://localhost")
-  ) {
-    return ""
-  }
+  if (!isCapacitor()) return ""
   return localStorage.getItem("agentrune_server") || ""
 }
 
@@ -47,15 +53,15 @@ function getDeviceName(): string {
 type AuthMode = "pairing" | "totp" | "none"
 type AuthStatus = "checking" | "need-setup" | "need-auth" | "authenticated"
 
-function useAuth() {
+function useAuth(serverReady: boolean) {
   const [status, setStatus] = useState<AuthStatus>("checking")
   const [mode, setMode] = useState<AuthMode>("none")
   const [error, setError] = useState("")
   const [sessionToken, setSessionToken] = useState("")
 
   useEffect(() => {
-    checkAuth()
-  }, [])
+    if (serverReady) checkAuth()
+  }, [serverReady])
 
   const checkAuth = async () => {
     try {
@@ -149,56 +155,367 @@ function useAuth() {
     }
   }
 
-  return { status, mode, error, sessionToken, pairWithCode, verifyTotp }
+  const recheckAuth = () => {
+    setStatus("checking")
+    checkAuth()
+  }
+
+  return { status, mode, error, sessionToken, pairWithCode, verifyTotp, recheckAuth }
 }
 
 // ─── WebSocket hook ──────────────────────────────────────────────
 
 function useWs() {
   const wsRef = useRef<WebSocket | null>(null)
-  const handlersRef = useRef<Map<string, (msg: Record<string, unknown>) => void>>(new Map())
+  const handlersRef = useRef<Map<string, Set<(msg: Record<string, unknown>) => void>>>(new Map())
 
   const connect = useCallback((sessionToken: string) => {
     const ws = new WebSocket(`${getWsUrl()}?token=${encodeURIComponent(sessionToken)}`)
     wsRef.current = ws
 
+    ws.onopen = () => {
+      const handlers = handlersRef.current.get("__ws_open__")
+      if (handlers) for (const h of handlers) h({})
+    }
+
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
-      const handler = handlersRef.current.get(msg.type)
-      if (handler) handler(msg)
+      const handlers = handlersRef.current.get(msg.type)
+      if (handlers) for (const h of handlers) h(msg)
     }
 
     ws.onclose = () => {
-      setTimeout(() => connect(sessionToken), 1500)
+      const handlers = handlersRef.current.get("__ws_close__")
+      if (handlers) for (const h of handlers) h({})
+      setTimeout(() => connect(sessionToken), 500)
     }
 
     return ws
   }, [])
 
-  const send = useCallback((msg: Record<string, unknown>) => {
+  const send = useCallback((msg: Record<string, unknown>): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg))
+      return true
     }
+    return false
   }, [])
 
-  const on = useCallback((type: string, handler: (msg: Record<string, unknown>) => void) => {
-    handlersRef.current.set(type, handler)
+  const on = useCallback((type: string, handler: (msg: Record<string, unknown>) => void): (() => void) => {
+    if (!handlersRef.current.has(type)) {
+      handlersRef.current.set(type, new Set())
+    }
+    handlersRef.current.get(type)!.add(handler)
+    return () => {
+      handlersRef.current.get(type)?.delete(handler)
+    }
   }, [])
 
   return { connect, send, on }
 }
 
-// ─── Auth screen ─────────────────────────────────────────────────
+// ─── QR Scanner fullscreen view ──────────────────────────────────
+
+function QrScannerView({ onScan, onCancel }: { onScan: (text: string) => void; onCancel: () => void }) {
+  const { t } = useLocale()
+  const scannerRef = useRef<HTMLDivElement>(null)
+  const html5QrRef = useRef<any>(null)
+  const [scanError, setScanError] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+      ; (async () => {
+        try {
+          const { Html5Qrcode } = await import("html5-qrcode")
+          await new Promise(r => setTimeout(r, 150))
+          if (cancelled) return
+          const scanner = new Html5Qrcode("qr-reader")
+          html5QrRef.current = scanner
+          await scanner.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            (decodedText) => {
+              scanner.stop().catch(() => { })
+              html5QrRef.current = null
+              onScan(decodedText)
+            },
+            () => { }
+          )
+        } catch (err: any) {
+          setScanError(err?.message || "Camera not available")
+        }
+      })()
+    return () => {
+      cancelled = true
+      if (html5QrRef.current) {
+        html5QrRef.current.stop().catch(() => { })
+        html5QrRef.current = null
+      }
+    }
+  }, [])
+
+  return (
+    <div style={{
+      height: "100dvh", display: "flex", flexDirection: "column",
+      background: "#000", color: "#e2e8f0",
+    }}>
+      <div style={{
+        padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
+        background: "rgba(15,23,42,0.9)", backdropFilter: "blur(20px)",
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 600 }}>{t("app.scanQrCode")}</div>
+        <button
+          onClick={onCancel}
+          style={{
+            padding: "6px 16px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)",
+            background: "rgba(255,255,255,0.08)", color: "#e2e8f0",
+            fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}
+        >
+          {t("app.cancel")}
+        </button>
+      </div>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
+        {scanError ? (
+          <div style={{ color: "#f59e0b", fontSize: 14, padding: 20, textAlign: "center" }}>{scanError}</div>
+        ) : (
+          <div id="qr-reader" ref={scannerRef} style={{ width: "100%", maxWidth: 400 }} />
+        )}
+      </div>
+      <div style={{
+        padding: "16px 20px", textAlign: "center",
+        background: "rgba(15,23,42,0.9)", backdropFilter: "blur(20px)",
+        fontSize: 12, color: "rgba(255,255,255,0.4)",
+      }}>
+        {t("app.alignQrCode")}
+      </div>
+    </div>
+  )
+}
+
+// ─── Connect screen (first time on Capacitor, no server URL) ────
+
+function ConnectScreen({ onConnected }: { onConnected: () => void }) {
+  const { t } = useLocale()
+  const [scanning, setScanning] = useState(false)
+  const [serverUrl, setServerUrl] = useState("")
+  const [status, setStatus] = useState("")
+  const [error, setError] = useState("")
+
+  // Parse QR text: extract server URL and optional pair code
+  const parseQrUrl = (text: string): { serverUrl: string; pairCode: string | null } | null => {
+    try {
+      const url = new URL(text)
+      const pairCode = url.searchParams.get("pair")
+      // server URL = origin (e.g. http://192.168.1.5:3456)
+      const server = url.origin
+      return { serverUrl: server, pairCode: pairCode && /^\d{6}$/.test(pairCode) ? pairCode : null }
+    } catch {
+      return null
+    }
+  }
+
+  const handleQrScan = async (text: string) => {
+    setScanning(false)
+    const parsed = parseQrUrl(text)
+    if (!parsed) {
+      setError(t("app.cannotRecognizeQr"))
+      return
+    }
+
+    setStatus(t("app.connecting"))
+    setError("")
+    localStorage.setItem("agentrune_server", parsed.serverUrl)
+
+    // If QR contains a pair code, auto-pair
+    if (parsed.pairCode) {
+      try {
+        const ctrl = new AbortController()
+        setTimeout(() => ctrl.abort(), 5000)
+        const res = await fetch(`${parsed.serverUrl}/api/auth/pair`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: parsed.pairCode, deviceName: getDeviceName() }),
+          signal: ctrl.signal,
+        })
+        if (res.ok) {
+          const data = await res.json()
+          localStorage.setItem("agentrune_device_id", data.deviceId)
+          localStorage.setItem("agentrune_device_token", data.deviceToken)
+          setStatus(t("app.pairingSuccess"))
+          setTimeout(onConnected, 500)
+          return
+        } else {
+          setError(t("app.pairingFailed", { status: String(res.status) }))
+          localStorage.removeItem("agentrune_server")
+          setStatus("")
+          return
+        }
+      } catch (e: any) {
+        // Fall through to try check endpoint
+        console.error("Pair fetch error:", e)
+      }
+    }
+
+    // No pair code or pairing failed — just check if server is reachable
+    try {
+      const ctrl2 = new AbortController()
+      setTimeout(() => ctrl2.abort(), 5000)
+      const res = await fetch(`${parsed.serverUrl}/api/auth/check`, { signal: ctrl2.signal })
+      if (res.ok) {
+        setStatus(t("app.connected"))
+        setTimeout(onConnected, 500)
+        return
+      }
+    } catch (e: any) {
+      console.error("Check fetch error:", e)
+    }
+
+    setError(t("app.connectionFailed", { url: parsed.serverUrl }))
+    localStorage.removeItem("agentrune_server")
+    setStatus("")
+  }
+
+  const handleManualConnect = async () => {
+    if (!serverUrl.trim()) return
+    setError("")
+    const url = serverUrl.trim().replace(/\/$/, "")
+    setStatus(t("app.connecting"))
+    localStorage.setItem("agentrune_server", url)
+    try {
+      const res = await fetch(`${url}/api/auth/check`)
+      if (res.ok) {
+        setStatus(t("app.connected"))
+        setTimeout(onConnected, 500)
+        return
+      }
+    } catch { }
+    setError(t("app.cannotConnectServer"))
+    localStorage.removeItem("agentrune_server")
+    setStatus("")
+  }
+
+  if (scanning) {
+    return <QrScannerView onScan={handleQrScan} onCancel={() => setScanning(false)} />
+  }
+
+  return (
+    <div style={{
+      height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center",
+      color: "var(--text-primary)",
+    }}>
+      <div style={{
+        width: 360, textAlign: "center", padding: 36, borderRadius: 20,
+        background: "var(--glass-bg)", backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
+        border: "1px solid var(--glass-border)", boxShadow: "var(--glass-shadow)",
+      }}>
+        <div style={{ fontSize: 36, fontWeight: 700, marginBottom: 4, letterSpacing: -1, color: "var(--text-primary)" }}>
+          AgentRune
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 32, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600, opacity: 0.7 }}>
+          {t("app.connectToComputer")}
+        </div>
+
+        {/* QR Scanner — Primary */}
+        <button
+          onClick={() => setScanning(true)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+            width: "100%", padding: "16px", borderRadius: 14, marginBottom: 24,
+            border: "1px solid rgba(59,130,246,0.3)",
+            background: "rgba(59,130,246,0.1)",
+            color: "var(--accent-primary)", fontSize: 16, fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="3" y="14" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="3" height="3" />
+            <path d="M20 14v3h-3M14 20h3v-3M20 20h.01" />
+          </svg>
+          {t("app.scanQrToPair")}
+        </button>
+
+        {/* Divider */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+          <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
+          <span style={{ fontSize: 11, color: "var(--text-secondary)", letterSpacing: 1, opacity: 0.5 }}>{t("app.orManualInput")}</span>
+          <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
+        </div>
+
+        {/* Manual URL input */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <input
+            type="url"
+            placeholder="http://192.168.1.x:3456"
+            value={serverUrl}
+            onChange={(e) => setServerUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleManualConnect()}
+            style={{
+              flex: 1, padding: "12px 14px", borderRadius: 14,
+              border: "1px solid var(--glass-border)", background: "var(--icon-bg)",
+              color: "var(--text-primary)", fontSize: 14, outline: "none",
+            }}
+          />
+          <button
+            onClick={handleManualConnect}
+            style={{
+              padding: "12px 18px", borderRadius: 14, border: "1px solid rgba(59,130,246,0.3)",
+              background: "rgba(59,130,246,0.1)", color: "var(--accent-primary)",
+              fontSize: 14, fontWeight: 600, cursor: "pointer",
+            }}
+          >
+            {t("app.connect")}
+          </button>
+        </div>
+
+        {status && (
+          <div style={{ color: "#4ade80", fontSize: 13, marginTop: 12 }}>{status}</div>
+        )}
+        {error && (
+          <div style={{
+            color: "#f87171", fontSize: 13, marginTop: 12,
+            padding: "8px 12px", borderRadius: 12, background: "rgba(248,113,113,0.08)",
+          }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{
+          marginTop: 24, padding: "12px 16px", borderRadius: 14,
+          background: "var(--icon-bg)", border: "1px solid var(--glass-border)",
+        }}>
+          <div
+            style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6, opacity: 0.7 }}
+            dangerouslySetInnerHTML={{ __html: t("app.serverInstructions") }}
+          />
+        </div>
+
+        {/* VPN warning */}
+        <div style={{
+          marginTop: 12, padding: "10px 14px", borderRadius: 14,
+          background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)",
+        }}>
+          <div style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5, opacity: 0.9 }}>
+            {t("app.vpnWarning")}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Auth screen (TOTP only — pairing handled by ConnectScreen) ──
 
 function AuthScreen({
   mode,
   error,
-  onPair,
   onTotp,
 }: {
   mode: AuthMode
   error: string
-  onPair: (code: string) => void
   onTotp: (code: string) => void
 }) {
   const [code, setCode] = useState("")
@@ -216,8 +533,7 @@ function AuthScreen({
     }
 
     if (joined.length === 6) {
-      if (mode === "pairing") onPair(joined)
-      else onTotp(joined)
+      onTotp(joined)
     }
   }
 
@@ -235,48 +551,37 @@ function AuthScreen({
     const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6)
     setCode(pasted)
     if (pasted.length === 6) {
-      if (mode === "pairing") onPair(pasted)
-      else onTotp(pasted)
+      onTotp(pasted)
     } else {
       inputRefs.current[pasted.length]?.focus()
     }
   }
 
-  const isPairing = mode === "pairing"
-
   return (
     <div style={{
       height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center",
-      background: "#0f172a", color: "#e2e8f0",
+      color: "var(--text-primary)",
     }}>
       <div style={{
-        width: 360, textAlign: "center", padding: 36, borderRadius: 24,
-        background: "rgba(255,255,255,0.04)", backdropFilter: "blur(32px)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        width: 360, textAlign: "center", padding: 36, borderRadius: 20,
+        background: "var(--glass-bg)", backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
+        border: "1px solid var(--glass-border)", boxShadow: "var(--glass-shadow)",
       }}>
-        <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 36, fontWeight: 700, marginBottom: 4, letterSpacing: -1 }}>
+        <div style={{ fontSize: 36, fontWeight: 700, marginBottom: 4, letterSpacing: -1, color: "var(--text-primary)" }}>
           AgentRune
         </div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginBottom: 32, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600 }}>
-          {isPairing ? "Device Pairing" : "Authenticator"}
+        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 32, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600, opacity: 0.7 }}>
+          Authenticator
         </div>
 
         <div style={{ marginBottom: 20 }}>
-          {isPairing ? (
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(96,165,250,0.6)" strokeWidth="1.5" style={{ margin: "0 auto" }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.686-3.063a4.5 4.5 0 00-1.242-7.244l4.5-4.5a4.5 4.5 0 016.364 6.364l-1.757 1.757" />
-            </svg>
-          ) : (
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(96,165,250,0.6)" strokeWidth="1.5" style={{ margin: "0 auto" }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-            </svg>
-          )}
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" strokeWidth="1.5" style={{ margin: "0 auto", opacity: 0.6 }}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+          </svg>
         </div>
 
-        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginBottom: 28, lineHeight: 1.5 }}>
-          {isPairing
-            ? "Enter the 6-digit code shown on your PC terminal"
-            : "Enter the 6-digit code from Google Authenticator"}
+        <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 28, lineHeight: 1.5, opacity: 0.8 }}>
+          Enter the 6-digit code from Google Authenticator
         </div>
 
         <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }} onPaste={handlePaste}>
@@ -294,46 +599,23 @@ function AuthScreen({
               style={{
                 width: 44, height: 56, textAlign: "center",
                 fontSize: 24, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
-                borderRadius: 12,
-                border: code[i]
-                  ? "2px solid rgba(96,165,250,0.4)"
-                  : "1px solid rgba(255,255,255,0.1)",
-                background: code[i]
-                  ? "rgba(96,165,250,0.06)"
-                  : "rgba(255,255,255,0.04)",
-                color: "#e2e8f0",
-                outline: "none",
-                transition: "all 0.2s",
+                borderRadius: 14,
+                border: code[i] ? "2px solid rgba(59,130,246,0.4)" : "1px solid var(--glass-border)",
+                background: code[i] ? "rgba(59,130,246,0.06)" : "var(--icon-bg)",
+                color: "var(--text-primary)", outline: "none", transition: "all 0.2s",
               }}
             />
           ))}
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", marginBottom: 8 }}>
-          Auto-verifies when complete
-        </div>
-
         {error && (
           <div style={{
             color: "#f87171", fontSize: 13, marginTop: 12,
-            padding: "8px 12px", borderRadius: 8,
-            background: "rgba(248,113,113,0.08)",
+            padding: "8px 12px", borderRadius: 12, background: "rgba(248,113,113,0.08)",
           }}>
             {error}
           </div>
         )}
-
-        <div style={{
-          marginTop: 24, padding: "12px 16px", borderRadius: 12,
-          background: "rgba(255,255,255,0.02)",
-          border: "1px solid rgba(255,255,255,0.04)",
-        }}>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", lineHeight: 1.5 }}>
-            {isPairing
-              ? "This device will be remembered. No re-pairing needed."
-              : "This device will be registered. No re-login needed."}
-          </div>
-        </div>
       </div>
     </div>
   )
@@ -343,31 +625,43 @@ function CheckingScreen() {
   return (
     <div style={{
       height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center",
-      background: "#0f172a", color: "#e2e8f0",
+      color: "var(--text-primary)",
     }}>
       <div style={{ textAlign: "center" }}>
-        <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 700, marginBottom: 12, letterSpacing: -1 }}>AgentRune</div>
-        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)" }}>Connecting...</div>
+        <div style={{ fontSize: 32, fontWeight: 700, marginBottom: 12, letterSpacing: -1, color: "var(--text-primary)" }}>AgentRune</div>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)", opacity: 0.7 }}>Connecting...</div>
       </div>
     </div>
   )
 }
+
+// ─── Dev mode check ─────────────────────────────────────────────
+
+const IS_DEV_PREVIEW = typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).has("dev")
 
 // ─── Main App (Router) ──────────────────────────────────────────
 
 type Screen = "launchpad" | "session"
 
 export function App() {
-  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp } = useAuth()
-  const [projects, setProjects] = useState<Project[]>([])
+  const [serverReady, setServerReady] = useState(IS_DEV_PREVIEW || !needsServerSetup())
+  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW)
+  const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
+    { id: "demo", name: "Demo Project", cwd: "/home/user/project" },
+  ] : [])
   const [screen, setScreen] = useState<Screen>("launchpad")
-  const [selectedProject, setSelectedProject] = useState<string | null>(null)
+  const [selectedProject, setSelectedProject] = useState<string | null>(IS_DEV_PREVIEW ? "demo" : null)
   const [activeAgentId, setActiveAgentId] = useState<string>("terminal")
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<"board" | "terminal">("board")
-  const [activeSessions, setActiveSessions] = useState<Set<string>>(new Set())
+  const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
+  const [theme, setTheme] = useState<"light" | "dark">(
+    () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
+  )
   const { connect, send, on } = useWs()
 
-  const isAuthed = status === "authenticated"
+  const isAuthed = IS_DEV_PREVIEW || status === "authenticated"
 
   // Load projects after auth
   useEffect(() => {
@@ -384,63 +678,136 @@ export function App() {
           setSelectedProject(data[0].id)
         }
       })
-      .catch(() => {})
+      .catch(() => { })
 
     // Load active sessions
     fetch(`${getApiBase()}/api/sessions`)
       .then((r) => r.json())
-      .then((data) => {
-        const ids = new Set<string>()
-        for (const s of data) {
-          // session id = project id in current implementation
-          ids.add(s.id)
-        }
-        setActiveSessions(ids)
+      .then((data: { id: string; projectId: string; agentId: string }[]) => {
+        setActiveSessions(data.map((s) => ({
+          id: s.id,
+          projectId: s.projectId,
+          agentId: s.agentId,
+        })))
       })
-      .catch(() => {})
+      .catch(() => { })
   }, [isAuthed])
 
   // Connect WS after auth
   useEffect(() => {
     if (!isAuthed) return
     const ws = connect(sessionToken)
-    ws.onopen = () => {}
     return () => { ws.close() }
   }, [isAuthed, connect, sessionToken])
 
-  // Auth gates
-  if (status === "checking") return <CheckingScreen />
-  if (status === "need-auth" || status === "need-setup") {
-    return <AuthScreen mode={mode} error={authError} onPair={pairWithCode} onTotp={verifyTotp} />
+  // Theme: apply dark class to <html>
+  useEffect(() => {
+    if (theme === "dark") {
+      document.documentElement.classList.add("dark")
+    } else {
+      document.documentElement.classList.remove("dark")
+    }
+  }, [theme])
+
+  const toggleTheme = () => {
+    const newTheme = theme === "light" ? "dark" : "light"
+    setTheme(newTheme)
+    localStorage.setItem("agentrune_theme", newTheme)
   }
 
-  // Launch handler
+  // Android hardware back button
+  const screenRef = useRef(screen)
+  const viewModeRef = useRef(viewMode)
+  useEffect(() => { screenRef.current = screen }, [screen])
+  useEffect(() => { viewModeRef.current = viewMode }, [viewMode])
+
+  useEffect(() => {
+    if (!isCapacitor()) return
+    let handle: { remove: () => void } | null = null
+    CapApp.addListener("backButton", () => {
+      // Dispatch a cancelable event — overlays can intercept it
+      const evt = new Event("app:back", { cancelable: true })
+      const wasCancelled = !document.dispatchEvent(evt)
+      if (wasCancelled) return // An overlay handled it
+
+      // Screen-level navigation
+      if (screenRef.current === "session") {
+        if (viewModeRef.current === "terminal") {
+          setViewMode("board")
+        } else {
+          setScreen("launchpad")
+          setViewMode("board")
+        }
+      } else {
+        CapApp.minimizeApp()
+      }
+    }).then((h) => { handle = h })
+    return () => { handle?.remove() }
+  }, [])
+
+  // Dev preview skips all auth
+  if (!IS_DEV_PREVIEW) {
+    // Need server setup first (Capacitor, no saved server URL)
+    if (!serverReady) {
+      return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
+    }
+
+    // Auth gates
+    if (status === "checking") return <CheckingScreen />
+    if (status === "need-auth" || status === "need-setup") {
+      if (mode === "totp") {
+        return <AuthScreen mode={mode} error={authError} onTotp={verifyTotp} />
+      }
+      if (isCapacitor()) {
+        return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
+      }
+      return <AuthScreen mode={mode} error={authError || ""} onTotp={verifyTotp} />
+    }
+  }
+
+  // Launch handler — creates a new session
   const handleLaunch = (projectId: string, agentId: string) => {
+    const sessionId = `${projectId}_${Date.now()}`
     setSelectedProject(projectId)
     setActiveAgentId(agentId)
+    setCurrentSessionId(sessionId)
     saveLastProject(projectId)
-    setActiveSessions((prev) => new Set([...prev, projectId]))
+    setActiveSessions((prev) => [...prev, { id: sessionId, projectId, agentId }])
     setScreen("session")
     setViewMode("board")
   }
 
-  // Resume handler
-  const handleResume = (projectId: string) => {
-    setSelectedProject(projectId)
-    saveLastProject(projectId)
-    setScreen("session")
+  // Resume handler — resumes a specific session
+  const handleResume = (sessionId: string) => {
+    const session = activeSessions.find((s) => s.id === sessionId)
+    if (session) {
+      setSelectedProject(session.projectId)
+      setActiveAgentId(session.agentId)
+      setCurrentSessionId(sessionId)
+      saveLastProject(session.projectId)
+      setScreen("session")
+    }
   }
 
-  // Kill handler
-  const handleKill = async (projectId: string) => {
+  // Open a session directly in terminal view
+  const handleOpenSessionTerminal = (sessionId: string) => {
+    const session = activeSessions.find((s) => s.id === sessionId)
+    if (session) {
+      setSelectedProject(session.projectId)
+      setActiveAgentId(session.agentId)
+      setCurrentSessionId(sessionId)
+      saveLastProject(session.projectId)
+      setScreen("session")
+      setViewMode("terminal")
+    }
+  }
+
+  // Kill handler — kills a specific session
+  const handleKill = async (sessionId: string) => {
     try {
-      await fetch(`${getApiBase()}/api/sessions/${projectId}/kill`, { method: "POST" })
-    } catch {}
-    setActiveSessions((prev) => {
-      const next = new Set(prev)
-      next.delete(projectId)
-      return next
-    })
+      await fetch(`${getApiBase()}/api/sessions/${sessionId}/kill`, { method: "POST" })
+    } catch { }
+    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId))
   }
 
   // New project handler
@@ -456,7 +823,7 @@ export function App() {
         setProjects((prev) => [...prev, project])
         setSelectedProject(project.id)
       }
-    } catch {}
+    } catch { }
   }
 
   // Back to launchpad
@@ -467,28 +834,50 @@ export function App() {
   if (screen === "session" && selectedProject) {
     const project = projects.find((p) => p.id === selectedProject)
     if (project) {
-      if (viewMode === "terminal") {
-        return (
-          <TerminalView
-            project={project}
-            agentId={activeAgentId}
-            sessionToken={sessionToken}
-            send={send}
-            on={on}
-            onBack={() => setViewMode("board")}
-          />
-        )
-      }
       return (
-        <MissionControl
-          project={project}
-          agentId={activeAgentId}
-          sessionToken={sessionToken}
-          send={send}
-          on={on}
-          onBack={() => { setScreen("launchpad"); setViewMode("board") }}
-          onOpenTerminal={() => setViewMode("terminal")}
-        />
+        <>
+          {/* Always keep TerminalView mounted to preserve xterm content.
+              When in board mode, push it behind MissionControl with lower z-index
+              and visibility:hidden so xterm keeps its layout dimensions. */}
+          <div style={viewMode !== "terminal" ? {
+            position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
+            visibility: "hidden", zIndex: 0,
+          } : undefined}>
+            <TerminalView
+              project={project}
+              agentId={activeAgentId}
+              sessionId={currentSessionId || undefined}
+              sessionToken={sessionToken}
+              send={send}
+              on={on}
+              onBack={() => setViewMode("board")}
+            />
+          </div>
+          {/* Always keep MissionControl mounted to preserve events state.
+              When in terminal mode, hide it with visibility:hidden (mirrors TerminalView pattern). */}
+          <div style={viewMode === "terminal" ? {
+            position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
+            visibility: "hidden", zIndex: 0,
+          } : undefined}>
+            <MissionControl
+              project={project}
+              agentId={activeAgentId}
+              sessionId={currentSessionId || undefined}
+              sessionToken={sessionToken}
+              send={send}
+              on={on}
+              onBack={() => { setScreen("launchpad"); setViewMode("board") }}
+              onOpenTerminal={() => setViewMode("terminal")}
+              projects={projects}
+              activeSessions={activeSessions}
+              onSwitchSession={handleResume}
+              onKillSession={handleKill}
+              onOpenSessionTerminal={handleOpenSessionTerminal}
+              theme={theme}
+              toggleTheme={toggleTheme}
+            />
+          </div>
+        </>
       )
     }
   }
@@ -506,6 +895,8 @@ export function App() {
         setSelectedProject(id)
         saveLastProject(id)
       }}
+      theme={theme}
+      toggleTheme={toggleTheme}
     />
   )
 }

@@ -1,0 +1,53 @@
+{
+  "name": "AgentRune",
+  "short_name": "AgentRune",
+  "description": "Agent-agnostic mobile command center for Web 4",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icon-48.webp",
+      "type": "image/webp",
+      "sizes": "48x48",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-72.webp",
+      "type": "image/webp",
+      "sizes": "72x72",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-96.webp",
+      "type": "image/webp",
+      "sizes": "96x96",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-128.webp",
+      "type": "image/webp",
+      "sizes": "128x128",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-192.webp",
+      "type": "image/webp",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-256.webp",
+      "type": "image/webp",
+      "sizes": "256x256",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.webp",
+      "type": "image/webp",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ]
+}
