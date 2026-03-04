@@ -27,7 +27,7 @@ A QR code will appear in the terminal.
 
 ### Phone (Client)
 
-1. Install AgentRune from [Google Play](#) <!-- TODO: add link -->
+1. Install AgentRune from [Google Play](https://play.google.com/store/apps/details?id=app.agentrune.dev) or download the APK from [Releases](https://github.com/Kujirafu/AgentRune/releases)
 2. Open the app and scan the QR code
 3. Select a project and launch an agent
 

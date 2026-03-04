@@ -37,4 +37,4 @@ We may update this policy as the app evolves. Changes will be posted in this fil
 
 ## Contact
 
-For questions about this privacy policy, open an issue at: https://github.com/anthropics/agentrune <!-- TODO: update with actual repo URL -->
+For questions about this privacy policy, open an issue at: https://github.com/Kujirafu/AgentRune/issues
