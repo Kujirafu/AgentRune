@@ -7,7 +7,9 @@ const config: CapacitorConfig = {
   server: {
     androidScheme: "http",  // Use HTTP so we can fetch from LAN server without mixed-content block
     cleartext: true,
-    allowNavigation: ["*"],
+    // allowNavigation: ["*"] was removed — it caused window.open("_system") to load
+    // external URLs inside the WebView (user-agent = "wv"), making Google OAuth
+    // return disallowed_useragent. fetch() calls are unaffected by this setting.
   },
   android: {
     buildOptions: {
