@@ -450,20 +450,17 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
         {/* AgentLore Login — Polling-based (no deep link) */}
         <button
           disabled={!!pollingCode}
-          onClick={async () => {
+          onClick={() => {
             setError("")
-            setStatus(t("app.openingBrowser"))
-            try {
-              const res = await fetch("https://agentlore.vercel.app/api/agentrune/mobile-auth/start", { method: "POST" })
-              const data = await res.json()
-              if (!data.data?.code) { setError(t("app.loginStartFailed")); setStatus(""); return }
-              window.open(data.data.authUrl, "_system")
-              setPollingCode(data.data.code)
-              setStatus(t("app.waitingForBrowserLogin"))
-            } catch {
-              setError(t("app.loginStartFailed"))
-              setStatus("")
-            }
+            // Generate code client-side so window.open is called synchronously
+            // within the user gesture — async await would trigger popup blocker
+            const code = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+              .map(b => b.toString(16).padStart(2, "0")).join("")
+            const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
+            // Must be synchronous — called directly in click handler, not after await
+            window.open(authUrl, "_system")
+            setPollingCode(code)
+            setStatus(t("app.waitingForBrowserLogin"))
           }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
