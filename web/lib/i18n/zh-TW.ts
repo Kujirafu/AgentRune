@@ -16,6 +16,7 @@ export const zhTW: Record<string, string> = {
   "app.orManualInput": "或手動輸入",
   "app.connect": "連線",
   "app.loginAgentLoreHint": "登入一次，電腦會自動出現在啟動台",
+  "app.agentLoreConnected": "AgentLore 已登入 — 掃描 QR Code 連接你的電腦",
   "app.openingBrowser": "開啟瀏覽器...",
   "app.waitingForBrowserLogin": "等待瀏覽器登入...",
   "app.loginStartFailed": "登入失敗，請重試",

@@ -19,8 +19,8 @@ function isCapacitor(): boolean {
 }
 
 function needsServerSetup(): boolean {
-  // If user is logged in with AgentLore, skip ConnectScreen — they'll pick a device in LaunchPad
-  if (localStorage.getItem("agentrune_phone_token")) return false
+  // Always require a local server URL — cloud device discovery not yet implemented.
+  // Cloud login (phone token) just shows a status badge in ConnectScreen.
   return isCapacitor() && !localStorage.getItem("agentrune_server")
 }
 
@@ -305,7 +305,8 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
   const [serverUrl, setServerUrl] = useState("")
   const [status, setStatus] = useState("")
   const [error, setError] = useState("")
-  const [showAdvanced, setShowAdvanced] = useState(false)
+  // Auto-expand QR section if already logged in to AgentLore (next step is scanning)
+  const [showAdvanced, setShowAdvanced] = useState(!!localStorage.getItem("agentrune_phone_token"))
   // Persist polling code across app kills — resume on restart
   const [pollingCode, setPollingCode] = useState<string | null>(
     () => localStorage.getItem("agentrune_polling_code")
@@ -471,6 +472,20 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
           {t("app.connectToComputer")}
         </div>
 
+        {/* AgentLore login status badge */}
+        {localStorage.getItem("agentrune_phone_token") ? (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            padding: "10px 16px", borderRadius: 12, marginBottom: 16,
+            background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.3)",
+          }}>
+            <span style={{ color: "#4ade80", fontSize: 15 }}>✓</span>
+            <span style={{ color: "#4ade80", fontSize: 13, fontWeight: 600 }}>
+              {t("app.agentLoreConnected")}
+            </span>
+          </div>
+        ) : (
+          <>
         {/* AgentLore Login — Polling-based (no deep link) */}
         <button
           disabled={!!pollingCode}
@@ -521,6 +536,8 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
         <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 20, opacity: 0.7, lineHeight: 1.5 }}>
           {t("app.loginAgentLoreHint")}
         </div>
+          </>
+        )}
 
         {/* Advanced: QR / Manual */}
         <button

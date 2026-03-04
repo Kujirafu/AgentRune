@@ -16,6 +16,7 @@ export const en: Record<string, string> = {
   "app.orManualInput": "Or enter manually",
   "app.connect": "Connect",
   "app.loginAgentLoreHint": "Login once — your computer auto-appears in the launch pad",
+  "app.agentLoreConnected": "Logged in to AgentLore — now scan QR to connect your computer",
   "app.openingBrowser": "Opening browser...",
   "app.waitingForBrowserLogin": "Waiting for login...",
   "app.loginStartFailed": "Failed to start login. Please try again.",
