@@ -17,6 +17,8 @@ function isCapacitor(): boolean {
 }
 
 function needsServerSetup(): boolean {
+  // If user is logged in with AgentLore, skip ConnectScreen — they'll pick a device in LaunchPad
+  if (localStorage.getItem("agentrune_phone_token")) return false
   return isCapacitor() && !localStorage.getItem("agentrune_server")
 }
 
@@ -301,6 +303,28 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
   const [serverUrl, setServerUrl] = useState("")
   const [status, setStatus] = useState("")
   const [error, setError] = useState("")
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // Listen for deep link after AgentLore OAuth — token saved → reload skips ConnectScreen
+  useEffect(() => {
+    let cleanup: (() => void) | undefined
+    import("@capacitor/app").then(({ App: CapApp }) => {
+      CapApp.addListener("appUrlOpen", ({ url }) => {
+        if (url.startsWith("agentrune://auth")) {
+          const u = new URL(url)
+          const token = u.searchParams.get("token")
+          const userId = u.searchParams.get("userId")
+          if (token) {
+            localStorage.setItem("agentrune_phone_token", token)
+            if (userId) localStorage.setItem("agentrune_user_id", userId)
+            // Reload to re-evaluate needsServerSetup() — will skip to LaunchPad
+            window.location.reload()
+          }
+        }
+      }).then((h) => { cleanup = () => h.remove() })
+    })
+    return () => { cleanup?.() }
+  }, [])
 
   // Parse QR text: extract server URL and optional pair code
   const parseQrUrl = (text: string): { serverUrl: string; pairCode: string | null } | null => {
@@ -412,64 +436,108 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
         <div style={{ fontSize: 36, fontWeight: 700, marginBottom: 4, letterSpacing: -1, color: "var(--text-primary)" }}>
           AgentRune
         </div>
-        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 32, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600, opacity: 0.7 }}>
+        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 28, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600, opacity: 0.7 }}>
           {t("app.connectToComputer")}
         </div>
 
-        {/* QR Scanner — Primary */}
+        {/* AgentLore Login — Primary */}
         <button
-          onClick={() => setScanning(true)}
+          onClick={() => {
+            import("@capacitor/browser").then(({ Browser }) =>
+              Browser.open({ url: "https://agentlore.vercel.app/api/agentrune/phone-auth" })
+                .catch(() => window.open("https://agentlore.vercel.app/api/agentrune/phone-auth", "_blank"))
+            )
+          }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
-            width: "100%", padding: "16px", borderRadius: 14, marginBottom: 24,
-            border: "1px solid rgba(59,130,246,0.3)",
-            background: "rgba(59,130,246,0.1)",
+            width: "100%", padding: "16px", borderRadius: 14, marginBottom: 12,
+            border: "1.5px solid rgba(59,130,246,0.5)",
+            background: "rgba(59,130,246,0.12)",
             color: "var(--accent-primary)", fontSize: 16, fontWeight: 700,
             cursor: "pointer",
           }}
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="7" height="7" rx="1" />
-            <rect x="14" y="3" width="7" height="7" rx="1" />
-            <rect x="3" y="14" width="7" height="7" rx="1" />
-            <rect x="14" y="14" width="3" height="3" />
-            <path d="M20 14v3h-3M14 20h3v-3M20 20h.01" />
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
           </svg>
-          {t("app.scanQrToPair")}
+          {t("settings.loginAgentLore")}
         </button>
 
-        {/* Divider */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-          <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
-          <span style={{ fontSize: 11, color: "var(--text-secondary)", letterSpacing: 1, opacity: 0.5 }}>{t("app.orManualInput")}</span>
-          <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
+        <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 20, opacity: 0.7, lineHeight: 1.5 }}>
+          {t("app.loginAgentLoreHint")}
         </div>
 
-        {/* Manual URL input */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          <input
-            type="url"
-            placeholder="http://192.168.1.x:3456"
-            value={serverUrl}
-            onChange={(e) => setServerUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleManualConnect()}
-            style={{
-              flex: 1, padding: "12px 14px", borderRadius: 14,
-              border: "1px solid var(--glass-border)", background: "var(--icon-bg)",
-              color: "var(--text-primary)", fontSize: 14, outline: "none",
-            }}
-          />
+        {/* Advanced: QR / Manual */}
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            width: "100%", padding: "10px", borderRadius: 12, marginBottom: showAdvanced ? 16 : 0,
+            border: "1px solid var(--glass-border)", background: "transparent",
+            color: "var(--text-secondary)", fontSize: 13, fontWeight: 500, cursor: "pointer",
+          }}
+        >
+          {t("app.advancedConnect")}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ transform: showAdvanced ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+
+        {showAdvanced && (<>
+          {/* QR Scan */}
           <button
-            onClick={handleManualConnect}
+            onClick={() => setScanning(true)}
             style={{
-              padding: "12px 18px", borderRadius: 14, border: "1px solid rgba(59,130,246,0.3)",
-              background: "rgba(59,130,246,0.1)", color: "var(--accent-primary)",
-              fontSize: 14, fontWeight: 600, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              width: "100%", padding: "13px", borderRadius: 14, marginBottom: 12,
+              border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+              color: "var(--text-primary)", fontSize: 14, fontWeight: 600, cursor: "pointer",
             }}
           >
-            {t("app.connect")}
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="3" height="3" />
+              <path d="M20 14v3h-3M14 20h3v-3M20 20h.01" />
+            </svg>
+            {t("app.scanQrToPair")}
           </button>
-        </div>
+
+          {/* Manual URL */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <input
+              type="url"
+              placeholder="http://192.168.1.x:3456"
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleManualConnect()}
+              style={{
+                flex: 1, padding: "12px 14px", borderRadius: 14,
+                border: "1px solid var(--glass-border)", background: "var(--icon-bg)",
+                color: "var(--text-primary)", fontSize: 14, outline: "none",
+              }}
+            />
+            <button
+              onClick={handleManualConnect}
+              style={{
+                padding: "12px 18px", borderRadius: 14, border: "1px solid rgba(59,130,246,0.3)",
+                background: "rgba(59,130,246,0.1)", color: "var(--accent-primary)",
+                fontSize: 14, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              {t("app.connect")}
+            </button>
+          </div>
+
+          <div style={{
+            marginTop: 8, padding: "12px 16px", borderRadius: 14,
+            background: "var(--icon-bg)", border: "1px solid var(--glass-border)",
+          }}>
+            <div
+              style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6, opacity: 0.7 }}
+              dangerouslySetInnerHTML={{ __html: t("app.serverInstructions") }}
+            />
+          </div>
+        </>)}
 
         {status && (
           <div style={{ color: "#4ade80", fontSize: 13, marginTop: 12 }}>{status}</div>
@@ -482,16 +550,6 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
             {error}
           </div>
         )}
-
-        <div style={{
-          marginTop: 24, padding: "12px 16px", borderRadius: 14,
-          background: "var(--icon-bg)", border: "1px solid var(--glass-border)",
-        }}>
-          <div
-            style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6, opacity: 0.7 }}
-            dangerouslySetInnerHTML={{ __html: t("app.serverInstructions") }}
-          />
-        </div>
 
         {/* VPN warning */}
         <div style={{
@@ -897,6 +955,7 @@ export function App() {
       }}
       theme={theme}
       toggleTheme={toggleTheme}
+      onCloudConnect={() => window.location.reload()}
     />
   )
 }

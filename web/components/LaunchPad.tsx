@@ -28,6 +28,7 @@ interface LaunchPadProps {
   onSelectProject: (id: string) => void
   theme: "light" | "dark"
   toggleTheme: () => void
+  onCloudConnect?: (url: string) => void
 }
 
 // Helper to return the correct SVG icon for an agent ID
@@ -99,6 +100,7 @@ export function LaunchPad({
   onSelectProject,
   theme,
   toggleTheme,
+  onCloudConnect,
 }: LaunchPadProps) {
   const { t } = useLocale()
   const [showNewForm, setShowNewForm] = useState(false)
@@ -263,7 +265,14 @@ export function LaunchPad({
               return (
                 <button
                   key={device.id}
-                  onClick={() => window.open(url, "_blank")}
+                  onClick={() => {
+                    if (onCloudConnect) {
+                      localStorage.setItem("agentrune_server", url)
+                      onCloudConnect(url)
+                    } else {
+                      window.open(url, "_blank")
+                    }
+                  }}
                   style={{
                     display: "flex",
                     alignItems: "center",

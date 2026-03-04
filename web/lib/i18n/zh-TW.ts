@@ -15,7 +15,9 @@ export const zhTW: Record<string, string> = {
   "app.scanQrToPair": "掃描 QR Code 配對",
   "app.orManualInput": "或手動輸入",
   "app.connect": "連線",
-  "app.serverInstructions": "用 <code>npm start</code> 啟動 Server，<br />終端機會顯示 QR Code 讓你掃描",
+  "app.loginAgentLoreHint": "登入一次，電腦會自動出現在啟動台",
+  "app.advancedConnect": "進階：QR Code / 手動輸入",
+  "app.serverInstructions": "在電腦終端機執行 <code>curl -fsSL https://agentlore.vercel.app/install.sh | sh</code>，然後在瀏覽器完成一次登入。",
   "app.vpnWarning": "如果您正在使用 VPN，請先關閉 — VPN 可能會導致手機無法連線到本地伺服器。",
 
   // LaunchPad

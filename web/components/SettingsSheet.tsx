@@ -2,6 +2,7 @@ import { useState, useEffect } from "react"
 import type { ProjectSettings } from "../lib/types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
 import { App } from "@capacitor/app"
+import { Browser } from "@capacitor/browser"
 
 interface SettingsSheetProps {
   open: boolean
@@ -50,15 +51,19 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
   const models = ["sonnet", "opus", "haiku"] as const
   const isClaudeAgent = agentId === "claude"
 
+  const openExternal = (url: string) => {
+    Browser.open({ url }).catch(() => window.open(url, "_blank"))
+  }
+
   const handleDonate = (amount: number | "custom") => {
     const url = amount === "custom"
       ? DONATE_CHECKOUT
       : `${DONATE_CHECKOUT}?checkout[custom_price]=${amount * 100}`
-    window.open(url, "_system")
+    openExternal(url)
   }
 
   const handleSubscribe = (plan: "pro" | "trust") => {
-    window.open(SUBSCRIBE_URLS[plan], "_blank")
+    openExternal(SUBSCRIBE_URLS[plan])
   }
 
   return (
@@ -169,7 +174,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
                 </button>
               ) : (
                 <button
-                  onClick={() => window.open(AGENTLORE_PHONE_AUTH_URL, "_blank")}
+                  onClick={() => openExternal(AGENTLORE_PHONE_AUTH_URL)}
                   style={{
                     width: "100%",
                     padding: "12px",

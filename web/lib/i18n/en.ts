@@ -15,7 +15,9 @@ export const en: Record<string, string> = {
   "app.scanQrToPair": "Scan QR Code to Pair",
   "app.orManualInput": "Or enter manually",
   "app.connect": "Connect",
-  "app.serverInstructions": "Run <code>npm start</code> to start the Server,<br />the terminal will show a QR Code to scan",
+  "app.loginAgentLoreHint": "Login once — your computer auto-appears in the launch pad",
+  "app.advancedConnect": "Advanced: QR / Manual URL",
+  "app.serverInstructions": "Run <code>curl -fsSL https://agentlore.vercel.app/install.sh | sh</code> on your computer, then login once in the browser.",
   "app.vpnWarning": "If you're using a VPN, please disable it first — VPN may prevent your phone from reaching the local server.",
 
   // LaunchPad

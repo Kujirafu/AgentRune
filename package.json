@@ -37,6 +37,7 @@
   "dependencies": {
     "@capacitor/android": "^8.1.0",
     "@capacitor/app": "^8.0.1",
+    "@capacitor/browser": "^8.0.1",
     "@capacitor/cli": "^8.1.0",
     "@capacitor/clipboard": "^8.0.1",
     "@capacitor/core": "^8.1.0",
@@ -53,7 +54,6 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^5.12.0",
     "@capacitor/assets": "^3.0.5",
     "@types/express": "^5.0.0",
     "@types/react": "^19.1.0",
@@ -63,6 +63,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "@yao-pkg/pkg": "^5.12.0",
     "cross-env": "^10.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
