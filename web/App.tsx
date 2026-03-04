@@ -301,7 +301,7 @@ function QrScannerView({ onScan, onCancel }: { onScan: (text: string) => void; o
 
 // ─── Connect screen (first time on Capacitor, no server URL) ────
 
-function ConnectScreen({ onConnected }: { onConnected: () => void }) {
+function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLogin?: (token: string) => void }) {
   const { t } = useLocale()
   const [scanning, setScanning] = useState(false)
   const [serverUrl, setServerUrl] = useState("")
@@ -328,9 +328,14 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
       if (data.data?.status === "confirmed") {
         clearInterval(pollingRef.current!)
         savePollingCode(null)
-        localStorage.setItem("agentrune_phone_token", data.data.token)
+        const token = data.data.token as string
+        localStorage.setItem("agentrune_phone_token", token)
         if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
-        window.location.reload()
+        if (onLogin) {
+          onLogin(token)
+        } else {
+          window.location.reload()
+        }
       } else if (data.data?.status === "expired") {
         clearInterval(pollingRef.current!)
         savePollingCode(null)
@@ -777,9 +782,9 @@ const IS_DEV_PREVIEW = typeof window !== "undefined" &&
 type Screen = "launchpad" | "session"
 
 export function App() {
-  // Cloud mode: user logged in via AgentLore — no local server needed
-  const isCloudMode = !!localStorage.getItem("agentrune_phone_token")
-  const [serverReady, setServerReady] = useState(IS_DEV_PREVIEW || !needsServerSetup())
+  // Cloud mode: user logged in via AgentLore — reactive state so login completes without reload
+  const [isCloudMode, setIsCloudMode] = useState(() => !!localStorage.getItem("agentrune_phone_token"))
+  const [serverReady, setServerReady] = useState(() => IS_DEV_PREVIEW || !needsServerSetup())
   // Skip local auth check in cloud mode — no local server to authenticate against
   const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW && !isCloudMode)
   const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
@@ -884,8 +889,13 @@ export function App() {
   // Dev preview skips all auth
   if (!IS_DEV_PREVIEW) {
     // Need server setup first (Capacitor, no saved server URL)
+    const handleLogin = (_token: string) => {
+      setIsCloudMode(true)
+      setServerReady(true)
+    }
+
     if (!serverReady) {
-      return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
+      return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} onLogin={handleLogin} />
     }
 
     // Auth gates — skipped in cloud mode (phone token = already authenticated)
@@ -896,7 +906,7 @@ export function App() {
           return <AuthScreen mode={mode} error={authError} onTotp={verifyTotp} />
         }
         if (isCapacitor()) {
-          return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
+          return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} onLogin={handleLogin} />
         }
         return <AuthScreen mode={mode} error={authError || ""} onTotp={verifyTotp} />
       }
