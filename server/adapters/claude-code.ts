@@ -19,6 +19,12 @@ interface AdapterState {
   lastTokenTime: number
   seenTools: Set<string>    // Dedup tool calls by signature
   seenToolsExpire: number   // Clear seen set periodically
+  pendingEdit: {
+    filePath: string
+    lines: string[]
+    startTime: number
+    eventId: string
+  } | null
 }
 
 function getState(ctx: ParseContext): AdapterState {
@@ -30,9 +36,30 @@ function getState(ctx: ParseContext): AdapterState {
       lastTokenTime: 0,
       seenTools: new Set<string>(),
       seenToolsExpire: Date.now() + 30000,
+      pendingEdit: null,
     }
   }
   return (ctx as any)._as
+}
+
+function parseDiffLines(lines: string[]): { before: string; after: string } {
+  const before: string[] = []
+  const after: string[] = []
+  for (const line of lines) {
+    const m = line.match(/^\s*\d+\s*([-+ ])?\s*│(.*)$/)
+    if (!m) continue
+    const marker = m[1] || " "
+    const content = m[2] ?? ""
+    if (marker === "-") {
+      before.push(content)
+    } else if (marker === "+") {
+      after.push(content)
+    } else {
+      before.push(content)
+      after.push(content)
+    }
+  }
+  return { before: before.join("\n"), after: after.join("\n") }
 }
 
 export const claudeCodeAdapter: AgentAdapter = {
@@ -74,17 +101,71 @@ export const claudeCodeAdapter: AgentAdapter = {
         const sig = `${m[0].slice(0, 60)}`
         if (!state.seenTools.has(sig)) {
           state.seenTools.add(sig)
-          events.push({
-            id: makeEventId(),
-            timestamp: now,
-            type: type as AgentEvent["type"],
-            status: "in_progress",
-            title: titleFn(m),
-            detail: extra === "bash" ? (m[1] || "").slice(0, 100) : (m[2] || "").slice(0, 100) || undefined,
-            raw: chunk,
-          })
+
+          if (type === "file_edit" || type === "file_create") {
+            // Finalize any previous pending edit first
+            if (state.pendingEdit) {
+              const { filePath: fp, lines, eventId: eid, startTime } = state.pendingEdit
+              const d = parseDiffLines(lines)
+              events.push({
+                id: eid,
+                timestamp: startTime,
+                type: "file_edit",
+                status: "completed",
+                title: `Edited ${fp}`,
+                diff: { filePath: fp, before: d.before, after: d.after },
+                raw: chunk,
+              })
+              state.pendingEdit = null
+            }
+            // Start accumulating new edit
+            const filePath = titleFn(m).replace(/^(Editing|Creating) /, "")
+            state.pendingEdit = {
+              filePath,
+              lines: [],
+              startTime: now,
+              eventId: makeEventId(),
+            }
+          } else {
+            events.push({
+              id: makeEventId(),
+              timestamp: now,
+              type: type as AgentEvent["type"],
+              status: "in_progress",
+              title: titleFn(m),
+              detail: extra === "bash" ? (m[1] || "").slice(0, 100) : (m[2] || "").slice(0, 100) || undefined,
+              raw: chunk,
+            })
+          }
         }
       }
+    }
+
+    // Finalize pending edit on idle prompt or timeout
+    if (state.pendingEdit) {
+      const lastLine = text.split("\n").filter(Boolean).pop()?.trim() || ""
+      const isIdle = /[$%>❯]\s*$/.test(lastLine)
+      const timedOut = now - state.pendingEdit.startTime > 3000
+      if (isIdle || timedOut) {
+        const { filePath: fp, lines, eventId: eid, startTime } = state.pendingEdit
+        const d = parseDiffLines(lines)
+        events.push({
+          id: eid,
+          timestamp: startTime,
+          type: "file_edit",
+          status: "completed",
+          title: `Edited ${fp}`,
+          diff: { filePath: fp, before: d.before, after: d.after },
+          raw: chunk,
+        })
+        state.pendingEdit = null
+      }
+    }
+
+    // Accumulate diff lines when a pending edit is active
+    if (state.pendingEdit) {
+      const diffLines = clean.split("\n").filter(l => /^\s*\d+\s*[-+ ]?\s*│/.test(l))
+      state.pendingEdit.lines.push(...diffLines)
     }
 
     // ─── Permission prompt ───
