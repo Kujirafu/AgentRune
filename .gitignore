@@ -52,3 +52,4 @@ icons/*.png
 # Media / temp
 /media__*.png
 /screenshot*.png
+dist-exe/

@@ -758,8 +758,11 @@ const IS_DEV_PREVIEW = typeof window !== "undefined" &&
 type Screen = "launchpad" | "session"
 
 export function App() {
+  // Cloud mode: user logged in via AgentLore — no local server needed
+  const isCloudMode = !!localStorage.getItem("agentrune_phone_token")
   const [serverReady, setServerReady] = useState(IS_DEV_PREVIEW || !needsServerSetup())
-  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW)
+  // Skip local auth check in cloud mode — no local server to authenticate against
+  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW && !isCloudMode)
   const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
     { id: "demo", name: "Demo Project", cwd: "/home/user/project" },
   ] : [])
@@ -775,7 +778,7 @@ export function App() {
   )
   const { connect, send, on } = useWs()
 
-  const isAuthed = IS_DEV_PREVIEW || status === "authenticated"
+  const isAuthed = IS_DEV_PREVIEW || isCloudMode || status === "authenticated"
 
   // Load projects after auth
   useEffect(() => {
@@ -866,16 +869,18 @@ export function App() {
       return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
     }
 
-    // Auth gates
-    if (status === "checking") return <CheckingScreen />
-    if (status === "need-auth" || status === "need-setup") {
-      if (mode === "totp") {
-        return <AuthScreen mode={mode} error={authError} onTotp={verifyTotp} />
+    // Auth gates — skipped in cloud mode (phone token = already authenticated)
+    if (!isCloudMode) {
+      if (status === "checking") return <CheckingScreen />
+      if (status === "need-auth" || status === "need-setup") {
+        if (mode === "totp") {
+          return <AuthScreen mode={mode} error={authError} onTotp={verifyTotp} />
+        }
+        if (isCapacitor()) {
+          return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
+        }
+        return <AuthScreen mode={mode} error={authError || ""} onTotp={verifyTotp} />
       }
-      if (isCapacitor()) {
-        return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} />
-      }
-      return <AuthScreen mode={mode} error={authError || ""} onTotp={verifyTotp} />
     }
   }
 
