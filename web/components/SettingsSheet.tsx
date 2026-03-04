@@ -174,7 +174,14 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
                 </button>
               ) : (
                 <button
-                  onClick={() => openExternal(AGENTLORE_PHONE_AUTH_URL)}
+                  onClick={() => {
+                    // Use system browser (_system) instead of in-app Chrome Custom Tab.
+                    // Chrome Custom Tab sometimes brings the app to foreground without
+                    // calling onNewIntent, so appUrlOpen never fires after the OAuth
+                    // redirect to agentrune://auth. The system browser (Chrome / Safari)
+                    // correctly triggers onNewIntent → Capacitor appUrlOpen.
+                    window.open(AGENTLORE_PHONE_AUTH_URL, "_system")
+                  }}
                   style={{
                     width: "100%",
                     padding: "12px",
