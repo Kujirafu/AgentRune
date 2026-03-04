@@ -306,32 +306,56 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
   const [status, setStatus] = useState("")
   const [error, setError] = useState("")
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [pollingCode, setPollingCode] = useState<string | null>(null)
+  // Persist polling code across app kills — resume on restart
+  const [pollingCode, setPollingCode] = useState<string | null>(
+    () => localStorage.getItem("agentrune_polling_code")
+  )
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Polling: check if mobile auth session was confirmed in the browser
+  const savePollingCode = (code: string | null) => {
+    setPollingCode(code)
+    if (code) localStorage.setItem("agentrune_polling_code", code)
+    else localStorage.removeItem("agentrune_polling_code")
+  }
+
+  const doPoll = useCallback(async (code: string) => {
+    try {
+      const res = await fetch(`https://agentlore.vercel.app/api/agentrune/mobile-auth/poll?code=${code}`)
+      const data = await res.json()
+      if (data.data?.status === "confirmed") {
+        clearInterval(pollingRef.current!)
+        savePollingCode(null)
+        localStorage.setItem("agentrune_phone_token", data.data.token)
+        if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
+        window.location.reload()
+      } else if (data.data?.status === "expired") {
+        clearInterval(pollingRef.current!)
+        savePollingCode(null)
+        setError(t("app.loginExpired"))
+        setStatus("")
+      }
+    } catch { /* network error, retry next tick */ }
+  }, [t])
+
+  // Poll every 3s; also poll immediately when app comes back to foreground
   useEffect(() => {
     if (!pollingCode) return
-    pollingRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`https://agentlore.vercel.app/api/agentrune/mobile-auth/poll?code=${pollingCode}`)
-        const data = await res.json()
-        if (data.data?.status === "confirmed") {
-          clearInterval(pollingRef.current!)
-          setPollingCode(null)
-          localStorage.setItem("agentrune_phone_token", data.data.token)
-          if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
-          window.location.reload()
-        } else if (data.data?.status === "expired") {
-          clearInterval(pollingRef.current!)
-          setPollingCode(null)
-          setError(t("app.loginExpired"))
-          setStatus("")
-        }
-      } catch { /* network error, retry next tick */ }
-    }, 3000)
+    doPoll(pollingCode) // immediate check on mount / code change
+    pollingRef.current = setInterval(() => doPoll(pollingCode), 3000)
     return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
-  }, [pollingCode, t])
+  }, [pollingCode, doPoll])
+
+  // Re-poll when app returns to foreground (AppState change)
+  useEffect(() => {
+    if (!pollingCode) return
+    let cleanup: (() => void) | undefined
+    import("@capacitor/app").then(({ App: CapApp }) => {
+      CapApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive && pollingCode) doPoll(pollingCode)
+      }).then((h) => { cleanup = () => h.remove() })
+    })
+    return () => { cleanup?.() }
+  }, [pollingCode, doPoll])
 
   // Parse QR text: extract server URL and optional pair code
   const parseQrUrl = (text: string): { serverUrl: string; pairCode: string | null } | null => {
@@ -459,7 +483,7 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
             const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
             // Must be synchronous — called directly in click handler, not after await
             window.open(authUrl, "_system")
-            setPollingCode(code)
+            savePollingCode(code)
             setStatus(t("app.waitingForBrowserLogin"))
           }}
           style={{
@@ -487,7 +511,7 @@ function ConnectScreen({ onConnected }: { onConnected: () => void }) {
         </button>
         {pollingCode && (
           <button
-            onClick={() => { setPollingCode(null); setStatus(""); }}
+            onClick={() => { savePollingCode(null); setStatus(""); }}
             style={{ fontSize: 12, color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer", marginBottom: 8, opacity: 0.6 }}
           >
             {t("app.cancel")}
