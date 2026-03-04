@@ -461,7 +461,6 @@ export function LaunchPad({
             onChange={(e) => setNewName(e.target.value)}
             placeholder={t("launchpad.projectName")}
             style={inputStyle}
-            autoFocus
           />
           <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
             <input

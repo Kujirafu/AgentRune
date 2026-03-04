@@ -798,6 +798,8 @@ export function App() {
   // Cloud mode: user logged in via AgentLore — reactive state so login completes without reload
   const [isCloudMode, setIsCloudMode] = useState(() => !!localStorage.getItem("agentrune_phone_token"))
   const [serverReady, setServerReady] = useState(() => IS_DEV_PREVIEW || !needsServerSetup())
+  // Reactive server URL — updated when Quick Connect is used, triggers data reload
+  const [serverUrl, setServerUrl] = useState(() => getServerUrl())
   // Skip local auth check in cloud mode — no local server to authenticate against
   const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW && !isCloudMode)
   const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
@@ -817,10 +819,12 @@ export function App() {
 
   const isAuthed = IS_DEV_PREVIEW || isCloudMode || status === "authenticated"
 
-  // Load projects after auth
+  // Load projects after auth (or when server URL changes via Quick Connect)
   useEffect(() => {
     if (!isAuthed) return
-    fetch(`${getApiBase()}/api/projects`)
+    const base = serverUrl || getApiBase()
+    if (!base) return
+    fetch(`${base}/api/projects`)
       .then((r) => r.json())
       .then((data) => {
         setProjects(data)
@@ -835,7 +839,7 @@ export function App() {
       .catch(() => { })
 
     // Load active sessions
-    fetch(`${getApiBase()}/api/sessions`)
+    fetch(`${base}/api/sessions`)
       .then((r) => r.json())
       .then((data: { id: string; projectId: string; agentId: string }[]) => {
         setActiveSessions(data.map((s) => ({
@@ -845,7 +849,7 @@ export function App() {
         })))
       })
       .catch(() => { })
-  }, [isAuthed])
+  }, [isAuthed, serverUrl])
 
   // Connect WS after auth
   useEffect(() => {
@@ -868,6 +872,29 @@ export function App() {
     setTheme(newTheme)
     localStorage.setItem("agentrune_theme", newTheme)
   }
+
+  // Deep link handler — receives agentrune://auth?token=...&userId=... from mobile-auth page
+  // This fires when Chrome redirects back to the app after successful login
+  useEffect(() => {
+    if (!isCapacitor()) return
+    let handle: { remove: () => void } | null = null
+    CapApp.addListener("appUrlOpen", ({ url }) => {
+      try {
+        const u = new URL(url)
+        if (u.hostname === "auth" || u.pathname === "/auth") {
+          const token = u.searchParams.get("token")
+          const userId = u.searchParams.get("userId")
+          if (token) {
+            localStorage.setItem("agentrune_phone_token", token)
+            if (userId) localStorage.setItem("agentrune_user_id", userId)
+            setIsCloudMode(true)
+            setServerReady(true)
+          }
+        }
+      } catch { /* invalid URL */ }
+    }).then((h) => { handle = h })
+    return () => { handle?.remove() }
+  }, [])
 
   // Android hardware back button
   const screenRef = useRef(screen)
@@ -1065,7 +1092,8 @@ export function App() {
       toggleTheme={toggleTheme}
       onCloudConnect={(url) => {
         localStorage.setItem("agentrune_server", url)
-        window.location.reload()
+        setServerUrl(url)
+        setServerReady(true)
       }}
     />
   )

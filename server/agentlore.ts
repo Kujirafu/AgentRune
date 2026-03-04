@@ -151,8 +151,12 @@ function writeMcpConfig(mcpConfig: object) {
 }
 
 export function getLocalIp(): string {
-  const nets = Object.values(networkInterfaces()).flat()
-  return nets.find((n) => n && n.family === "IPv4" && !n.internal)?.address ?? "127.0.0.1"
+  const nets = Object.values(networkInterfaces()).flat().filter(
+    (n) => n && n.family === "IPv4" && !n.internal
+  ) as { address: string }[]
+  // Prefer private routable addresses (WiFi/LAN) over link-local (169.254.x.x)
+  const preferred = nets.find((n) => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(n.address))
+  return (preferred ?? nets[0])?.address ?? "127.0.0.1"
 }
 
 function setupAutoStart(): void {
