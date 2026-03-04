@@ -1,5 +1,6 @@
 // web/components/EventCard.tsx
 import { useState, useRef, useCallback } from "react"
+import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import { useLocale } from "../lib/i18n/index.js"
 import type { AgentEvent } from "../../shared/types"
@@ -198,7 +199,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
             {event.title}
           </span>
         </div>
-        {contextMenu && <ContextMenuOverlay actions={menuActions} pos={contextMenu} onClose={closeMenu} />}
+        {contextMenu && createPortal(<ContextMenuOverlay actions={menuActions} pos={contextMenu} onClose={closeMenu} />, document.body)}
       </>
     )
   }
@@ -352,7 +353,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
           </div>
         )}
       </div>
-      {contextMenu && <ContextMenuOverlay actions={menuActions} pos={contextMenu} onClose={closeMenu} />}
+      {contextMenu && createPortal(<ContextMenuOverlay actions={menuActions} pos={contextMenu} onClose={closeMenu} />, document.body)}
     </>
   )
 }

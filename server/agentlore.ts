@@ -96,6 +96,7 @@ export async function registerDevice(
   config: AgentLoreConfig,
   localIp: string,
   PORT: number,
+  cloudSessionToken?: string,
 ) {
   try {
     const res = await fetch(`${AGENTLORE_BASE}/api/agentrune/register`, {
@@ -110,6 +111,7 @@ export async function registerDevice(
         port: PORT,
         platform: process.platform,
         protocol: "http",
+        cloudSessionToken: cloudSessionToken || undefined,
       }),
     })
 
@@ -121,8 +123,8 @@ export async function registerDevice(
       return
     }
 
-    const { data } = (await res.json()) as { data: { mcpConfig: object } }
-    writeMcpConfig(data.mcpConfig)
+    const { data } = (await res.json()) as { data: { mcpConfig: object | null } }
+    if (data.mcpConfig) writeMcpConfig(data.mcpConfig)
     checkAndSetupAutoStart(config)
   } catch {
     // Heartbeat failure is non-fatal
@@ -138,11 +140,20 @@ function writeMcpConfig(mcpConfig: object) {
     }
     const mcpServers = (mcpConfig as { mcpServers: Record<string, unknown> }).mcpServers
     const existingServers = existing.mcpServers as Record<string, unknown> | undefined
+    // Always update — API key may have been rotated by the server
+    existing.mcpServers = { ...existingServers, ...mcpServers }
+    mkdirSync(join(homedir(), ".claude"), { recursive: true })
+    writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
     if (!existingServers?.agentlore) {
-      existing.mcpServers = { ...existingServers, ...mcpServers }
-      mkdirSync(join(homedir(), ".claude"), { recursive: true })
-      writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
       console.log("  ✓ AgentLore MCP 已設定於 ~/.claude/settings.json")
+    }
+
+    // Also write key to ~/.agentrune/mcp-api-key as fallback for MCP
+    const agentloreEnv = (mcpServers as Record<string, { env?: { AGENTLORE_API_KEY?: string } }>)?.agentlore?.env
+    if (agentloreEnv?.AGENTLORE_API_KEY) {
+      const keyPath = join(homedir(), ".agentrune", "mcp-api-key")
+      mkdirSync(join(homedir(), ".agentrune"), { recursive: true })
+      writeFileSync(keyPath, agentloreEnv.AGENTLORE_API_KEY)
     }
   } catch {
     // Non-fatal

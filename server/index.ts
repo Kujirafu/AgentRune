@@ -608,11 +608,22 @@ server.listen(PORT, "0.0.0.0", async () => {
 
   console.log()
 
-  // AgentLore device registration
+  // AgentLore device registration — pass a cloud session token so phones can connect without pairing
+  // Persist cloudToken to disk so it survives server restarts
   const agentLoreConfig = await initAgentLore(PORT)
   if (agentLoreConfig) {
     const localIp = getLocalIp()
-    await registerDevice(agentLoreConfig, localIp, PORT)
-    setInterval(() => registerDevice(agentLoreConfig, localIp, PORT), 2 * 60 * 1000)
+    const cloudTokenPath = join(homedir(), ".agentrune", "cloud-token")
+    let cloudToken: string
+    if (existsSync(cloudTokenPath)) {
+      cloudToken = readFileSync(cloudTokenPath, "utf-8").trim()
+      sessionTokens.add(cloudToken)
+    } else {
+      cloudToken = issueSessionToken()
+      mkdirSync(join(homedir(), ".agentrune"), { recursive: true })
+      writeFileSync(cloudTokenPath, cloudToken)
+    }
+    await registerDevice(agentLoreConfig, localIp, PORT, cloudToken)
+    setInterval(() => registerDevice(agentLoreConfig, localIp, PORT, cloudToken), 2 * 60 * 1000)
   }
 })

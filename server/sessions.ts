@@ -56,7 +56,7 @@ export class SessionManager extends EventEmitter {
       cols: 120,
       rows: 30,
       cwd: project.cwd,
-      env: { ...process.env } as Record<string, string>,
+      env: (() => { const e = { ...process.env }; delete e.CLAUDECODE; return e })() as Record<string, string>,
     })
 
     const session: Session = {

@@ -13,6 +13,7 @@ interface CloudDevice {
   localIp: string
   port: number
   protocol: string
+  cloudSessionToken?: string
   status: "ONLINE" | "OFFLINE"
   lastSeen: string
 }
@@ -28,7 +29,7 @@ interface LaunchPadProps {
   onSelectProject: (id: string) => void
   theme: "light" | "dark"
   toggleTheme: () => void
-  onCloudConnect?: (url: string) => void
+  onCloudConnect?: (url: string, cloudSessionToken?: string) => void
 }
 
 // Helper to return the correct SVG icon for an agent ID
@@ -260,7 +261,8 @@ export function LaunchPad({
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {cloudDevices.map((device) => {
-              const url = `${device.protocol}://${device.localIp}:${device.port}`
+              // LAN servers always use HTTP — self-signed HTTPS certs fail in WebView
+              const url = `http://${device.localIp}:${device.port}`
               const isOnline = device.status === "ONLINE"
               return (
                 <button
@@ -268,7 +270,7 @@ export function LaunchPad({
                   onClick={() => {
                     if (onCloudConnect) {
                       localStorage.setItem("agentrune_server", url)
-                      onCloudConnect(url)
+                      onCloudConnect(url, device.cloudSessionToken)
                     } else {
                       window.open(url, "_blank")
                     }

@@ -731,7 +731,9 @@ function AuthScreen({
         </div>
 
         <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 28, lineHeight: 1.5, opacity: 0.8 }}>
-          Enter the 6-digit code from Google Authenticator
+          {mode === "pairing"
+            ? "Enter the 6-digit pairing code shown on your computer"
+            : "Enter the 6-digit code from Google Authenticator"}
         </div>
 
         <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }} onPaste={handlePaste}>
@@ -800,8 +802,13 @@ export function App() {
   const [serverReady, setServerReady] = useState(() => IS_DEV_PREVIEW || !needsServerSetup())
   // Reactive server URL — updated when Quick Connect is used, triggers data reload
   const [serverUrl, setServerUrl] = useState(() => getServerUrl())
-  // Skip local auth check in cloud mode — no local server to authenticate against
-  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(serverReady && !IS_DEV_PREVIEW && !isCloudMode)
+  // Cloud session token — pre-authorized WS token from AgentLore, skips local pairing
+  const [cloudSessionToken, setCloudSessionToken] = useState<string | null>(
+    () => localStorage.getItem("agentrune_cloud_token")
+  )
+  // Run local auth only when NO cloud session token (need pairing code / TOTP)
+  const shouldRunAuth = serverReady && !IS_DEV_PREVIEW && (!isCloudMode || (!!serverUrl && !cloudSessionToken))
+  const { status, mode, error: authError, sessionToken, pairWithCode, verifyTotp, recheckAuth } = useAuth(shouldRunAuth)
   const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
     { id: "demo", name: "Demo Project", cwd: "/home/user/project" },
   ] : [])
@@ -817,7 +824,10 @@ export function App() {
   )
   const { connect, send, on } = useWs()
 
-  const isAuthed = IS_DEV_PREVIEW || isCloudMode || status === "authenticated"
+  // Cloud mode without a server URL = browsing LaunchPad (Quick Connect list)
+  // Cloud mode WITH cloudSessionToken = pre-authorized, skip local auth
+  // Cloud mode WITH server URL but NO cloudSessionToken = must authenticate locally
+  const isAuthed = IS_DEV_PREVIEW || (isCloudMode && !serverUrl) || !!cloudSessionToken || status === "authenticated"
 
   // Load projects after auth (or when server URL changes via Quick Connect)
   useEffect(() => {
@@ -851,12 +861,13 @@ export function App() {
       .catch(() => { })
   }, [isAuthed, serverUrl])
 
-  // Connect WS after auth
+  // Connect WS after auth — use cloudSessionToken (from Quick Connect) or local sessionToken
+  const wsToken = cloudSessionToken || sessionToken
   useEffect(() => {
-    if (!isAuthed) return
-    const ws = connect(sessionToken)
+    if (!isAuthed || !wsToken) return
+    const ws = connect(wsToken)
     return () => { ws.close() }
-  }, [isAuthed, connect, sessionToken])
+  }, [isAuthed, connect, wsToken])
 
   // Theme: apply dark class to <html>
   useEffect(() => {
@@ -938,17 +949,20 @@ export function App() {
       return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} onLogin={handleLogin} />
     }
 
-    // Auth gates — skipped in cloud mode (phone token = already authenticated)
-    if (!isCloudMode) {
+    // Auth gates — skipped in cloud mode before Quick Connect, or when cloudSessionToken available
+    if ((!isCloudMode || serverUrl) && !cloudSessionToken) {
       if (status === "checking") return <CheckingScreen />
       if (status === "need-auth" || status === "need-setup") {
         if (mode === "totp") {
           return <AuthScreen mode={mode} error={authError} onTotp={verifyTotp} />
         }
-        if (isCapacitor()) {
+        // Non-cloud Capacitor: show full ConnectScreen with QR scanning
+        if (isCapacitor() && !isCloudMode) {
           return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} onLogin={handleLogin} />
         }
-        return <AuthScreen mode={mode} error={authError || ""} onTotp={verifyTotp} />
+        // Cloud mode or desktop: show code input screen
+        // For pairing mode use pairWithCode, for totp use verifyTotp
+        return <AuthScreen mode={mode} error={authError || ""} onTotp={mode === "pairing" ? pairWithCode : verifyTotp} />
       }
     }
   }
@@ -1090,10 +1104,14 @@ export function App() {
       }}
       theme={theme}
       toggleTheme={toggleTheme}
-      onCloudConnect={(url) => {
+      onCloudConnect={(url, token) => {
         localStorage.setItem("agentrune_server", url)
         setServerUrl(url)
         setServerReady(true)
+        if (token) {
+          localStorage.setItem("agentrune_cloud_token", token)
+          setCloudSessionToken(token)
+        }
       }}
     />
   )

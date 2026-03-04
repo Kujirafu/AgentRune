@@ -458,8 +458,8 @@ export function MissionControl({
         if (navigator.vibrate) navigator.vibrate([200, 100, 200])
       }
 
-      // ─── Interactive menu detection (numbered list + "Enter to select") ───
-      if (/enter to select/i.test(text) || /\u2191\u2193\s*to navigate/i.test(text)) {
+      // ─── Interactive menu detection (numbered list + navigation hint OR ❯ cursor) ───
+      if (/enter to select/i.test(text) || /\u2191\u2193\s*to navigate/i.test(text) || /\u276F\s*\d+\.\s/.test(text)) {
         const lines = text.split(/[\r\n]+/)
         const rawOptions: { label: string; index: number }[] = []
         let currentSelection = 0
