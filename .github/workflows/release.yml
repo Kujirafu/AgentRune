@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            pkg-target: node18-linux-x64
+            output: agentrune-linux-x64
+          - os: macos-13
+            pkg-target: node18-macos-x64
+            output: agentrune-macos-x64
+          - os: macos-14
+            pkg-target: node18-macos-arm64
+            output: agentrune-macos-arm64
+          - os: windows-latest
+            pkg-target: node18-win-x64
+            output: agentrune-win-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build:all
+
+      - name: Package binary
+        run: npx --yes @yao-pkg/pkg dist-server/index.js --target ${{ matrix.pkg-target }} --output dist-exe/${{ matrix.output }} --config pkg.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist-exe/${{ matrix.output }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

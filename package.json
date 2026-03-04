@@ -25,7 +25,14 @@
     "cap:sync": "npx cap sync android",
     "cap:build": "npm run build && npx cap sync android",
     "cap:open": "npx cap open android",
-    "typecheck": "npx tsc --noEmit"
+    "typecheck": "npx tsc --noEmit",
+    "build:exe": "node -e \"require('fs').mkdirSync('dist-exe',{recursive:true})\" && pkg dist-server/index.js --config pkg.json"
+  },
+  "pkg": {
+    "assets": [
+      "dist/**/*",
+      "node_modules/node-pty/build/Release/**"
+    ]
   },
   "dependencies": {
     "@capacitor/android": "^8.1.0",
@@ -46,6 +53,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@yao-pkg/pkg": "^5.12.0",
     "@capacitor/assets": "^3.0.5",
     "@types/express": "^5.0.0",
     "@types/react": "^19.1.0",
