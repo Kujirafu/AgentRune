@@ -128,10 +128,11 @@ export function MissionControl({
   const prevViewModeRef = useRef(viewMode)
   useEffect(() => {
     if (prevViewModeRef.current === "terminal" && viewMode === "board") {
-      // Clear dedup state so restored session tool calls aren't filtered out
+      // Clear dedup state so restored content isn't filtered out
       parseStateRef.current.seenTools.clear()
       scrollbackProcessedRef.current = false
       tuiBufferRef.current = ""
+      lastTuiMenuTime.current = 0
       // Re-attach to get fresh scrollback and events
       send({ type: "attach", projectId: project.id, agentId, sessionId })
     }
@@ -364,17 +365,15 @@ export function MissionControl({
     if (/^\/(resume|status)$/i.test(text.trim())) {
       scrollbackProcessedRef.current = false // allow fresh scrollback parsing
       tuiBufferRef.current = "" // clear TUI buffer for fresh resume menu detection
+      lastTuiMenuTime.current = 0 // reset cooldown so menu can be detected immediately
       // Re-attach after TUI renders to parse scrollback for resume menu.
-      // Two attempts: 2s (fast networks) and 5s (slow TUI render).
-      // Dedup in scrollback handler prevents duplicate events.
-      setTimeout(() => {
-        scrollbackProcessedRef.current = false
-        send({ type: "attach", projectId: project.id, agentId, sessionId })
-      }, 2000)
-      setTimeout(() => {
-        scrollbackProcessedRef.current = false
-        send({ type: "attach", projectId: project.id, agentId, sessionId })
-      }, 5000)
+      // Three attempts: 800ms (fast), 2s (medium), 5s (slow TUI render).
+      for (const delay of [800, 2000, 5000]) {
+        setTimeout(() => {
+          scrollbackProcessedRef.current = false
+          send({ type: "attach", projectId: project.id, agentId, sessionId })
+        }, delay)
+      }
     }
 
     // Insert user message as event for message-output correspondence
@@ -486,17 +485,29 @@ export function MissionControl({
     unsubs.push(on("event", () => {}))
 
     // Replay stored events on re-attach (from server adapter)
+    // Filter out tool call events — those belong in Details > Tools panel only.
+    const isToolEvent = (e: AgentEvent) => {
+      if (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") return true
+      if (e.type === "info") {
+        const t = e.title || ""
+        if (/^(Reading|Editing|Creating|Running command|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill)\b/.test(t)) return true
+        if (/^\d[\d,]*\s*tokens?\s/i.test(t)) return true
+        if (/^Thinking/i.test(t)) return true
+      }
+      return false
+    }
     unsubs.push(on("events_replay", (msg) => {
       const replayed = (msg.events as AgentEvent[]) || []
-      if (replayed.length > 0) {
+      const filtered = replayed.filter(e => !isToolEvent(e))
+      if (filtered.length > 0) {
         // Merge server events with any client-side events (dedupe by id)
         setEvents(prev => {
           const existingIds = new Set(prev.map(e => e.id))
-          const newEvents = replayed.filter(e => !existingIds.has(e.id))
+          const newEvents = filtered.filter(e => !existingIds.has(e.id))
           if (newEvents.length === 0) return prev
           return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
         })
-        const latest = replayed[replayed.length - 1]
+        const latest = filtered[filtered.length - 1]
         if (latest?.type === "decision_request" && latest.status === "waiting") {
           setAgentStatus("waiting")
         } else if (latest?.status === "in_progress") {
@@ -771,7 +782,9 @@ export function MissionControl({
           .replace(/\(loading[^)]*\)?/gi, "")
           .replace(/\s{2,}/g, " ")
           .trim()
-        if (respText.length > 3 && !/^thinking\.{0,3}$/i.test(respText) && !/^\d+\s*tokens/i.test(respText)) {
+        // Skip tool-like responses (Search(...), Read(...) etc.)
+        const looksLikeTool = /^(?:Read|Edit|Write|Bash|Glob|Grep|Agent|Search|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate)\s*\(/i.test(respText)
+        if (respText.length > 3 && !looksLikeTool && !/^thinking\.{0,3}$/i.test(respText) && !/^\d+\s*tokens/i.test(respText)) {
           const sig = "resp:" + respText.slice(0, 40)
           if (!ps.seenTools.has(sig)) {
             ps.seenTools.add(sig)
@@ -844,7 +857,8 @@ export function MissionControl({
             .replace(/thought\s+for\s+\d+s/gi, "")
             .replace(/\s{2,}/g, " ")
             .trim()
-          if (respText.length > 5 && !/^thinking\.{0,3}$/i.test(respText) && !/^\d+\s*tokens/i.test(respText)) {
+          const looksLikeTool = /^(?:Read|Edit|Write|Bash|Glob|Grep|Agent|Search|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate)\s*\(/i.test(respText)
+          if (respText.length > 5 && !looksLikeTool && !/^thinking\.{0,3}$/i.test(respText) && !/^\d+\s*tokens/i.test(respText)) {
             responseEvents.push({
               id: `h_${now}_${idx++}`, timestamp: now - 10000 + idx * 100,
               type: "info",
