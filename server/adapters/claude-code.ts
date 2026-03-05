@@ -296,9 +296,9 @@ export const claudeCodeAdapter: AgentAdapter = {
     // ─── TUI menu detection (e.g. /resume, /model) ───
     // Use ctx.buffer (full accumulated output) since TUI renders in many small chunks
     // Debounce: only fire once per 2s to avoid spamming as the TUI redraws
-    if (now - state.lastMenuTime > 2000) {
+    if (now - state.lastMenuTime > 1000) {
       const bufClean = stripAnsi(ctx.buffer)
-      const menuHeaderMatch = bufClean.match(/Resume Session\s*\((\d+)\s+of\s+(\d+)\)/i)
+      const menuHeaderMatch = bufClean.match(/Resume Session\s*\((\d+)\s+(?:of\s+\d+|total)\)/i)
       if (menuHeaderMatch) {
         state.lastMenuTime = now
         // Parse session entries using metadata as anchors (no newlines in TUI output)
@@ -330,7 +330,7 @@ export const claudeCodeAdapter: AgentAdapter = {
             timestamp: now,
             type: "decision_request",
             status: "waiting",
-            title: `Resume Session (${menuHeaderMatch[2]} total)`,
+            title: `Resume Session (${menuHeaderMatch[1]} total)`,
             raw: chunk,
             decision: {
               options: items.slice(0, 8).map((item) => ({

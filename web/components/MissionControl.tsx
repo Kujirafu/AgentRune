@@ -133,8 +133,8 @@ export function MissionControl({
       scrollbackProcessedRef.current = false
       tuiBufferRef.current = ""
       lastTuiMenuTime.current = 0
-      // Re-attach to get fresh scrollback and events
-      send({ type: "attach", projectId: project.id, agentId, sessionId })
+      // Request scrollback only (not full re-attach which sends events_replay too)
+      send({ type: "scrollback_request" })
     }
     prevViewModeRef.current = viewMode
   }, [viewMode, send, project.id, agentId, sessionId])
@@ -366,12 +366,13 @@ export function MissionControl({
       scrollbackProcessedRef.current = false // allow fresh scrollback parsing
       tuiBufferRef.current = "" // clear TUI buffer for fresh resume menu detection
       lastTuiMenuTime.current = 0 // reset cooldown so menu can be detected immediately
-      // Re-attach after TUI renders to parse scrollback for resume menu.
-      // Three attempts: 800ms (fast), 2s (medium), 5s (slow TUI render).
-      for (const delay of [800, 2000, 5000]) {
+      // Request scrollback (NOT full re-attach) after TUI renders.
+      // Full attach sends events_replay which can interfere with scrollback parsing.
+      // Three attempts: 1s, 3s, 6s (TUI needs time to fully render).
+      for (const delay of [1000, 3000, 6000]) {
         setTimeout(() => {
           scrollbackProcessedRef.current = false
-          send({ type: "attach", projectId: project.id, agentId, sessionId })
+          send({ type: "scrollback_request" })
         }, delay)
       }
     }
@@ -403,17 +404,17 @@ export function MissionControl({
     parseStateRef.current.seenTools.clear()
     tuiBufferRef.current = ""
     scrollbackProcessedRef.current = false
-    // Re-attach after decision to pick up restored session tool calls
+    // Request scrollback after session restore completes
     // Two attempts: 3s (quick resume) and 8s (slow restore)
     setTimeout(() => {
       parseStateRef.current.seenTools.clear()
       scrollbackProcessedRef.current = false
-      send({ type: "attach", projectId: project.id, agentId, sessionId })
+      send({ type: "scrollback_request" })
     }, 3000)
     setTimeout(() => {
       parseStateRef.current.seenTools.clear()
       scrollbackProcessedRef.current = false
-      send({ type: "attach", projectId: project.id, agentId, sessionId })
+      send({ type: "scrollback_request" })
     }, 8000)
   }, [sendInput, send, project.id, agentId, sessionId])
 
