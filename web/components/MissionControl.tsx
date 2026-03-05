@@ -540,31 +540,18 @@ export function MissionControl({
 
       const mkId = () => `c_${now}_${Math.random().toString(36).slice(2, 7)}`
 
-      // ─── Tool call events (the ONLY action events we generate) ───
-      const toolPatterns: [RegExp, AgentEvent["type"], (m: RegExpMatchArray) => string][] = [
-        [/●\s*Read\(([^)]+)\)/, "info", m => t("mc.read", { path: m[1] })],
-        [/●\s*Edit\(([^)]+)\)/, "file_edit", m => t("mc.edited", { path: m[1] })],
-        [/●\s*Write\(([^)]+)\)/, "file_create", m => t("mc.created", { path: m[1] })],
-        [/●\s*Bash\(([^)]*)\)/, "command_run", () => t("mc.runCommand")],
-        [/●\s*(Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(/, "info", m => m[1]],
-      ]
-
-      for (const [pattern, type, titleFn] of toolPatterns) {
-        const m = text.match(pattern)
-        if (m) {
-          const sig = m[0].slice(0, 60)
-          if (!ps.seenTools.has(sig)) {
-            ps.seenTools.add(sig)
-            if (ps.seenTools.size > 200) {
-              const oldest = [...ps.seenTools].slice(0, 100)
-              for (const k of oldest) ps.seenTools.delete(k)
-            }
-            setEvents(prev => [...prev, {
-              id: mkId(), timestamp: now,
-              type,
-              status: "in_progress" as const,
-              title: titleFn(m),
-            }].slice(-100))
+      // ─── Tool call detection (for dedup + status tracking only) ───
+      // Tool calls are shown in the Details > Tools panel via AnsiParser,
+      // NOT in the main events panel.
+      const toolRe = /●\s*(?:Read|Edit|Write|Bash|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(/
+      const isToolCall = toolRe.test(text)
+      if (isToolCall) {
+        const sig = (text.match(toolRe)?.[0] || "").slice(0, 60)
+        if (sig) {
+          ps.seenTools.add(sig)
+          if (ps.seenTools.size > 200) {
+            const oldest = [...ps.seenTools].slice(0, 100)
+            for (const k of oldest) ps.seenTools.delete(k)
           }
         }
       }
@@ -697,9 +684,9 @@ export function MissionControl({
             // Only set cooldown AFTER successfully finding items
             lastTuiMenuTime.current = now
             setEvents(prev => {
-              // Don't duplicate resume menu (regardless of status)
+              // Don't duplicate if a waiting resume menu already exists
               const existing = prev.find(e =>
-                e.type === "decision_request" && e.title?.includes("Resume Session"))
+                e.type === "decision_request" && e.status === "waiting" && e.title?.includes("Resume Session"))
               if (existing) return prev
               return [...prev, {
                 id: mkId(), timestamp: now,
@@ -833,47 +820,49 @@ export function MissionControl({
       // Extract recent tool calls from scrollback (last 8000 chars)
       const tail = clean.slice(-8000)
 
-      // Only parse tool calls on first scrollback; skip on re-attach to prevent duplicates
-      const historyEvents: AgentEvent[] = []
-      const shouldParseToolCalls = !scrollbackProcessedRef.current
+      // Tool calls are shown in Details > Tools panel via AnsiParser.
+      // From scrollback, extract Claude's text responses for the events panel.
+      const shouldParse = !scrollbackProcessedRef.current
       scrollbackProcessedRef.current = true
       const now = Date.now()
-      const mkHId = (i: number) => `h_${now}_${i}`
 
-      // Find tool calls in history — only on first scrollback to prevent duplicates
-      if (shouldParseToolCalls) {
-        const toolRe = /●\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(([^)]*)\)/g
-        let tm
+      if (shouldParse) {
+        // Find Claude's ● responses (NOT tool calls) from scrollback
+        const toolCallRe = /●\s*(?:Read|Edit|Write|Bash|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(/
+        const responseRe = /●\s*([^●\n]{5,})/g
+        const responseEvents: AgentEvent[] = []
+        let rm
         let idx = 0
-        while ((tm = toolRe.exec(tail)) !== null) {
-          const typeMap: Record<string, AgentEvent["type"]> = {
-            Read: "info", Edit: "file_edit", Write: "file_create",
-            Bash: "command_run", Glob: "info", Grep: "info", Agent: "info",
-            WebFetch: "info", WebSearch: "info", NotebookEdit: "info",
-            Skill: "info", TaskCreate: "info", TaskUpdate: "info",
-            TaskList: "info", TaskGet: "info",
+        while ((rm = responseRe.exec(tail)) !== null) {
+          // Skip tool call lines
+          if (toolCallRe.test(rm[0])) continue
+          let respText = rm[1]
+            .replace(/[\x00-\x1f]/g, " ")
+            .replace(/[✦✱∗∴*]\s*[A-Z][a-z]+(?:-[a-z]+)*…/g, "")
+            .replace(/\(\d+\.?\d*s\s*·[^)]*\)?/g, "")
+            .replace(/[↑↓]\s*\d[\d,]*\s*tokens?/gi, "")
+            .replace(/thought\s+for\s+\d+s/gi, "")
+            .replace(/\s{2,}/g, " ")
+            .trim()
+          if (respText.length > 5 && !/^thinking\.{0,3}$/i.test(respText) && !/^\d+\s*tokens/i.test(respText)) {
+            responseEvents.push({
+              id: `h_${now}_${idx++}`, timestamp: now - 10000 + idx * 100,
+              type: "info",
+              status: "completed",
+              title: respText.length > 80 ? respText.slice(0, 80) + "…" : respText,
+              detail: respText.length > 80 ? respText.slice(0, 400) : undefined,
+            })
           }
-          historyEvents.push({
-            id: mkHId(idx++), timestamp: now - 10000 + idx * 100,
-            type: typeMap[tm[1]] || "info",
-            status: "completed",
-            title: tm[1] === "Read" ? t("mc.read", { path: tm[2] }) : tm[1] === "Edit" ? t("mc.edited", { path: tm[2] }) :
-              tm[1] === "Write" ? t("mc.created", { path: tm[2] }) : tm[1] === "Bash" ? t("mc.ranCommand") : tm[1],
-            detail: tm[2]?.slice(0, 100) || undefined,
+        }
+        if (responseEvents.length > 0) {
+          const recent = responseEvents.slice(-10)
+          setEvents(prev => {
+            const existingTitles = new Set(prev.map(e => `${e.title}|${e.detail || ""}`))
+            const newEvents = recent.filter(e => !existingTitles.has(`${e.title}|${e.detail || ""}`))
+            if (newEvents.length === 0) return prev
+            return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
           })
         }
-      }
-
-      if (historyEvents.length > 0) {
-        // Show most recent 20 tool calls from scrollback history
-        // Dedup by title+detail (not ID) to prevent flooding on re-attach
-        const recent = historyEvents.slice(-20)
-        setEvents(prev => {
-          const existingTitles = new Set(prev.map(e => `${e.title}|${e.detail || ""}`))
-          const newEvents = recent.filter(e => !existingTitles.has(`${e.title}|${e.detail || ""}`))
-          if (newEvents.length === 0) return prev
-          return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
-        })
       }
 
       // ─── Resume TUI detection from scrollback (more reliable than live output) ───
@@ -908,7 +897,7 @@ export function MissionControl({
         if (limitedItems.length > 0) {
           const mkSId = () => `sb_${now}_${Math.random().toString(36).slice(2, 7)}`
           setEvents(prev => {
-            const existing = prev.find(e => e.type === "decision_request" && e.title?.includes("Resume Session"))
+            const existing = prev.find(e => e.type === "decision_request" && e.status === "waiting" && e.title?.includes("Resume Session"))
             if (existing) return prev
             return [...prev, {
               id: mkSId(), timestamp: now,
