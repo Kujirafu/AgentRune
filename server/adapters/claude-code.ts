@@ -17,6 +17,9 @@ interface AdapterState {
   lastThinkingTime: number
   lastResponseTime: number
   lastTokenTime: number
+  lastMenuTime: number      // Debounce TUI menu detection
+  resumeDetected: boolean   // Track if /resume was just selected
+  resumeSummaryEmitted: boolean
   seenTools: Set<string>    // Dedup tool calls by signature
   seenToolsExpire: number   // Clear seen set periodically
   pendingEdit: {
@@ -34,6 +37,9 @@ function getState(ctx: ParseContext): AdapterState {
       lastThinkingTime: 0,
       lastResponseTime: 0,
       lastTokenTime: 0,
+      lastMenuTime: 0,
+      resumeDetected: false,
+      resumeSummaryEmitted: false,
       seenTools: new Set<string>(),
       seenToolsExpire: Date.now() + 30000,
       pendingEdit: null,
@@ -83,6 +89,50 @@ export const claudeCodeAdapter: AgentAdapter = {
     const clean = stripAnsi(chunk)
     const text = state.pending + clean
     state.pending = ""
+
+    // ─── Detect resumed session: parse restored conversation from buffer ───
+    // After /resume completes, Claude Code restores the conversation history.
+    // The buffer fills up with the previous session's output.
+    // Detect this by looking for conversation restoration patterns in the buffer.
+    if (!state.resumeSummaryEmitted) {
+      const bufClean = stripAnsi(ctx.buffer)
+      // Claude Code shows "Resuming session..." or the conversation appears with ● markers
+      // Detect: buffer has multiple ● markers (restored conversation) and an idle prompt
+      const bulletCount = (bufClean.match(/●/g) || []).length
+      const hasPrompt = /[❯>$%]\s*$/.test(bufClean.split("\n").filter(Boolean).pop()?.trim() || "")
+      if (bulletCount >= 3 && hasPrompt && bufClean.length > 500) {
+        state.resumeSummaryEmitted = true
+        // Extract conversation items from buffer
+        const segments = bufClean.split(/●\s*/).filter(s => s.trim().length > 10)
+        const summaryItems: string[] = []
+        for (const seg of segments) {
+          const firstLine = seg.split("\n")[0].trim()
+            .replace(/[\x00-\x1f]/g, " ")
+            .trim()
+          if (firstLine.length > 5 && firstLine.length < 200) {
+            // Skip tool-call signatures and noise
+            if (/^(Read|Edit|Write|Bash|Glob|Grep|Agent)\(/.test(firstLine)) continue
+            if (/tokens?\s*used|Thinking|whirring/i.test(firstLine)) continue
+            summaryItems.push(firstLine.slice(0, 120))
+          }
+        }
+        if (summaryItems.length > 0) {
+          events.push({
+            id: makeEventId(),
+            timestamp: now,
+            type: "session_summary",
+            status: "completed",
+            title: "Session resumed",
+            detail: summaryItems.slice(-6).join("\n"),
+            raw: chunk,
+          })
+        }
+      }
+    }
+    // Reset resume state when new /resume is detected
+    if (/Resume Session/.test(text)) {
+      state.resumeSummaryEmitted = false
+    }
 
     // ─── Tool calls (checked independently, not exclusive) ───
     const toolPatterns: [RegExp, string, (m: RegExpMatchArray) => string, string?][] = [
@@ -241,6 +291,57 @@ export const claudeCodeAdapter: AgentAdapter = {
     } else if (/●/.test(text) && !toolCallInText && !hasToolCall && !responseMatch) {
       // ● found but not enough text after it yet — save for next chunk
       state.pending = text
+    }
+
+    // ─── TUI menu detection (e.g. /resume, /model) ───
+    // Use ctx.buffer (full accumulated output) since TUI renders in many small chunks
+    // Debounce: only fire once per 2s to avoid spamming as the TUI redraws
+    if (now - state.lastMenuTime > 2000) {
+      const bufClean = stripAnsi(ctx.buffer)
+      const menuHeaderMatch = bufClean.match(/Resume Session\s*\((\d+)\s+of\s+(\d+)\)/i)
+      if (menuHeaderMatch) {
+        state.lastMenuTime = now
+        // Parse session entries using metadata as anchors (no newlines in TUI output)
+        const metaRe = /(\d+\s+(?:minutes?|hours?|days?|seconds?)\s+ago)\s+[·•∙⋅]\s+(\S+)\s+[·•∙⋅]\s+(\d[\d.]*[KMGT]?B)/gi
+        const metaMatches: { index: number; end: number; time: string; branch: string; size: string }[] = []
+        let mm
+        while ((mm = metaRe.exec(bufClean)) !== null) {
+          metaMatches.push({ index: mm.index, end: mm.index + mm[0].length, time: mm[1], branch: mm[2], size: mm[3] })
+        }
+        const items: { label: string; index: number }[] = []
+        for (let i = 0; i < metaMatches.length; i++) {
+          const prevEnd = i === 0
+            ? (bufClean.indexOf("Search...") >= 0 ? bufClean.indexOf("Search...") + 9 : 0)
+            : metaMatches[i - 1].end
+          let title = bufClean.slice(prevEnd, metaMatches[i].index).replace(/[\x00-\x1f]/g, " ").trim()
+          title = title.replace(/^[❯>→\s·]+/, "").trim()
+          title = title.replace(/^\d[\d.]*[KMGT]?B\s*/i, "").trim()
+          if (/Resume Session|Search\.\.\.|Ctrl\+|Esc/i.test(title)) continue
+          if (title.length > 3) {
+            items.push({
+              label: `${title.slice(0, 60)}\n${metaMatches[i].time} · ${metaMatches[i].branch} · ${metaMatches[i].size}`,
+              index: items.length,
+            })
+          }
+        }
+        if (items.length > 0) {
+          events.push({
+            id: makeEventId(),
+            timestamp: now,
+            type: "decision_request",
+            status: "waiting",
+            title: `Resume Session (${menuHeaderMatch[2]} total)`,
+            raw: chunk,
+            decision: {
+              options: items.slice(0, 8).map((item) => ({
+                label: item.label,
+                input: "\x1b[B".repeat(item.index) + "\r",
+                style: "primary" as const,
+              })),
+            },
+          })
+        }
+      }
     }
 
     // ─── Token usage (throttle: 5s) ───

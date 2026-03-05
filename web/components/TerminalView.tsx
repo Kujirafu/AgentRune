@@ -50,8 +50,9 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
   const promptReadyRef = useRef(false)
   const parserRef = useRef(new AnsiParser())
 
-  // Force re-render for parser blocks
+  // Force re-render for parser blocks (debounced to avoid jank during scroll)
   const [, setParserTick] = useState(0)
+  const parserTickTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const agent = AGENTS.find((a) => a.id === agentId)
 
@@ -105,6 +106,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       sendInput(text)
       return
     }
+    if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
     if (!text.trim()) return  // Don't send empty commands
     // Send text first, then Enter separately after a delay.
     // TUI apps like Claude Code process input as a stream — if text+\r arrives
@@ -230,6 +232,84 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     })
     resizeObs.observe(termRef.current)
 
+    // Mobile touch scroll: xterm disableStdin=true may break touch scrolling
+    // We manually translate vertical touch drags into scrollLines() calls
+    // with sensitivity multiplier and momentum/inertia for smooth scrolling
+    if (isMobile) {
+      const el = termRef.current
+      let touchY = 0
+      let accum = 0
+      let velocity = 0
+      let lastTime = 0
+      let momentumId = 0
+      const lineH = term.options.fontSize ? term.options.fontSize * 1.2 : 16
+      const sensitivity = 2.5 // scroll 2.5x faster than finger movement
+
+      const stopMomentum = () => {
+        if (momentumId) { cancelAnimationFrame(momentumId); momentumId = 0 }
+      }
+
+      const onTouchStart = (e: TouchEvent) => {
+        stopMomentum()
+        touchY = e.touches[0].clientY
+        accum = 0
+        velocity = 0
+        lastTime = Date.now()
+      }
+      const onTouchMove = (e: TouchEvent) => {
+        const now = Date.now()
+        const dt = Math.max(now - lastTime, 1)
+        const dy = touchY - e.touches[0].clientY // positive = scroll down
+        touchY = e.touches[0].clientY
+        lastTime = now
+
+        // Track velocity for momentum (pixels per ms)
+        velocity = 0.7 * velocity + 0.3 * (dy / dt)
+
+        accum += dy * sensitivity
+        const lines = Math.trunc(accum / lineH)
+        if (lines !== 0) {
+          term.scrollLines(lines)
+          accum -= lines * lineH
+        }
+        // Only prevent default when actually scrolling (threshold=5px)
+        // Lower threshold causes browser to skip native scroll optimizations
+        if (Math.abs(dy) > 5) e.preventDefault()
+      }
+      const onTouchEnd = () => {
+        // Momentum: continue scrolling with decaying velocity
+        let v = velocity * sensitivity // px/ms scaled
+        const friction = 0.95
+        const tick = () => {
+          v *= friction
+          if (Math.abs(v) < 0.01) { momentumId = 0; return }
+          accum += v * 16 // ~16ms per frame
+          const lines = Math.trunc(accum / lineH)
+          if (lines !== 0) {
+            term.scrollLines(lines)
+            accum -= lines * lineH
+          }
+          momentumId = requestAnimationFrame(tick)
+        }
+        if (Math.abs(v) > 0.05) {
+          momentumId = requestAnimationFrame(tick)
+        }
+      }
+      el.addEventListener("touchstart", onTouchStart, { passive: true })
+      el.addEventListener("touchmove", onTouchMove, { passive: false })
+      el.addEventListener("touchend", onTouchEnd, { passive: true })
+
+      return () => {
+        stopMomentum()
+        resizeObs.disconnect()
+        el.removeEventListener("touchstart", onTouchStart)
+        el.removeEventListener("touchmove", onTouchMove)
+        el.removeEventListener("touchend", onTouchEnd)
+        term.dispose()
+        xtermRef.current = null
+      }
+    }
+
     return () => {
       resizeObs.disconnect()
       term.dispose()
@@ -245,9 +325,14 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       const data = msg.data as string
       xtermRef.current?.write(data)
 
-      // Feed ANSI parser
+      // Feed ANSI parser (debounce re-render to avoid scroll jank)
       parserRef.current.feed(data)
-      setParserTick((t) => t + 1)
+      if (!parserTickTimer.current) {
+        parserTickTimer.current = setTimeout(() => {
+          parserTickTimer.current = null
+          setParserTick((t) => t + 1)
+        }, 300)
+      }
 
       // Detect shell prompt
       if (/[$%>]\s*$/.test(data)) {
@@ -390,11 +475,8 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         gap: 8,
         padding: "10px 14px",
         paddingTop: "calc(10px + env(safe-area-inset-top, 0px))",
-        background: "rgba(30,41,59,0.75)",
-        backdropFilter: "blur(24px)",
-        WebkitBackdropFilter: "blur(24px)",
+        background: "rgba(15,23,42,0.97)",
         borderBottom: "1px solid rgba(255,255,255,0.12)",
-        boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
         flexShrink: 0,
         userSelect: "none",
       }}>
@@ -405,7 +487,6 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.12)",
             background: "rgba(255,255,255,0.06)",
-            backdropFilter: "blur(12px)",
             color: "rgba(255,255,255,0.6)",
             fontSize: 16,
             cursor: "pointer",
@@ -472,7 +553,6 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.12)",
             background: "rgba(255,255,255,0.06)",
-            backdropFilter: "blur(12px)",
             color: "rgba(255,255,255,0.6)",
             fontSize: 16,
             cursor: "pointer",
@@ -488,7 +568,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       {/* Terminal output */}
       <div
         ref={termRef}
-        style={{ flex: 1, padding: 4, overflow: "hidden" }}
+        style={{ flex: 1, padding: 4, overflow: "hidden", willChange: "transform" }}
       />
 
       {/* Smart suggestions */}

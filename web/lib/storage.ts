@@ -37,6 +37,14 @@ export function getApiBase(): string {
   return localStorage.getItem("agentrune_server") || ""
 }
 
+export function getVolumeKeysEnabled(): boolean {
+  return localStorage.getItem("agentrune_volume_keys") === "true"
+}
+
+export function setVolumeKeysEnabled(enabled: boolean) {
+  localStorage.setItem("agentrune_volume_keys", enabled ? "true" : "false")
+}
+
 export function getLastProject(): string | null {
   return localStorage.getItem("agentrune_last_project")
 }

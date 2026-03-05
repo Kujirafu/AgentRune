@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession } from "./lib/types"
 import type { AgentEvent } from "../shared/types"
-import { getLastProject, saveLastProject } from "./lib/storage"
+import { getLastProject, saveLastProject, getVolumeKeysEnabled } from "./lib/storage"
 import { LaunchPad } from "./components/LaunchPad"
 import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
@@ -175,12 +175,26 @@ function useAuth(serverReady: boolean) {
 function useWs() {
   const wsRef = useRef<WebSocket | null>(null)
   const handlersRef = useRef<Map<string, Set<(msg: Record<string, unknown>) => void>>>(new Map())
+  const tokenRef = useRef<string>("")
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Prevent duplicate connect() calls while a WebSocket is already connecting/open
+  const connectingRef = useRef(false)
 
-  const connect = useCallback((sessionToken: string) => {
+  const doConnect = useCallback((sessionToken: string) => {
+    // Avoid duplicate connections
+    if (connectingRef.current) return wsRef.current
+    const existing = wsRef.current
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return existing
+    }
+    connectingRef.current = true
+    tokenRef.current = sessionToken
+
     const ws = new WebSocket(`${getWsUrl()}?token=${encodeURIComponent(sessionToken)}`)
     wsRef.current = ws
 
     ws.onopen = () => {
+      connectingRef.current = false
       const handlers = handlersRef.current.get("__ws_open__")
       if (handlers) for (const h of handlers) h({})
     }
@@ -192,13 +206,75 @@ function useWs() {
     }
 
     ws.onclose = () => {
+      connectingRef.current = false
       const handlers = handlersRef.current.get("__ws_close__")
       if (handlers) for (const h of handlers) h({})
-      setTimeout(() => connect(sessionToken), 500)
+      // Auto-reconnect with short delay
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = setTimeout(() => doConnect(tokenRef.current), 300)
+    }
+
+    ws.onerror = () => {
+      // onerror is always followed by onclose, so just reset flag
+      connectingRef.current = false
     }
 
     return ws
   }, [])
+
+  // Force-reconnect: kill current WS and reconnect immediately
+  // Used when the app comes back from background
+  const forceReconnect = useCallback(() => {
+    if (!tokenRef.current) return
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    connectingRef.current = false
+    const existing = wsRef.current
+    if (existing) {
+      // Detach handlers to prevent the onclose auto-reconnect from racing
+      existing.onclose = null
+      existing.onerror = null
+      existing.onmessage = null
+      existing.onopen = null
+      try { existing.close() } catch {}
+      wsRef.current = null
+    }
+    // Fire close handlers so UI updates immediately
+    const handlers = handlersRef.current.get("__ws_close__")
+    if (handlers) for (const h of handlers) h({})
+    // Reconnect immediately
+    doConnect(tokenRef.current)
+  }, [doConnect])
+
+  // Listen for app resume (visibility change + Capacitor appStateChange)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return
+      if (!tokenRef.current) return
+      const ws = wsRef.current
+      // If WS is gone or not open, force reconnect immediately
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        forceReconnect()
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible)
+
+    let capHandle: { remove: () => void } | null = null
+    if (isCapacitor()) {
+      CapApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive && tokenRef.current) {
+          const ws = wsRef.current
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            forceReconnect()
+          }
+        }
+      }).then((h) => { capHandle = h })
+    }
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible)
+      capHandle?.remove()
+    }
+  }, [forceReconnect])
 
   const send = useCallback((msg: Record<string, unknown>): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -218,7 +294,7 @@ function useWs() {
     }
   }, [])
 
-  return { connect, send, on }
+  return { connect: doConnect, send, on }
 }
 
 // ─── QR Scanner fullscreen view ──────────────────────────────────
@@ -819,6 +895,7 @@ export function App() {
   const [viewMode, setViewMode] = useState<"board" | "terminal">("board")
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
   const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
+  const [allDiffEvents, setAllDiffEvents] = useState<AgentEvent[]>([])
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
@@ -865,8 +942,9 @@ export function App() {
   const wsToken = cloudSessionToken || sessionToken
   useEffect(() => {
     if (!isAuthed || !wsToken) return
-    const ws = connect(wsToken)
-    return () => { ws.close() }
+    connect(wsToken)
+    // Cleanup: don't close on re-render — useWs manages its own lifecycle.
+    // Only close on full unmount (App teardown).
   }, [isAuthed, connect, wsToken])
 
   // Theme: apply dark class to <html>
@@ -912,6 +990,18 @@ export function App() {
   const viewModeRef = useRef(viewMode)
   useEffect(() => { screenRef.current = screen }, [screen])
   useEffect(() => { viewModeRef.current = viewMode }, [viewMode])
+
+  // Volume keys → arrow up/down (global, sent to terminal via WebSocket)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      if (!getVolumeKeysEnabled()) return // respect setting toggle
+      const dir = (e as CustomEvent).detail
+      const seq = dir === "up" ? "\x1b[A" : "\x1b[B"
+      send({ type: "input", data: seq })
+    }
+    document.addEventListener("volume-key", handler)
+    return () => document.removeEventListener("volume-key", handler)
+  }, [send])
 
   useEffect(() => {
     if (!isCapacitor()) return
@@ -1070,6 +1160,7 @@ export function App() {
               on={on}
               onBack={() => { setScreen("launchpad"); setViewMode("board") }}
               onOpenTerminal={() => setViewMode("terminal")}
+              viewMode={viewMode}
               projects={projects}
               activeSessions={activeSessions}
               onSwitchSession={handleResume}
@@ -1078,10 +1169,13 @@ export function App() {
               theme={theme}
               toggleTheme={toggleTheme}
               onEventDiff={(e) => setDiffEvent(e)}
+              onDiffEventsChange={setAllDiffEvents}
             />
             <DiffPanel
               event={diffEvent}
+              allDiffEvents={allDiffEvents}
               onClose={() => setDiffEvent(null)}
+              onSelectEvent={(e) => setDiffEvent(e)}
             />
           </div>
         </>

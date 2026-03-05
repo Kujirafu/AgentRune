@@ -401,6 +401,29 @@ const clientEventSessions = new Map<WebSocket, string>()
 const sessionEngines = new Map<string, ParseEngine>()
 const sessionRecentEvents = new Map<string, AgentEvent[]>()
 
+// Persist events to disk so they survive server restarts
+const EVENTS_DIR = join(homedir(), ".agentrune", "events")
+try { mkdirSync(EVENTS_DIR, { recursive: true }) } catch { /* ok */ }
+
+function persistEvents(sessionId: string, events: AgentEvent[]) {
+  try {
+    // Keep only last 100 events per session, persist asynchronously
+    const capped = events.slice(-100)
+    const path = join(EVENTS_DIR, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
+    writeFileSync(path, JSON.stringify(capped))
+  } catch { /* ignore */ }
+}
+
+function loadPersistedEvents(sessionId: string): AgentEvent[] {
+  try {
+    const path = join(EVENTS_DIR, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, "utf-8"))
+    }
+  } catch { /* ignore */ }
+  return []
+}
+
 wss.on("connection", (ws, req) => {
   // Auth check for WebSocket
   if (auth.mode !== "none") {
@@ -460,11 +483,24 @@ wss.on("connection", (ws, req) => {
         }
 
         // Replay stored events so MissionControl shows them immediately
-        const storedEvents = sessionRecentEvents.get(session.id) || []
+        let storedEvents = sessionRecentEvents.get(session.id) || []
+        // Fall back to disk-persisted events if in-memory is empty
+        if (storedEvents.length === 0) {
+          storedEvents = loadPersistedEvents(session.id)
+          if (storedEvents.length > 0) {
+            sessionRecentEvents.set(session.id, storedEvents)
+            console.log(`[REPLAY] loaded ${storedEvents.length} events from disk for session=${session.id}`)
+          }
+        }
+        console.log(`[REPLAY] session=${session.id} storedEvents=${storedEvents.length}`)
         if (storedEvents.length > 0) {
+          for (const e of storedEvents.slice(-3)) {
+            console.log(`  [REPLAY] type=${e.type} title="${e.title}"`)
+          }
           ws.send(JSON.stringify({ type: "events_replay", events: storedEvents }))
         }
 
+        console.log(`[ATTACH] session=${session.id} resumed=${alreadyExisted} agent=${agentId}`)
         ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted }))
         break
       }
@@ -486,6 +522,17 @@ wss.on("connection", (ws, req) => {
       case "resize": {
         const sid = clientSessions.get(ws)
         if (sid) sessions.resize(sid, msg.cols as number, msg.rows as number)
+        break
+      }
+
+      case "scrollback_request": {
+        const sid = clientSessions.get(ws)
+        if (sid) {
+          const scrollback = sessions.getRecentScrollback(sid)
+          if (scrollback) {
+            ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
+          }
+        }
         break
       }
 
@@ -545,12 +592,13 @@ sessions.on("data", (sessionId: string, data: string) => {
     }
   }
 
-  // Store events in per-session list (cap at 100)
+  // Store events in per-session list (cap at 100) + persist to disk
   if (events.length > 0) {
     const list = sessionRecentEvents.get(sessionId)
     if (list) {
       list.push(...events)
       if (list.length > 100) list.splice(0, list.length - 100)
+      persistEvents(sessionId, list)
     }
   }
 

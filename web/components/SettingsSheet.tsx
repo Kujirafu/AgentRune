@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react"
 import type { ProjectSettings } from "../lib/types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
+import { getVolumeKeysEnabled, setVolumeKeysEnabled } from "../lib/storage"
 import { App } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 
@@ -24,9 +25,11 @@ const AGENTLORE_PHONE_AUTH_URL = "https://agentlore.vercel.app/api/agentrune/pho
 export function SettingsSheet({ open, settings, agentId, onChange, onClose }: SettingsSheetProps) {
   const { t, locale, setLocale } = useLocale()
   const [phoneToken, setPhoneToken] = useState<string | null>(null)
+  const [volumeKeys, setVolumeKeys] = useState(false)
 
   useEffect(() => {
     setPhoneToken(localStorage.getItem("agentrune_phone_token"))
+    setVolumeKeys(getVolumeKeysEnabled())
   }, [open])
 
   useEffect(() => {
@@ -316,6 +319,13 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
               icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>}
               active={settings.autoEdit}
               onChange={(v) => onChange({ ...settings, autoEdit: v })}
+            />
+            <ToggleCard
+              label={t("settings.volumeKeys") || "Volume Keys → ↑↓"}
+              description={t("settings.volumeKeysDesc") || "Use volume buttons as arrow keys for TUI navigation"}
+              icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></svg>}
+              active={volumeKeys}
+              onChange={(v) => { setVolumeKeys(v); setVolumeKeysEnabled(v) }}
             />
           </div>
         </div>

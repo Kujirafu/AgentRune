@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react"
+import { createPortal } from "react-dom"
+import { Clipboard } from "@capacitor/clipboard"
+import { App as CapApp } from "@capacitor/app"
 import type { SlashCommand } from "../lib/types"
 import { useLocale } from "../lib/i18n/index.js"
 
@@ -42,6 +45,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
   const [sentHistory, addSent] = useSentHistory()
   const inputRef = useRef<HTMLInputElement>(null)
   const historyRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null)
 
@@ -57,8 +61,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
   const hasSpeechSupport = typeof window !== "undefined" &&
     ("SpeechRecognition" in window || "webkitSpeechRecognition" in window)
 
-  const hasClipboardSupport = typeof navigator !== "undefined" &&
-    navigator.clipboard && typeof navigator.clipboard.readText === "function"
+  const hasClipboardSupport = true // Capacitor Clipboard plugin always available
 
   useEffect(() => {
     return () => {
@@ -102,17 +105,106 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     setIsListening(true)
   }
 
-  const handleClipboardPaste = async () => {
+  // ─── Clipboard history ───
+  const [showClipboard, setShowClipboard] = useState(false)
+  const [clipHistory, setClipHistory] = useState<{ text: string; time: number; isImage?: boolean }[]>(() => {
+    try { return JSON.parse(localStorage.getItem("clipboard_history") || "[]") } catch { return [] }
+  })
+
+  const saveClipHistory = (items: typeof clipHistory) => {
+    const capped = items.slice(0, 30) // keep last 30
+    setClipHistory(capped)
+    localStorage.setItem("clipboard_history", JSON.stringify(capped))
+  }
+
+  const addToClipHistory = (text: string, isImage = false) => {
+    if (!text || text.length < 1) return
+    // Dedupe: don't add if same as most recent
+    setClipHistory(prev => {
+      if (prev[0]?.text === text) return prev
+      const next = [{ text, time: Date.now(), isImage }, ...prev.filter(h => h.text !== text)].slice(0, 30)
+      localStorage.setItem("clipboard_history", JSON.stringify(next))
+      return next
+    })
+  }
+
+  // Read system clipboard and add to history
+  const readSystemClipboard = async () => {
     try {
-      const text = await navigator.clipboard.readText()
-      if (text) {
-        setInput(prev => prev + text)
-        inputRef.current?.focus()
+      const { type, value } = await Clipboard.read()
+      if (value && (type === "string" || type === "text/plain" || type?.startsWith("text/"))) {
+        addToClipHistory(value)
+      } else if (type?.startsWith("image/") && value) {
+        addToClipHistory(value, true)
       }
     } catch {
-      // Clipboard access denied — silently fail
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text) addToClipHistory(text)
+      } catch { /* ok */ }
     }
   }
+
+  const handleClipboardOpen = async () => {
+    await readSystemClipboard()
+    setShowClipboard(true)
+  }
+
+  // Auto-read clipboard when app regains focus (builds history over time)
+  useEffect(() => {
+    const onFocus = () => { readSystemClipboard() }
+    window.addEventListener("focus", onFocus)
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") readSystemClipboard()
+    })
+    return () => { window.removeEventListener("focus", onFocus) }
+  }, [])
+
+  const handleClipItemPaste = (item: typeof clipHistory[0]) => {
+    if (item.isImage && onImagePaste) {
+      onImagePaste(item.text, "clipboard.png")
+    } else {
+      setInput(prev => prev + item.text)
+      inputRef.current?.focus()
+    }
+    setShowClipboard(false)
+  }
+
+  // Hardware back button closes clipboard panel
+  useEffect(() => {
+    if (!showClipboard) return
+    const listener = CapApp.addListener("backButton", () => {
+      setShowClipboard(false)
+    })
+    return () => { listener.then(h => h.remove()) }
+  }, [showClipboard])
+
+  // Document-level paste listener: catches image paste from Samsung keyboard clipboard
+  // that <input type="text"> can't handle natively
+  useEffect(() => {
+    const handleDocPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items || !onImagePaste) return
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          e.preventDefault()
+          const file = item.getAsFile()
+          if (!file) return
+          const reader = new FileReader()
+          reader.onload = () => {
+            const base64 = reader.result as string
+            setPastePreview(base64)
+            addToClipHistory(base64, true)
+            onImagePaste(base64, `paste.${file.type.split("/")[1] || "png"}`)
+          }
+          reader.readAsDataURL(file)
+          return
+        }
+      }
+    }
+    document.addEventListener("paste", handleDocPaste)
+    return () => document.removeEventListener("paste", handleDocPaste)
+  }, [onImagePaste])
 
   useEffect(() => {
     if (autoFocus) {
@@ -129,10 +221,20 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
 
   const handleSend = () => {
     const trimmed = input.trim()
-    if (!trimmed) return
-    addSent({ text: trimmed, time: Date.now() })
-    onSend(input)
+    if (!trimmed && !pastePreview) {
+      // Empty input (no image) → send Enter key to terminal (for TUI menu confirmation)
+      onSend("\r")
+      return
+    }
+    if (trimmed) {
+      addSent({ text: trimmed, time: Date.now() })
+      onSend(input)
+    } else if (pastePreview) {
+      // Image attached but no text — send empty message to trigger submission
+      onSend("")
+    }
     setInput("")
+    setPastePreview(null)
     inputRef.current?.focus()
   }
 
@@ -151,6 +253,10 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     const items = e.clipboardData?.items
     if (!items) return
 
+    // Save pasted text to clipboard history
+    const pastedText = e.clipboardData?.getData("text/plain")
+    if (pastedText) addToClipHistory(pastedText)
+
     for (const item of items) {
       if (item.type.startsWith("image/")) {
         e.preventDefault()
@@ -161,6 +267,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         reader.onload = () => {
           const base64 = reader.result as string
           setPastePreview(base64)
+          addToClipHistory(base64, true)
           onImagePaste?.(base64, `paste.${file.type.split("/")[1] || "png"}`)
         }
         reader.readAsDataURL(file)
@@ -169,13 +276,30 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     }
   }
 
+  const handleFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) continue
+      const reader = new FileReader()
+      reader.onload = () => {
+        const base64 = reader.result as string
+        setPastePreview(base64)
+        onImagePaste?.(base64, file.name || `image.${file.type.split("/")[1] || "png"}`)
+      }
+      reader.readAsDataURL(file)
+    }
+    // Reset so same file can be picked again
+    e.target.value = ""
+  }
+
   // Tap to resend
   const handleResend = (text: string) => {
     setInput(text)
     inputRef.current?.focus()
   }
 
-  const hasInput = input.trim().length > 0
+  const hasInput = input.trim().length > 0 || !!pastePreview
 
   // Slash command suggestions
   const filteredSlash = useMemo(() => {
@@ -389,10 +513,35 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         )}
 
-        {/* Paste button */}
+        {/* Image pick button */}
+        {onImagePaste && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFilePick}
+              style={{ display: "none" }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              title={t("input.attachImage") || "Attach image"}
+              style={actionBtnStyle}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        {/* Clipboard button — opens editable clipboard panel */}
         {hasClipboardSupport && (
           <button
-            onClick={handleClipboardPaste}
+            onClick={handleClipboardOpen}
             title={t("input.pasteClipboard")}
             style={actionBtnStyle}
           >
@@ -473,7 +622,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         )}
 
-        {/* Send button — circular glass */}
+        {/* Send / Enter button — circular glass */}
         <button
           onClick={handleSend}
           style={{
@@ -498,12 +647,122 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
             justifyContent: "center",
           }}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13" />
-            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
+          {hasInput ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="9 10 4 15 9 20" />
+              <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+            </svg>
+          )}
         </button>
       </div>
+
+      {/* Clipboard history panel — portal to escape overflow:hidden parents */}
+      {showClipboard && createPortal(
+        <div
+          onClick={() => setShowClipboard(false)}
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "rgba(0,0,0,0.6)",
+            backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            zIndex: 10000,
+            display: "flex", flexDirection: "column",
+            padding: "60px 16px 16px",
+          }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{
+            flex: 1, display: "flex", flexDirection: "column", minHeight: 0,
+          }}>
+            {/* Header */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12,
+              marginBottom: 16,
+            }}>
+              <button onClick={() => setShowClipboard(false)} style={{
+                width: 36, height: 36, borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.15)",
+                background: "rgba(255,255,255,0.05)",
+                color: "rgba(255,255,255,0.7)",
+                fontSize: 16, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0,
+              }}>
+                {"←"}
+              </button>
+              <div style={{ flex: 1, fontSize: 18, fontWeight: 700, color: "#fff" }}>
+                {t("input.clipboard") || "Clipboard"}
+              </div>
+              <button onClick={() => { saveClipHistory([]); }} style={{
+                padding: "6px 12px", borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.15)",
+                background: "rgba(255,255,255,0.05)",
+                color: "rgba(255,255,255,0.6)",
+                fontSize: 12, cursor: "pointer",
+                flexShrink: 0,
+              }}>
+                {t("input.clearHistory") || "Clear"}
+              </button>
+            </div>
+
+            {/* History list */}
+            <div style={{
+              flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8,
+              WebkitOverflowScrolling: "touch" as never,
+            }}>
+              {clipHistory.length === 0 && (
+                <div style={{
+                  textAlign: "center", padding: 40,
+                  color: "rgba(255,255,255,0.4)", fontSize: 14,
+                }}>
+                  {t("input.clipboardEmpty") || "No clipboard history"}
+                </div>
+              )}
+              {clipHistory.map((item, i) => (
+                <button
+                  key={`${item.time}_${i}`}
+                  onClick={() => handleClipItemPaste(item)}
+                  style={{
+                    textAlign: "left",
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    background: "rgba(255,255,255,0.05)",
+                    backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+                    color: "#fff",
+                    fontSize: 13,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    cursor: "pointer",
+                    transition: "all 0.2s",
+                    display: "flex", flexDirection: "column", gap: 4,
+                  }}
+                >
+                  {item.isImage ? (
+                    <img src={item.text} alt="" style={{
+                      maxWidth: "100%", maxHeight: 80, borderRadius: 8, objectFit: "cover",
+                    }} />
+                  ) : (
+                    <div style={{
+                      overflow: "hidden", textOverflow: "ellipsis",
+                      display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" as never,
+                      lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-all",
+                    }}>
+                      {item.text}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)" }}>
+                    {new Date(item.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   )
 }

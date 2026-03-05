@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import type { Project, ProjectSettings, AppSession } from "../lib/types"
 import type { AgentEvent } from "../../shared/types"
 import { AGENTS } from "../lib/types"
-import { getSettings, saveSettings, addRecentCommand } from "../lib/storage"
+import { getSettings, saveSettings, addRecentCommand, getApiBase } from "../lib/storage"
 import { EventCard } from "./EventCard"
 import type { AgentStatus } from "./StatusIndicator"
 import { QuickActions } from "./QuickActions"
@@ -34,6 +34,8 @@ interface MissionControlProps {
   theme?: "light" | "dark"
   toggleTheme?: () => void
   onEventDiff?: (event: AgentEvent) => void
+  onDiffEventsChange?: (events: AgentEvent[]) => void
+  viewMode?: "board" | "terminal"
 }
 
 // Session label helpers (localStorage-backed)
@@ -62,10 +64,13 @@ export function MissionControl({
   theme,
   toggleTheme,
   onEventDiff,
+  onDiffEventsChange,
+  viewMode,
 }: MissionControlProps) {
   const { t } = useLocale()
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle")
+  const prevSessionIdRef = useRef(sessionId)
   const [wsConnected, setWsConnected] = useState(true)
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
   const [showSettings, setShowSettings] = useState(false)
@@ -76,11 +81,27 @@ export function MissionControl({
   const [sessionLabels, setSessionLabels] = useState<Record<string, string>>(getSessionLabels)
   const [panel, setPanel] = useState(1) // 0=sessions, 1=main, 2=thinking
   const [viewH, setViewH] = useState(window.innerHeight)
+  const fullHeightRef = useRef(window.innerHeight)
+  const keyboardH = Math.max(0, fullHeightRef.current - viewH)
   const scrollRef = useRef<HTMLDivElement>(null)
   const slideRef = useRef<HTMLDivElement>(null)
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const promptReadyRef = useRef(false)
+  const scrollbackProcessedRef = useRef(false)
   const agent = AGENTS.find((a) => a.id === agentId)
+
+  // Reset events when switching sessions
+  useEffect(() => {
+    if (prevSessionIdRef.current !== sessionId) {
+      prevSessionIdRef.current = sessionId
+      setEvents([])
+      setAgentStatus("idle")
+      parserRef.current = new AnsiParser()
+      setParsedBlocks([])
+      setUsageTokens({ input: 0, output: 0 })
+      scrollbackProcessedRef.current = false
+    }
+  }, [sessionId])
 
   // Client-side event detection state (parses "output" WS messages directly)
   const parseStateRef = useRef({
@@ -90,6 +111,9 @@ export function MissionControl({
     pending: "",
     isThinking: false,
   })
+  // Rolling buffer for TUI detection (accumulates stripped output, capped at 8KB)
+  const tuiBufferRef = useRef("")
+  const lastTuiMenuTime = useRef(0)
   // AnsiParser for structured output blocks (thinking/code/tools)
   const parserRef = useRef(new AnsiParser())
   const [parsedBlocks, setParsedBlocks] = useState<OutputBlock[]>([])
@@ -98,6 +122,21 @@ export function MissionControl({
   const [usageTokens, setUsageTokens] = useState<{ input: number; output: number }>({ input: 0, output: 0 })
   const [showProjectUsage, setShowProjectUsage] = useState(false)
   const projectTotalTokens = useRef<{ input: number; output: number }>({ input: 0, output: 0 })
+
+  // When returning from terminal view to board, re-parse scrollback to catch
+  // events that happened while user was in terminal (e.g. /resume session selection)
+  const prevViewModeRef = useRef(viewMode)
+  useEffect(() => {
+    if (prevViewModeRef.current === "terminal" && viewMode === "board") {
+      // Clear dedup state so restored session tool calls aren't filtered out
+      parseStateRef.current.seenTools.clear()
+      scrollbackProcessedRef.current = false
+      tuiBufferRef.current = ""
+      // Re-attach to get fresh scrollback and events
+      send({ type: "attach", projectId: project.id, agentId, sessionId })
+    }
+    prevViewModeRef.current = viewMode
+  }, [viewMode, send, project.id, agentId, sessionId])
 
   // Long-press for session context menu
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -122,12 +161,17 @@ export function MissionControl({
   const dragRef = useRef({
     startX: 0, startY: 0, lastX: 0, lastY: 0,
     direction: "" as "" | "h" | "v",
-    isDragging: false, offset: 0,
+    isDragging: false, offset: 0, startTime: 0,
   })
 
   // Track viewport height (keyboard-aware via visualViewport)
   useEffect(() => {
-    const update = () => setViewH(window.visualViewport?.height ?? window.innerHeight)
+    const update = () => {
+      const newH = window.visualViewport?.height ?? window.innerHeight
+      setViewH(newH)
+      // Only update fullHeight when height increases (keyboard closing, not opening)
+      if (newH > fullHeightRef.current) fullHeightRef.current = newH
+    }
     window.visualViewport?.addEventListener("resize", update)
     window.addEventListener("resize", update)
     return () => {
@@ -136,12 +180,29 @@ export function MissionControl({
     }
   }, [])
 
+  // Auto-scroll to bottom when keyboard opens/closes
+  useEffect(() => {
+    if (keyboardH > 0) {
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+      })
+    }
+  }, [keyboardH])
+
   // Auto-scroll to bottom (newest at bottom, chat-style)
   useEffect(() => {
     requestAnimationFrame(() => {
       if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     })
   }, [events])
+
+  // Report diff events to parent
+  useEffect(() => {
+    if (onDiffEventsChange) {
+      const diffEvents = events.filter(e => e.diff)
+      onDiffEventsChange(diffEvents)
+    }
+  }, [events, onDiffEventsChange])
 
   // Set initial slide position
   useEffect(() => {
@@ -163,7 +224,7 @@ export function MissionControl({
     dragRef.current = {
       startX: e.touches[0].clientX, startY: e.touches[0].clientY,
       lastX: e.touches[0].clientX, lastY: e.touches[0].clientY,
-      direction: "", isDragging: false, offset: 0,
+      direction: "", isDragging: false, offset: 0, startTime: Date.now(),
     }
   }, [])
 
@@ -205,10 +266,14 @@ export function MissionControl({
   const onTouchEnd = useCallback((e: React.TouchEvent) => {
     const d = dragRef.current
     if (d.direction === "h" && d.isDragging) {
-      const threshold = window.innerWidth * 0.25
+      const threshold = window.innerWidth * 0.35
+      const elapsed = Math.max(1, Date.now() - d.startTime)
+      const velocity = Math.abs(d.offset) / elapsed // px/ms
+      // Fast flick (>0.5 px/ms) needs only 60px; slow drag needs 35% screen width
+      const triggered = Math.abs(d.offset) > threshold || (velocity > 0.5 && Math.abs(d.offset) > 60)
       let newPanel = panel
-      if (d.offset > threshold && panel > 0) newPanel = panel - 1
-      else if (d.offset < -threshold && panel < 2) newPanel = panel + 1
+      if (triggered && d.offset > 0 && panel > 0) newPanel = panel - 1
+      else if (triggered && d.offset < 0 && panel < 2) newPanel = panel + 1
 
       if (slideRef.current) {
         slideRef.current.style.transition = `transform 0.5s ${SPRING}`
@@ -217,18 +282,17 @@ export function MissionControl({
       if (newPanel !== panel) setPanel(newPanel)
     }
     // Swipe-up → open file browser (on main panel)
-    // Use changedTouches for accurate end position (touchmove may not fire reliably)
     if (d.direction === "v" && panel === 1) {
       const endY = e.changedTouches[0]?.clientY ?? d.lastY
       const endX = e.changedTouches[0]?.clientX ?? d.lastX
       const dy = d.startY - endY
       const dx = Math.abs(endX - d.startX)
-      // Only trigger when started from bottom 45% of screen (avoids conflict with event list scroll)
-      if (dy > 60 && dx < 80 && d.startY > viewH * 0.55) {
+      // Higher threshold: 120px vertical, 40px horizontal tolerance, bottom 20% only
+      if (dy > 120 && dx < 40 && d.startY > viewH * 0.80) {
         setShowBrowser(true)
       }
     }
-    dragRef.current = { startX: 0, startY: 0, lastX: 0, lastY: 0, direction: "", isDragging: false, offset: 0 }
+    dragRef.current = { startX: 0, startY: 0, lastX: 0, lastY: 0, direction: "", isDragging: false, offset: 0, startTime: 0 }
   }, [panel, viewH])
 
   // ─── Settings ───
@@ -256,8 +320,23 @@ export function MissionControl({
     return send({ type: "input", data })
   }, [send])
 
+  const handleImagePaste = useCallback(async (base64: string, filename: string) => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, data: base64, filename }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        sendInput(data.path)
+      }
+    } catch {}
+  }, [project.id, sendInput])
+
   const handleSendCommand = useCallback((text: string) => {
     if (text === "\x03") { sendInput(text); return }
+    if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
     if (!text.trim()) return
 
     // Send text first, then Enter separately after a delay.
@@ -277,6 +356,26 @@ export function MissionControl({
       return
     }
     setTimeout(() => sendInput("\r"), 30)
+
+    // For TUI commands like /resume, re-attach ONCE after TUI renders to get scrollback.
+    // Live ANSI parsing is unreliable due to cursor positioning.
+    // Scrollback parsing is proven reliable (works on app restart).
+    // Title-based dedup prevents event flooding from repeated scrollback.
+    if (/^\/(resume|status)$/i.test(text.trim())) {
+      scrollbackProcessedRef.current = false // allow fresh scrollback parsing
+      tuiBufferRef.current = "" // clear TUI buffer for fresh resume menu detection
+      // Re-attach after TUI renders to parse scrollback for resume menu.
+      // Two attempts: 2s (fast networks) and 5s (slow TUI render).
+      // Dedup in scrollback handler prevents duplicate events.
+      setTimeout(() => {
+        scrollbackProcessedRef.current = false
+        send({ type: "attach", projectId: project.id, agentId, sessionId })
+      }, 2000)
+      setTimeout(() => {
+        scrollbackProcessedRef.current = false
+        send({ type: "attach", projectId: project.id, agentId, sessionId })
+      }, 5000)
+    }
 
     // Insert user message as event for message-output correspondence
     setEvents(prev => [...prev, {
@@ -301,7 +400,23 @@ export function MissionControl({
     setEvents((prev) =>
       prev.map((e) => e.id === eventId ? { ...e, status: "completed" as const } : e)
     )
-  }, [sendInput])
+    // Clear dedup state + allow fresh scrollback parsing for restored session content
+    parseStateRef.current.seenTools.clear()
+    tuiBufferRef.current = ""
+    scrollbackProcessedRef.current = false
+    // Re-attach after decision to pick up restored session tool calls
+    // Two attempts: 3s (quick resume) and 8s (slow restore)
+    setTimeout(() => {
+      parseStateRef.current.seenTools.clear()
+      scrollbackProcessedRef.current = false
+      send({ type: "attach", projectId: project.id, agentId, sessionId })
+    }, 3000)
+    setTimeout(() => {
+      parseStateRef.current.seenTools.clear()
+      scrollbackProcessedRef.current = false
+      send({ type: "attach", projectId: project.id, agentId, sessionId })
+    }, 8000)
+  }, [sendInput, send, project.id, agentId, sessionId])
 
   // ─── Quote: prepend quoted text to next command ───
   const [quotedText, setQuotedText] = useState("")
@@ -374,10 +489,12 @@ export function MissionControl({
     unsubs.push(on("events_replay", (msg) => {
       const replayed = (msg.events as AgentEvent[]) || []
       if (replayed.length > 0) {
-        // Merge with existing client-side events (server events as fallback)
+        // Merge server events with any client-side events (dedupe by id)
         setEvents(prev => {
-          if (prev.length > 0) return prev // Client already has events
-          return replayed.slice().sort((a, b) => a.timestamp - b.timestamp)
+          const existingIds = new Set(prev.map(e => e.id))
+          const newEvents = replayed.filter(e => !existingIds.has(e.id))
+          if (newEvents.length === 0) return prev
+          return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
         })
         const latest = replayed[replayed.length - 1]
         if (latest?.type === "decision_request" && latest.status === "waiting") {
@@ -389,12 +506,29 @@ export function MissionControl({
     }))
     unsubs.push(on("output", (msg) => {
       const data = msg.data as string
-      if (/[$%>❯]\s*$/.test(data)) promptReadyRef.current = true
+      const isPrompt = /[$%>❯]\s*$/.test(data)
+      if (isPrompt) promptReadyRef.current = true
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
-      setAgentStatus("working")
+      // Only set "working" for substantial NEW content — NOT status bar redraws
+      // Strip ANSI first to check actual visible content
+      const visibleCheck = data
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+        .replace(/\x1b[78DMEHcn]/g, "")
+        .replace(/\x1b\(B/g, "")
+        .trim()
+      const isStatusBar = /^[↑↓]\s*\d/.test(visibleCheck) || /^\d+s\s*·/.test(visibleCheck) ||
+        /^\d+\s*tokens?/i.test(visibleCheck) || /^[✦✱∗∴]\s*[A-Z]/i.test(visibleCheck) ||
+        /^thinking/i.test(visibleCheck) || /^thought\s+for/i.test(visibleCheck) ||
+        /^\(\d+/.test(visibleCheck) || /^shift\+tab/i.test(visibleCheck)
+      if (!isPrompt && !isStatusBar && visibleCheck.length > 10) setAgentStatus("working")
 
       // Strip ANSI for pattern matching
+      // IMPORTANT: replace cursor positioning (\x1b[row;colH) with newline FIRST
+      // so text from different screen positions doesn't concatenate directly
+      // (critical for TUI menus like /resume where metadata is at fixed columns)
       const stripped = data
+        .replace(/\x1b\[\d+;\d+H/g, "\n")
         .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
         .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
         .replace(/\x1b[78DMEHcn]/g, "")
@@ -513,6 +647,79 @@ export function MissionControl({
         }
       }
 
+      // ─── TUI menu detection: /resume session picker ───
+      // Accumulate stripped output into rolling buffer for multi-chunk TUI detection
+      tuiBufferRef.current = (tuiBufferRef.current + stripped).slice(-8000)
+      {
+        const buf = tuiBufferRef.current
+        // Use LAST occurrence (buffer may contain multiple /resume renders)
+        const allMatches = [...buf.matchAll(/Resume Session\s*\((\d+)\s+(?:of\s+\d+|total)\)/gi)]
+        const resumeMatch = allMatches.length > 0 ? allMatches[allMatches.length - 1] : null
+        if (resumeMatch) {
+          // Only search for session entries AFTER the LAST "Resume Session" header
+          const headerEnd = (resumeMatch.index || 0) + resumeMatch[0].length
+          const searchBuf = buf.slice(headerEnd)
+          // Find "Search..." and start after it, or start from headerEnd
+          const searchIdx = searchBuf.indexOf("Search...")
+          const entriesBuf = searchIdx >= 0 ? searchBuf.slice(searchIdx + 9) : searchBuf
+
+          // Parse session entries using metadata as anchors
+          // Size restricted to digits+unit to avoid eating CJK chars.
+          const metaRe = /(\d+\s+(?:minutes?|hours?|days?|seconds?)\s+ago)\s+[·•∙⋅]\s+(\S+)\s+[·•∙⋅]\s+(\d[\d.]*[KMGT]?B)/gi
+          const metaMatches: { index: number; end: number; time: string; branch: string; size: string }[] = []
+          let mm
+          while ((mm = metaRe.exec(entriesBuf)) !== null) {
+            metaMatches.push({ index: mm.index, end: mm.index + mm[0].length, time: mm[1], branch: mm[2], size: mm[3] })
+          }
+          // Build items: try to extract title between metadata entries,
+          // but if title is empty (TUI cursor positioning ate it), use metadata as label
+          const items: { label: string; meta: string; index: number }[] = []
+          for (let i = 0; i < metaMatches.length; i++) {
+            const prevEnd = i === 0 ? 0 : metaMatches[i - 1].end
+            let title = entriesBuf.slice(prevEnd, metaMatches[i].index).replace(/[\x00-\x1f]/g, " ").trim()
+            // Strip TUI box-drawing chars, cursor markers, bullets
+            title = title.replace(/[─│┌┐└┘├┤┬┴┼╭╮╰╯╴╵╶╷━┃┏┓┗┛┣┫┳┻╋▀▄█▌▐░▒▓■□▪▫●○◆◇◈▲△▶▷◀◁∗✦✱∴❯→←↑↓↔↕⏎⎯]/g, " ")
+            title = title.replace(/^[>\s·]+/, "").trim()
+            title = title.replace(/^\d[\d.]*[KMGT]?B\s*/i, "").trim()
+            if (/Resume Session|Search\.\.\.|Ctrl\+|Esc|enter to|navigate|PowerShell|Copyright|著作權/i.test(title)) title = ""
+            // Skip /remote-control sessions — those are just AgentRune remote sessions
+            if (/remote-control/i.test(title)) continue
+            const meta = `${metaMatches[i].time} · ${metaMatches[i].branch} · ${metaMatches[i].size}`
+            items.push({
+              label: title.length > 3 ? title.slice(0, 60) : "",
+              meta,
+              index: i, // Use original TUI index for arrow key navigation
+            })
+          }
+          // Cap at 8 options max
+          const limitedItems = items.slice(0, 8)
+          if (limitedItems.length > 0 && now - lastTuiMenuTime.current > 1000) {
+            // Only set cooldown AFTER successfully finding items
+            lastTuiMenuTime.current = now
+            setEvents(prev => {
+              // Don't duplicate resume menu (regardless of status)
+              const existing = prev.find(e =>
+                e.type === "decision_request" && e.title?.includes("Resume Session"))
+              if (existing) return prev
+              return [...prev, {
+                id: mkId(), timestamp: now,
+                type: "decision_request" as const,
+                status: "waiting" as const,
+                title: `Resume Session (${resumeMatch[1]} total)`,
+                decision: {
+                  options: limitedItems.map((item) => ({
+                    label: item.label ? `${item.label}\n${item.meta}` : item.meta,
+                    input: "\x1b[B".repeat(item.index) + "\r",
+                    style: "primary" as const,
+                  })),
+                },
+              }].slice(-100)
+            })
+            setAgentStatus("waiting")
+          }
+        }
+      }
+
       // ─── Test results ───
       if (now - ps.lastTestResult > 10000 &&
           (/tests?\s+passed/i.test(text) || /\d+\s+passing/i.test(text))) {
@@ -618,46 +825,130 @@ export function MissionControl({
       const data = msg.data as string
       if (!data || data.length < 10) return
       const clean = data
+        .replace(/\x1b\[\d+;\d+H/g, "\n")
         .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
         .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
         .replace(/\x1b[78DMEHcn]/g, "")
         .replace(/\x1b\(B/g, "")
-      // Extract recent tool calls from scrollback (last 4000 chars)
-      const tail = clean.slice(-4000)
+      // Extract recent tool calls from scrollback (last 8000 chars)
+      const tail = clean.slice(-8000)
+
+      // Only parse tool calls on first scrollback; skip on re-attach to prevent duplicates
       const historyEvents: AgentEvent[] = []
+      const shouldParseToolCalls = !scrollbackProcessedRef.current
+      scrollbackProcessedRef.current = true
       const now = Date.now()
       const mkHId = (i: number) => `h_${now}_${i}`
 
-      // Find tool calls in history (same tool list as live parser)
-      const toolRe = /●\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(([^)]*)\)/g
-      let tm
-      let idx = 0
-      while ((tm = toolRe.exec(tail)) !== null) {
-        const typeMap: Record<string, AgentEvent["type"]> = {
-          Read: "info", Edit: "file_edit", Write: "file_create",
-          Bash: "command_run", Glob: "info", Grep: "info", Agent: "info",
-          WebFetch: "info", WebSearch: "info", NotebookEdit: "info",
-          Skill: "info", TaskCreate: "info", TaskUpdate: "info",
-          TaskList: "info", TaskGet: "info",
+      // Find tool calls in history — only on first scrollback to prevent duplicates
+      if (shouldParseToolCalls) {
+        const toolRe = /●\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill|TaskCreate|TaskUpdate|TaskList|TaskGet)\(([^)]*)\)/g
+        let tm
+        let idx = 0
+        while ((tm = toolRe.exec(tail)) !== null) {
+          const typeMap: Record<string, AgentEvent["type"]> = {
+            Read: "info", Edit: "file_edit", Write: "file_create",
+            Bash: "command_run", Glob: "info", Grep: "info", Agent: "info",
+            WebFetch: "info", WebSearch: "info", NotebookEdit: "info",
+            Skill: "info", TaskCreate: "info", TaskUpdate: "info",
+            TaskList: "info", TaskGet: "info",
+          }
+          historyEvents.push({
+            id: mkHId(idx++), timestamp: now - 10000 + idx * 100,
+            type: typeMap[tm[1]] || "info",
+            status: "completed",
+            title: tm[1] === "Read" ? t("mc.read", { path: tm[2] }) : tm[1] === "Edit" ? t("mc.edited", { path: tm[2] }) :
+              tm[1] === "Write" ? t("mc.created", { path: tm[2] }) : tm[1] === "Bash" ? t("mc.ranCommand") : tm[1],
+            detail: tm[2]?.slice(0, 100) || undefined,
+          })
         }
-        historyEvents.push({
-          id: mkHId(idx++), timestamp: now - 10000 + idx * 100,
-          type: typeMap[tm[1]] || "info",
-          status: "completed",
-          title: tm[1] === "Read" ? t("mc.read", { path: tm[2] }) : tm[1] === "Edit" ? t("mc.edited", { path: tm[2] }) :
-            tm[1] === "Write" ? t("mc.created", { path: tm[2] }) : tm[1] === "Bash" ? t("mc.ranCommand") : tm[1],
-          detail: tm[2]?.slice(0, 100) || undefined,
-        })
       }
 
       if (historyEvents.length > 0) {
-        // Show most recent 10 tool calls from history
-        const recent = historyEvents.slice(-10)
-        setEvents(prev => prev.length > 0 ? prev : recent)
+        // Show most recent 20 tool calls from scrollback history
+        // Dedup by title+detail (not ID) to prevent flooding on re-attach
+        const recent = historyEvents.slice(-20)
+        setEvents(prev => {
+          const existingTitles = new Set(prev.map(e => `${e.title}|${e.detail || ""}`))
+          const newEvents = recent.filter(e => !existingTitles.has(`${e.title}|${e.detail || ""}`))
+          if (newEvents.length === 0) return prev
+          return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
+        })
+      }
+
+      // ─── Resume TUI detection from scrollback (more reliable than live output) ───
+      // Use the LAST occurrence (scrollback may contain multiple /resume renders)
+      const allResumeMatches = [...tail.matchAll(/Resume Session\s*\((\d+)\s+(?:of\s+\d+|total)\)/gi)]
+      const resumeMatch = allResumeMatches.length > 0 ? allResumeMatches[allResumeMatches.length - 1] : null
+      if (resumeMatch) {
+        const headerEnd = (resumeMatch.index || 0) + resumeMatch[0].length
+        const searchBuf = tail.slice(headerEnd)
+        const searchIdx = searchBuf.indexOf("Search...")
+        const entriesBuf = searchIdx >= 0 ? searchBuf.slice(searchIdx + 9) : searchBuf
+        const metaRe = /(\d+\s+(?:minutes?|hours?|days?|seconds?)\s+ago)\s+[·•∙⋅]\s+(\S+)\s+[·•∙⋅]\s+(\d[\d.]*[KMGT]?B)/gi
+        const metaMatches: { index: number; end: number; time: string; branch: string; size: string }[] = []
+        let smm
+        while ((smm = metaRe.exec(entriesBuf)) !== null) {
+          metaMatches.push({ index: smm.index, end: smm.index + smm[0].length, time: smm[1], branch: smm[2], size: smm[3] })
+        }
+        const resumeItems: { label: string; meta: string; index: number }[] = []
+        for (let i = 0; i < metaMatches.length; i++) {
+          const prevEnd = i === 0 ? 0 : metaMatches[i - 1].end
+          let title = entriesBuf.slice(prevEnd, metaMatches[i].index).replace(/[\x00-\x1f]/g, " ").trim()
+          title = title.replace(/[─│┌┐└┘├┤┬┴┼╭╮╰╯╴╵╶╷━┃┏┓┗┛┣┫┳┻╋▀▄█▌▐░▒▓■□▪▫●○◆◇◈▲△▶▷◀◁∗✦✱∴❯→←↑↓↔↕⏎⎯]/g, " ")
+          title = title.replace(/^[>\s·]+/, "").trim()
+          title = title.replace(/^\d[\d.]*[KMGT]?B\s*/i, "").trim()
+          if (/Resume Session|Search\.\.\.|Ctrl\+|Esc|enter to|navigate|PowerShell|Copyright|著作權/i.test(title)) title = ""
+          if (/remote-control/i.test(title)) continue
+          const meta = `${metaMatches[i].time} · ${metaMatches[i].branch} · ${metaMatches[i].size}`
+          resumeItems.push({ label: title.length > 3 ? title.slice(0, 60) : "", meta, index: i })
+        }
+        // Cap at 8 options max
+        const limitedItems = resumeItems.slice(0, 8)
+        if (limitedItems.length > 0) {
+          const mkSId = () => `sb_${now}_${Math.random().toString(36).slice(2, 7)}`
+          setEvents(prev => {
+            const existing = prev.find(e => e.type === "decision_request" && e.title?.includes("Resume Session"))
+            if (existing) return prev
+            return [...prev, {
+              id: mkSId(), timestamp: now,
+              type: "decision_request" as const,
+              status: "waiting" as const,
+              title: `Resume Session (${resumeMatch[1]} total)`,
+              decision: {
+                options: limitedItems.map((item) => ({
+                  label: item.label ? `${item.label}\n${item.meta}` : item.meta,
+                  input: "\x1b[B".repeat(item.index) + "\r",
+                  style: "primary" as const,
+                })),
+              },
+            }].slice(-100)
+          })
+          setAgentStatus("waiting")
+        }
       }
     }))
-    // TerminalView handles attach + auto-command
-    unsubs.push(on("attached", () => {}))
+    // Show session start/resume event in Events panel (dedup within 10s)
+    unsubs.push(on("attached", (msg) => {
+      const resumed = msg.resumed as boolean
+      const agentName = (msg.agentId as string) || "terminal"
+      const title = resumed
+        ? t("mc.sessionResumed") || `Session resumed (${agentName})`
+        : t("mc.sessionStarted") || `Session started (${agentName})`
+      setEvents((prev) => {
+        const now = Date.now()
+        const hasDupe = prev.some((e) =>
+          e.type === "info" && e.title === title && (now - e.timestamp) < 30000
+        )
+        if (hasDupe) return prev
+        return [...prev, {
+          id: `evt_attach_${now}`, timestamp: now,
+          type: "info" as const,
+          status: "completed" as const,
+          title,
+        }]
+      })
+    }))
     unsubs.push(on("exit", () => {
       setAgentStatus("idle")
   
@@ -734,8 +1025,10 @@ export function MissionControl({
           zIndex: 9999,
           pointerEvents: "none",
           borderRadius: 0,
-          animation: "borderGlow 2.5s ease-in-out infinite",
-          boxShadow: "inset 0 0 18px 1px rgba(255, 255, 255, 0.08), inset 0 0 4px 0px rgba(255, 255, 255, 0.15)",
+          animation: `${theme === "dark" ? "borderGlowDark" : "borderGlowLight"} 2.5s ease-in-out infinite`,
+          boxShadow: theme === "dark"
+            ? "inset 0 0 20px 2px rgba(255, 255, 255, 0.15), inset 0 0 5px 1px rgba(255, 255, 255, 0.25)"
+            : "inset 0 0 20px 3px rgba(59, 130, 246, 0.4), inset 0 0 6px 1px rgba(59, 130, 246, 0.5)",
         }} />
       )}
       <div
@@ -777,7 +1070,7 @@ export function MissionControl({
               <div style={{ flex: 1, fontSize: 15, fontWeight: 700, color: "var(--text-primary)", letterSpacing: -0.3 }}>
                 {t("mc.sessions")}
               </div>
-              <button onClick={() => goToPanel(1)} style={glassBtn}>
+              <button onClick={() => goToPanel(1)} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="9 18 15 12 9 6" />
                 </svg>
@@ -904,16 +1197,16 @@ export function MissionControl({
           <div style={{ width: "100vw", flexShrink: 0, height: "100%", display: "flex", flexDirection: "column" }}>
             {/* Top bar */}
             <div style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "12px 16px",
-              paddingTop: "calc(12px + env(safe-area-inset-top, 0px))",
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "10px 12px",
+              paddingTop: "calc(10px + env(safe-area-inset-top, 0px))",
               background: "var(--glass-bg)",
               backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
               borderBottom: "1px solid var(--glass-border)",
               boxShadow: "var(--glass-shadow)",
               flexShrink: 0, userSelect: "none",
             }}>
-              <button onClick={onBack} style={glassBtn}>
+              <button onClick={onBack} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="15 18 9 12 15 6" />
                 </svg>
@@ -928,12 +1221,13 @@ export function MissionControl({
               </div>
               <button
                 onClick={() => setShowProjectUsage(prev => !prev)}
+                onTouchStart={(e) => e.stopPropagation()}
                 style={{
-                  fontSize: 10, padding: "4px 10px", borderRadius: 10,
+                  fontSize: 9, padding: "3px 7px", borderRadius: 8,
                   background: showProjectUsage ? "rgba(74,222,128,0.08)" : "rgba(96,165,250,0.08)",
                   border: showProjectUsage ? "1px solid rgba(74,222,128,0.2)" : "1px solid rgba(96,165,250,0.2)",
-                  color: showProjectUsage ? "#4ade80" : "var(--accent-primary)", fontWeight: 600, letterSpacing: 0.3,
-                  fontFamily: "'JetBrains Mono', monospace", cursor: "pointer",
+                  color: showProjectUsage ? "#4ade80" : "var(--accent-primary)", fontWeight: 600, letterSpacing: 0.2,
+                  fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", flexShrink: 0,
                 }}
               >
                 {(() => {
@@ -948,12 +1242,14 @@ export function MissionControl({
                 })()}
               </button>
               {settings.bypass && (
-                <span style={{ fontSize: 10, padding: "4px 10px", borderRadius: 10, background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.25)", color: "#f59e0b", fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>
-                  {t("mc.bypass")}
-                </span>
+                <button onClick={() => { /* toggle in settings */ setShowSettings(true) }} onTouchStart={(e) => e.stopPropagation()} style={{ ...glassBtn, background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.25)", color: "#f59e0b" }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                  </svg>
+                </button>
               )}
               {toggleTheme && (
-                <button onClick={toggleTheme} style={glassBtn}>
+                <button onClick={toggleTheme} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                   {theme === "dark" ? (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
@@ -965,12 +1261,12 @@ export function MissionControl({
                   )}
                 </button>
               )}
-              <button onClick={onOpenTerminal} style={glassBtn}>
+              <button onClick={onOpenTerminal} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
                 </svg>
               </button>
-              <button onClick={() => setShowSettings(true)} style={glassBtn}>
+              <button onClick={() => setShowSettings(true)} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="3" />
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
@@ -978,7 +1274,7 @@ export function MissionControl({
               </button>
             </div>
 
-            {/* ─── Status indicator ─── */}
+            {/* ─── Status indicator (hidden when keyboard open to save space) ─── */}
             {/* Connection lost */}
             {!wsConnected && (
               <div style={{
@@ -993,8 +1289,8 @@ export function MissionControl({
               </div>
             )}
 
-            {/* Idle: green dot pill / Waiting: amber pill */}
-            {(agentStatus === "idle" || agentStatus === "waiting") && (
+            {/* Idle: green dot pill / Waiting: amber pill (hidden when keyboard open) */}
+            {(agentStatus === "idle" || agentStatus === "waiting") && keyboardH === 0 && (
               <div style={{
                 padding: "6px 16px",
                 display: "flex", alignItems: "center", justifyContent: "center",
@@ -1037,12 +1333,13 @@ export function MissionControl({
               </div>
             )}
 
-            {/* Page indicator — 3 panels */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 6, padding: "4px 0", flexShrink: 0 }}>
+            {/* Page indicator — 3 panels (hidden when keyboard open) */}
+            <div style={{ display: keyboardH === 0 ? "flex" : "none", justifyContent: "center", gap: 6, padding: "4px 0", flexShrink: 0 }}>
               {[t("mc.sessions"), t("mc.events"), t("mc.details")].map((label, i) => (
                 <button
                   key={i}
                   onClick={() => goToPanel(i)}
+                  onTouchStart={(e) => e.stopPropagation()}
                   style={{
                     padding: "3px 10px",
                     borderRadius: 8,
@@ -1065,7 +1362,7 @@ export function MissionControl({
             <div
               ref={scrollRef}
               style={{
-                flex: 1, overflowY: "auto", padding: 16,
+                flex: 1, overflowY: "auto", overflowX: "hidden", padding: 16,
                 minHeight: 0,
                 display: "flex", flexDirection: "column", gap: 12,
                 WebkitOverflowScrolling: "touch" as never,
@@ -1097,9 +1394,11 @@ export function MissionControl({
               )}
             </div>
 
-            <QuickActions onAction={sendInput} />
+            {/* Input area — padded above keyboard */}
+            {keyboardH === 0 && <QuickActions onAction={sendInput} />}
             <InputBar
               onSend={handleSendCommand}
+              onImagePaste={handleImagePaste}
               autoFocus={isMobile}
               slashCommands={agent?.slashCommands}
               onBrowse={() => setShowBrowser(true)}
@@ -1122,7 +1421,7 @@ export function MissionControl({
               flexShrink: 0,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <button onClick={() => goToPanel(1)} style={glassBtn}>
+                <button onClick={() => goToPanel(1)} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="15 18 9 12 15 6" />
                   </svg>
@@ -1213,7 +1512,14 @@ export function MissionControl({
                   })
               })()
               return (
-                <div style={{ flex: 1, overflowY: "auto", padding: 16, minHeight: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div
+                  ref={(el) => {
+                    // Auto-scroll detail panel to bottom when entering or new content arrives
+                    if (el && panel === 2) {
+                      requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
+                    }
+                  }}
+                  style={{ flex: 1, overflowY: "auto", padding: 16, minHeight: 0, display: "flex", flexDirection: "column", gap: 10 }}>
                   {activeBlocks.map((block, i) => (
                     <div
                       key={i}
@@ -1514,7 +1820,7 @@ export function MissionControl({
 
 // ─── Shared button style ───
 const glassBtn: React.CSSProperties = {
-  width: 38, height: 38, borderRadius: 12,
+  width: 32, height: 32, borderRadius: 10,
   border: "1px solid var(--glass-border)",
   background: "var(--glass-bg)",
   backdropFilter: "blur(16px)",

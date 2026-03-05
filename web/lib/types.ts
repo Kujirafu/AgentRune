@@ -80,6 +80,7 @@ export const AGENTS: AgentDef[] = [
       { command: "/login", description: "Login to Anthropic" },
       { command: "/logout", description: "Logout" },
       { command: "/permissions", description: "Manage permissions" },
+      { command: "/resume", description: "Resume a previous session" },
       { command: "/status", description: "Show session status" },
       { command: "/mcp", description: "Manage MCP servers" },
     ],

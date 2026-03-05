@@ -1,228 +1,441 @@
 // web/components/DiffPanel.tsx
-import { useState, useRef } from "react"
-import ReactMarkdown from "react-markdown"
+import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import type { AgentEvent } from "../../shared/types"
 
+// ─── Types ──────────────────────────────────────────────────────
 interface DiffPanelProps {
   event: AgentEvent | null
+  allDiffEvents: AgentEvent[]
   onClose: () => void
+  onSelectEvent: (e: AgentEvent) => void
 }
 
-function isMarkdownFile(path: string): boolean {
-  return path.endsWith(".md") || path.endsWith(".mdx")
+interface DiffLine {
+  type: "same" | "add" | "del" | "mod"
+  before?: string
+  after?: string
 }
 
-const MD_STYLES = `
-.diff-md p { font-size: 13px; color: rgba(226,232,240,0.8); margin: 0 0 8px; line-height: 1.6; }
-.diff-md h1,.diff-md h2,.diff-md h3 { font-size: 14px; font-weight: 700; color: #e2e8f0; margin: 12px 0 6px; }
-.diff-md code { font-family: 'JetBrains Mono', monospace; font-size: 11px; background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 5px; }
-.diff-md pre { background: rgba(255,255,255,0.04); border-radius: 10px; padding: 12px; overflow-x: auto; margin: 8px 0; }
-.diff-md pre code { background: transparent; padding: 0; }
-.diff-md ul, .diff-md ol { padding-left: 18px; font-size: 13px; color: rgba(226,232,240,0.7); }
-.diff-md li { margin-bottom: 4px; }
-.diff-md a { color: #60a5fa; text-decoration: none; }
-.diff-md blockquote { border-left: 3px solid rgba(96,165,250,0.4); margin: 8px 0; padding: 4px 12px; color: rgba(226,232,240,0.5); }
-`
+// ─── LCS-based line diff ────────────────────────────────────────
+function computeLineDiff(beforeText: string, afterText: string): DiffLine[] {
+  const a = beforeText.split("\n")
+  const b = afterText.split("\n")
+  const m = a.length
+  const n = b.length
 
-function DiffContent({ content, side, filePath }: { content: string; side: "before" | "after"; filePath: string }) {
-  if (isMarkdownFile(filePath)) {
-    return (
-      <div className="diff-md" style={{ padding: "12px 16px" }}>
-        <ReactMarkdown>{content}</ReactMarkdown>
-      </div>
-    )
-  }
-
-  const lines = content.split("\n")
-  const highlightColor = side === "before"
-    ? "rgba(248,113,113,0.10)"
-    : "rgba(74,222,128,0.10)"
-
-  return (
-    <pre style={{
-      margin: 0,
-      padding: "12px 16px",
-      fontSize: 12,
-      fontFamily: "'JetBrains Mono', monospace",
-      color: "rgba(255,255,255,0.75)",
-      whiteSpace: "pre-wrap",
-      wordBreak: "break-word",
-      lineHeight: 1.6,
-    }}>
-      {lines.map((line, i) => (
-        <div
-          key={i}
-          style={{
-            background: highlightColor,
-            borderRadius: 3,
-            padding: "0 4px",
-            marginBottom: 1,
-          }}
-        >
-          {line || " "}
-        </div>
-      ))}
-    </pre>
-  )
-}
-
-export function DiffPanel({ event, onClose }: DiffPanelProps) {
-  const [page, setPage] = useState<"before" | "after">("after")
-  const touchStartX = useRef(0)
-  const open = event !== null
-
-  const filePath = event?.diff?.filePath || event?.title?.replace(/^(Edited|Created) /, "") || "File"
-  const fileName = filePath.split(/[\\/]/).pop() || filePath
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    touchStartX.current = e.touches[0].clientX
-  }
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    const dx = e.changedTouches[0].clientX - touchStartX.current
-    if (dx > 80) {
-      if (page === "after") {
-        setPage("before")
-      } else {
-        onClose()
-      }
-    } else if (dx < -80) {
-      if (page === "before") setPage("after")
+  // Build LCS table
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1])
     }
   }
 
+  // Backtrack to produce diff
+  const result: DiffLine[] = []
+  let i = m, j = n
+  const stack: DiffLine[] = []
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+      stack.push({ type: "same", before: a[i - 1], after: b[j - 1] })
+      i--; j--
+    } else if (i > 0 && j > 0 && dp[i - 1][j - 1] >= dp[i - 1][j] && dp[i - 1][j - 1] >= dp[i][j - 1]) {
+      // Modified line: both sides changed
+      stack.push({ type: "mod", before: a[i - 1], after: b[j - 1] })
+      i--; j--
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      stack.push({ type: "add", after: b[j - 1] })
+      j--
+    } else {
+      stack.push({ type: "del", before: a[i - 1] })
+      i--
+    }
+  }
+  stack.reverse()
+  result.push(...stack)
+  return result
+}
+
+// ─── Constants ──────────────────────────────────────────────────
+const SPRING = "cubic-bezier(0.22, 1, 0.36, 1)"
+const COLORS = {
+  addBg: "rgba(34, 197, 94, 0.15)",
+  addText: "#22c55e",
+  delBg: "rgba(239, 68, 68, 0.15)",
+  delText: "#ef4444",
+  dotBefore: "#ef4444",
+  dotAfter: "#22c55e",
+}
+
+// ─── Component ──────────────────────────────────────────────────
+export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent }: DiffPanelProps) {
+  const [page, setPage] = useState<0 | 1>(1) // 0=before, 1=after
+  const slideRef = useRef<HTMLDivElement>(null)
+  const beforeScrollRef = useRef<HTMLDivElement>(null)
+  const afterScrollRef = useRef<HTMLDivElement>(null)
+  const tabRowRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef({ startX: 0, startY: 0, direction: "", isDragging: false, offset: 0, startTime: 0 })
+
+  const open = event !== null
   const hasDiff = !!event?.diff
 
-  return (
-    <>
-      <style>{MD_STYLES}</style>
+  // File path helpers
+  const filePath = event?.diff?.filePath || event?.title?.replace(/^(Edited|Created) /, "") || "File"
+  const fileName = filePath.split(/[\\/]/).pop() || filePath
 
-      {open && (
-        <div
-          onClick={onClose}
-          style={{
-            position: "fixed", inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            backdropFilter: "blur(2px)",
-            zIndex: 200,
-          }}
-        />
-      )}
+  // ─── Compute diff lines ─────────────────────────────────────
+  const diffLines = useMemo(() => {
+    if (!event?.diff) return []
+    return computeLineDiff(event.diff.before || "", event.diff.after || "")
+  }, [event?.diff?.before, event?.diff?.after])
 
-      <div
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
-        style={{
-          position: "fixed",
-          top: 0, right: 0, bottom: 0,
-          width: "85vw",
-          maxWidth: 420,
-          zIndex: 201,
-          background: "rgba(15,23,42,0.95)",
-          backdropFilter: "blur(32px)",
-          WebkitBackdropFilter: "blur(32px)",
-          borderLeft: "1px solid rgba(255,255,255,0.1)",
-          boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-          transform: open ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 0.3s ease-out",
-          display: "flex",
-          flexDirection: "column",
-          color: "#e2e8f0",
-        }}
-      >
-        {/* Header */}
-        <div style={{ padding: "14px 16px 0", flexShrink: 0 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 13,
-              fontWeight: 600,
-              color: "rgba(255,255,255,0.7)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              flex: 1,
-              marginRight: 8,
-            }}>
-              {fileName}
-            </div>
-            <button
-              onClick={onClose}
-              style={{
-                width: 30, height: 30, borderRadius: 8,
-                border: "1px solid rgba(255,255,255,0.1)",
-                background: "rgba(255,255,255,0.05)",
-                color: "rgba(255,255,255,0.4)",
-                fontSize: 14, cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >✕</button>
-          </div>
+  // ─── Swipe position ─────────────────────────────────────────
+  const goToPage = useCallback((p: 0 | 1) => {
+    if (slideRef.current) {
+      slideRef.current.style.transition = `transform 0.4s ${SPRING}`
+      slideRef.current.style.transform = `translateX(${-p * 100}%)`
+    }
+    // Sync scroll
+    if (p === 0 && afterScrollRef.current && beforeScrollRef.current) {
+      beforeScrollRef.current.scrollTop = afterScrollRef.current.scrollTop
+    } else if (p === 1 && beforeScrollRef.current && afterScrollRef.current) {
+      afterScrollRef.current.scrollTop = beforeScrollRef.current.scrollTop
+    }
+    setPage(p)
+  }, [])
 
-          {hasDiff && (
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 8,
-              marginBottom: 12,
-            }}>
-              <button
-                onClick={() => setPage("before")}
-                style={{
-                  padding: "6px 16px", borderRadius: 8,
-                  border: page === "before" ? "1px solid rgba(248,113,113,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                  background: page === "before" ? "rgba(248,113,113,0.12)" : "transparent",
-                  color: page === "before" ? "#f87171" : "rgba(255,255,255,0.35)",
-                  fontSize: 12, fontWeight: 600, cursor: "pointer",
-                }}
-              >Before</button>
-              <div style={{ display: "flex", gap: 5 }}>
-                <div style={{ width: 6, height: 6, borderRadius: 3, background: page === "before" ? "#f87171" : "rgba(255,255,255,0.15)" }} />
-                <div style={{ width: 6, height: 6, borderRadius: 3, background: page === "after" ? "#4ade80" : "rgba(255,255,255,0.15)" }} />
-              </div>
-              <button
-                onClick={() => setPage("after")}
-                style={{
-                  padding: "6px 16px", borderRadius: 8,
-                  border: page === "after" ? "1px solid rgba(74,222,128,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                  background: page === "after" ? "rgba(74,222,128,0.12)" : "transparent",
-                  color: page === "after" ? "#4ade80" : "rgba(255,255,255,0.35)",
-                  fontSize: 12, fontWeight: 600, cursor: "pointer",
-                }}
-              >After</button>
-            </div>
-          )}
-        </div>
+  // Reset to After page when event changes
+  useEffect(() => {
+    if (event) {
+      setPage(1)
+      if (slideRef.current) {
+        slideRef.current.style.transition = "none"
+        slideRef.current.style.transform = "translateX(-100%)"
+      }
+    }
+  }, [event])
 
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" as never }}>
-          {!hasDiff ? (
-            <div style={{ padding: "16px", fontSize: 12, color: "rgba(255,255,255,0.35)", fontFamily: "'JetBrains Mono', monospace" }}>
-              {event?.detail || "Diff not available"}
-            </div>
-          ) : (
-            <DiffContent
-              content={page === "before" ? (event!.diff!.before || "(empty)") : (event!.diff!.after || "(empty)")}
-              side={page}
-              filePath={filePath}
-            />
-          )}
-        </div>
+  // Auto-scroll active tab into view
+  useEffect(() => {
+    if (!tabRowRef.current || !event) return
+    const idx = allDiffEvents.findIndex(e => e === event)
+    const btn = tabRowRef.current.children[idx] as HTMLElement | undefined
+    btn?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" })
+  }, [event, allDiffEvents])
 
-        {/* Swipe hint */}
-        <div style={{
-          padding: "8px",
-          textAlign: "center",
-          fontSize: 10,
-          color: "rgba(255,255,255,0.12)",
-          flexShrink: 0,
-          borderTop: "1px solid rgba(255,255,255,0.04)",
+  // ─── Hardware back ──────────────────────────────────────────
+  useEffect(() => {
+    if (!open) return
+    const state = { diffPanel: true }
+    history.pushState(state, "")
+    const handler = () => { onClose() }
+    window.addEventListener("popstate", handler)
+    return () => {
+      window.removeEventListener("popstate", handler)
+    }
+  }, [open, onClose])
+
+  // ─── Touch handlers (same pattern as MissionControl) ────────
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    dragRef.current = {
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      direction: "", isDragging: false, offset: 0, startTime: Date.now(),
+    }
+  }, [])
+
+  const onTouchMove = useCallback((e: React.TouchEvent) => {
+    const d = dragRef.current
+    const dx = e.touches[0].clientX - d.startX
+    const dy = e.touches[0].clientY - d.startY
+
+    if (!d.direction) {
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        d.direction = Math.abs(dx) > Math.abs(dy) ? "h" : "v"
+      }
+      return
+    }
+
+    if (d.direction === "h") {
+      e.preventDefault()
+      d.isDragging = true
+      // Rubber band at edges
+      let offset = dx
+      if ((page === 0 && dx > 0) || (page === 1 && dx < 0)) {
+        offset = dx * 0.15
+      }
+      d.offset = offset
+      if (slideRef.current) {
+        slideRef.current.style.transition = "none"
+        slideRef.current.style.transform = `translateX(calc(${-page * 100}% + ${offset}px))`
+      }
+    }
+  }, [page])
+
+  const onTouchEnd = useCallback(() => {
+    const d = dragRef.current
+    if (d.direction === "h" && d.isDragging) {
+      const threshold = window.innerWidth * 0.35
+      const elapsed = Math.max(1, Date.now() - d.startTime)
+      const velocity = Math.abs(d.offset) / elapsed
+      const triggered = Math.abs(d.offset) > threshold || (velocity > 0.5 && Math.abs(d.offset) > 60)
+      let newPage = page
+      if (triggered && d.offset > 0 && page > 0) newPage = 0 as 0 | 1
+      else if (triggered && d.offset < 0 && page < 1) newPage = 1 as 0 | 1
+      goToPage(newPage as 0 | 1)
+    }
+    dragRef.current = { startX: 0, startY: 0, direction: "", isDragging: false, offset: 0, startTime: 0 }
+  }, [page, goToPage])
+
+  // ─── Render diff lines for one side ─────────────────────────
+  const renderLines = (side: "before" | "after") => {
+    if (diffLines.length === 0) {
+      const content = side === "before" ? (event?.diff?.before || "(empty)") : (event?.diff?.after || "(empty)")
+      return (
+        <pre style={{
+          margin: 0, padding: "12px 16px", fontSize: 12,
+          fontFamily: "'JetBrains Mono', monospace",
+          color: "var(--text-secondary)", whiteSpace: "pre-wrap",
+          wordBreak: "break-word", lineHeight: 1.7,
         }}>
-          {hasDiff ? "← swipe to switch  ·  swipe right on Before to close" : "swipe right to close"}
+          {content}
+        </pre>
+      )
+    }
+
+    let lineNum = 0
+    return (
+      <pre style={{
+        margin: 0, padding: "12px 0", fontSize: 12,
+        fontFamily: "'JetBrains Mono', monospace",
+        color: "var(--text-secondary)", whiteSpace: "pre-wrap",
+        wordBreak: "break-word", lineHeight: 1.7,
+      }}>
+        {diffLines.map((line, i) => {
+          const isBefore = side === "before"
+
+          // Placeholder line
+          if ((line.type === "add" && isBefore) || (line.type === "del" && !isBefore)) {
+            lineNum++
+            return (
+              <div key={i} style={{
+                padding: "0 16px", minHeight: "1.7em",
+                background: "var(--icon-bg)", opacity: 0.5,
+              }}>
+                {" "}
+              </div>
+            )
+          }
+
+          // Content line
+          const text = isBefore ? (line.before ?? "") : (line.after ?? "")
+          lineNum++
+
+          let bg = "transparent"
+          let color = "var(--text-secondary)"
+
+          if (line.type === "add") {
+            bg = COLORS.addBg; color = COLORS.addText
+          } else if (line.type === "del") {
+            bg = COLORS.delBg; color = COLORS.delText
+          } else if (line.type === "mod") {
+            bg = isBefore ? COLORS.delBg : COLORS.addBg
+            color = isBefore ? COLORS.delText : COLORS.addText
+          }
+
+          return (
+            <div key={i} style={{ padding: "0 16px", background: bg, color, minHeight: "1.7em" }}>
+              {text || " "}
+            </div>
+          )
+        })}
+      </pre>
+    )
+  }
+
+  if (!open) return null
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 300,
+      background: "var(--bg-gradient)",
+      display: "flex", flexDirection: "column",
+      color: "var(--text-primary)",
+    }}>
+      {/* ─── Header ─────────────────────────────────────────── */}
+      <div style={{
+        flexShrink: 0,
+        background: "var(--glass-bg)",
+        backdropFilter: "blur(16px)",
+        WebkitBackdropFilter: "blur(16px)",
+        borderBottom: "1px solid var(--glass-border)",
+        paddingTop: "max(env(safe-area-inset-top), 12px)",
+      }}>
+        {/* Title row */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "10px 16px 8px",
+        }}>
+          <button
+            onClick={() => { onClose(); history.back() }}
+            style={{
+              width: 36, height: 36, borderRadius: 12,
+              border: "1px solid var(--glass-border)",
+              background: "var(--card-bg)",
+              color: "var(--text-primary)",
+              fontSize: 18, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            ←
+          </button>
+          <div style={{
+            fontSize: 17, fontWeight: 600,
+            color: "var(--text-primary)",
+            flex: 1,
+          }}>
+            Diff View
+          </div>
         </div>
+
+        {/* File tabs */}
+        {allDiffEvents.length > 1 && (
+          <div
+            ref={tabRowRef}
+            style={{
+              display: "flex", gap: 6,
+              padding: "4px 16px 8px",
+              overflowX: "auto",
+              WebkitOverflowScrolling: "touch" as never,
+              scrollbarWidth: "none",
+              msOverflowStyle: "none",
+            }}
+          >
+            {allDiffEvents.map((ev) => {
+              const fp = ev.diff?.filePath || ev.title?.replace(/^(Edited|Created) /, "") || "?"
+              const fn = fp.split(/[\\/]/).pop() || fp
+              const active = ev === event
+              return (
+                <button
+                  key={ev.id}
+                  onClick={() => onSelectEvent(ev)}
+                  style={{
+                    flexShrink: 0,
+                    padding: "5px 14px",
+                    borderRadius: 20,
+                    border: "none",
+                    background: active ? "var(--accent-primary)" : "var(--card-bg)",
+                    color: active ? "#fff" : "var(--text-secondary)",
+                    fontSize: 12, fontWeight: 600,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {fn}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
+        {/* Dot indicator */}
+        {hasDiff && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            gap: 6, paddingBottom: 10,
+          }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: page === 0 ? COLORS.dotBefore : "var(--text-secondary)", opacity: page === 0 ? 1 : 0.4 }}>
+              Before
+            </span>
+            <div style={{
+              width: 7, height: 7, borderRadius: "50%",
+              background: page === 0 ? COLORS.dotBefore : "var(--glass-border)",
+              transition: "background 0.3s",
+            }} />
+            <div style={{
+              width: 7, height: 7, borderRadius: "50%",
+              background: page === 1 ? COLORS.dotAfter : "var(--glass-border)",
+              transition: "background 0.3s",
+            }} />
+            <span style={{ fontSize: 11, fontWeight: 600, color: page === 1 ? COLORS.dotAfter : "var(--text-secondary)", opacity: page === 1 ? 1 : 0.4 }}>
+              After
+            </span>
+          </div>
+        )}
       </div>
-    </>
+
+      {/* ─── Body: 2-panel slider ───────────────────────────── */}
+      {hasDiff ? (
+        <div
+          style={{ flex: 1, overflow: "hidden", position: "relative" }}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+        >
+          <div
+            ref={slideRef}
+            style={{
+              display: "flex",
+              width: "200%",
+              height: "100%",
+              transform: "translateX(-100%)",
+              willChange: "transform",
+            }}
+          >
+            {/* Before panel */}
+            <div
+              ref={beforeScrollRef}
+              style={{
+                width: "50%", height: "100%", overflowY: "auto",
+                WebkitOverflowScrolling: "touch" as never,
+              }}
+            >
+              <div style={{
+                margin: "12px 12px",
+                background: "var(--card-bg)",
+                borderRadius: 16,
+                backdropFilter: "blur(12px)",
+                WebkitBackdropFilter: "blur(12px)",
+                border: "1px solid var(--glass-border)",
+                overflow: "hidden",
+              }}>
+                {renderLines("before")}
+              </div>
+            </div>
+
+            {/* After panel */}
+            <div
+              ref={afterScrollRef}
+              style={{
+                width: "50%", height: "100%", overflowY: "auto",
+                WebkitOverflowScrolling: "touch" as never,
+              }}
+            >
+              <div style={{
+                margin: "12px 12px",
+                background: "var(--card-bg)",
+                borderRadius: 16,
+                backdropFilter: "blur(12px)",
+                WebkitBackdropFilter: "blur(12px)",
+                border: "1px solid var(--glass-border)",
+                overflow: "hidden",
+              }}>
+                {renderLines("after")}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          flex: 1, padding: 16, overflowY: "auto",
+          fontSize: 13, color: "var(--text-secondary)",
+          fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          {event?.detail || "Diff not available"}
+        </div>
+      )}
+    </div>
   )
 }

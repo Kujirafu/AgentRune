@@ -1,5 +1,5 @@
 // web/components/EventCard.tsx
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import { useLocale } from "../lib/i18n/index.js"
@@ -88,7 +88,16 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
   const longPressFired = useRef(false)
   const touchStartPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
+  const [detailExpanded, setDetailExpanded] = useState(false)
+  const detailRef = useRef<HTMLDivElement>(null)
+  const [detailOverflow, setDetailOverflow] = useState(false)
   const cleanDetail = event.detail ? stripStatusBar(stripAnsi(event.detail)) : ""
+
+  useEffect(() => {
+    if (detailRef.current && !detailExpanded) {
+      setDetailOverflow(detailRef.current.scrollHeight > 128)
+    }
+  }, [cleanDetail, detailExpanded])
   const cleanRaw = event.raw ? stripAnsi(event.raw) : ""
 
   const isUserMsg = event.id.startsWith("usr_")
@@ -226,6 +235,9 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
           animation: "fadeSlideUp 0.3s ease-out",
           userSelect: "none",
           WebkitUserSelect: "none",
+          overflow: "hidden",
+          maxWidth: "100%",
+          flexShrink: 0,
         }}
       >
         {/* Header */}
@@ -253,30 +265,64 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
           </span>
         </div>
 
-        {/* Detail */}
+        {/* Detail — collapsible when content is long */}
         {cleanDetail && (
-          <div style={{
-            fontSize: 12,
-            color: "var(--text-secondary)",
-            fontFamily: "'JetBrains Mono', monospace",
-          }}>
-            {event.type === "info" && looksLikeMarkdown(cleanDetail) ? (
-              <>
-                <style>{`
-                  .ec-md p { font-size: 12px; color: rgba(226,232,240,0.7); margin: 0 0 4px; line-height: 1.5; }
-                  .ec-md code { font-family: 'JetBrains Mono', monospace; font-size: 11px; background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 4px; }
-                  .ec-md pre { background: rgba(255,255,255,0.04); border-radius: 8px; padding: 8px 12px; margin: 4px 0; overflow-x: auto; }
-                  .ec-md pre code { background: transparent; padding: 0; }
-                  .ec-md ul, .ec-md ol { padding-left: 16px; font-size: 12px; color: rgba(226,232,240,0.65); margin: 0; }
-                  .ec-md h1,.ec-md h2,.ec-md h3 { font-size: 13px; font-weight: 700; color: #e2e8f0; margin: 6px 0 2px; }
-                  .ec-md a { color: #60a5fa; text-decoration: none; }
-                `}</style>
-                <div className="ec-md">
-                  <ReactMarkdown>{cleanDetail}</ReactMarkdown>
-                </div>
-              </>
-            ) : (
-              cleanDetail
+          <div style={{ position: "relative" }}>
+            <div
+              ref={detailRef}
+              style={{
+                fontSize: 12,
+                color: "var(--text-secondary)",
+                fontFamily: "'JetBrains Mono', monospace",
+                maxHeight: detailExpanded ? "none" : 120,
+                overflow: "hidden",
+              }}
+            >
+              {event.type === "info" && looksLikeMarkdown(cleanDetail) ? (
+                <>
+                  <style>{`
+                    .ec-md p { font-size: 12px; color: rgba(226,232,240,0.7); margin: 0 0 4px; line-height: 1.5; }
+                    .ec-md code { font-family: 'JetBrains Mono', monospace; font-size: 11px; background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 4px; }
+                    .ec-md pre { background: rgba(255,255,255,0.04); border-radius: 8px; padding: 8px 12px; margin: 4px 0; overflow-x: auto; }
+                    .ec-md pre code { background: transparent; padding: 0; }
+                    .ec-md ul, .ec-md ol { padding-left: 16px; font-size: 12px; color: rgba(226,232,240,0.65); margin: 0; }
+                    .ec-md h1,.ec-md h2,.ec-md h3 { font-size: 13px; font-weight: 700; color: #e2e8f0; margin: 6px 0 2px; }
+                    .ec-md a { color: #60a5fa; text-decoration: none; }
+                  `}</style>
+                  <div className="ec-md">
+                    <ReactMarkdown>{cleanDetail}</ReactMarkdown>
+                  </div>
+                </>
+              ) : (
+                cleanDetail
+              )}
+            </div>
+            {/* Gradient fade + expand button when content overflows */}
+            {!detailExpanded && (detailOverflow || cleanDetail.length > 300) && (
+              <div
+                onClick={(e) => { e.stopPropagation(); setDetailExpanded(true) }}
+                style={{
+                  position: "absolute", bottom: 0, left: 0, right: 0,
+                  height: 40,
+                  background: "linear-gradient(transparent, var(--card-bg, rgba(15,23,42,0.95)))",
+                  display: "flex", alignItems: "flex-end", justifyContent: "center",
+                  cursor: "pointer", paddingBottom: 2,
+                }}
+              >
+                <span style={{ fontSize: 10, color: "var(--accent-primary)", fontWeight: 600, opacity: 0.8 }}>
+                  ▼ {t("event.showMore") || "Show more"}
+                </span>
+              </div>
+            )}
+            {detailExpanded && cleanDetail.length > 300 && (
+              <div
+                onClick={(e) => { e.stopPropagation(); setDetailExpanded(false) }}
+                style={{ textAlign: "center", cursor: "pointer", paddingTop: 4 }}
+              >
+                <span style={{ fontSize: 10, color: "var(--accent-primary)", fontWeight: 600, opacity: 0.8 }}>
+                  ▲ {t("event.showLess") || "Show less"}
+                </span>
+              </div>
             )}
           </div>
         )}
@@ -315,16 +361,19 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                   borderRadius: 12,
                   border: opt.style === "danger"
                     ? "1px solid rgba(248,113,113,0.3)"
-                    : "1px solid rgba(59,130,246,0.15)",
+                    : "1px solid rgba(59,130,246,0.3)",
                   background: opt.style === "danger"
-                    ? "rgba(248,113,113,0.08)"
-                    : "rgba(59,130,246,0.05)",
+                    ? "rgba(248,113,113,0.1)"
+                    : "rgba(59,130,246,0.1)",
                   color: opt.style === "danger" ? "#f87171" : "var(--accent-primary)",
                   fontSize: 13,
                   fontWeight: 600,
                   cursor: "pointer",
                   transition: "all 0.2s",
                   textAlign: "left",
+                  wordBreak: "break-word" as const,
+                  whiteSpace: "pre-wrap",
+                  overflow: "hidden",
                 }}
               >
                 {opt.label}
