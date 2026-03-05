@@ -6,6 +6,9 @@ import { makeEventId } from "./types.js"
 /** Strip ANSI escape codes for pattern matching */
 function stripAnsi(s: string): string {
   return s
+    // Cursor positioning (e.g. \x1b[5;40H) → newline (preserves TUI layout)
+    .replace(/\x1b\[\d+;\d+H/g, "\n")
+    // Other CSI sequences (colors, clear, etc.) → remove
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07]*\x07/g, "")
     .replace(/\x1b\(B/g, "")
