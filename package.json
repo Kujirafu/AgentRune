@@ -1,0 +1,5 @@
+{
+  "name": "agentrune-monorepo",
+  "private": true,
+  "workspaces": ["cli", "app"]
+}

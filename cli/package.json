@@ -1,0 +1,31 @@
+{
+  "name": "agentrune",
+  "version": "0.1.0",
+  "description": "AgentRune CLI — AI agent mission control + AgentLore MCP server",
+  "type": "module",
+  "bin": {
+    "agentrune": "dist/bin.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/bin.ts",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "express": "^5.1.0",
+    "ws": "^8.18.0",
+    "node-pty": "^1.0.0",
+    "open": "^11.0.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0"
+  }
+}
