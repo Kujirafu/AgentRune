@@ -157,7 +157,7 @@ export function MissionControl({
     }
     return merged
   })()
-  const [detailTab, setDetailTab] = useState<"thinking" | "code" | "tools">("thinking")
+  const [detailTab, setDetailTab] = useState<"events" | "code" | "thinking">("events")
   // Cumulative token counter
   const [usageTokens, setUsageTokens] = useState<{ input: number; output: number }>({ input: 0, output: 0 })
   const [showProjectUsage, setShowProjectUsage] = useState(false)
@@ -1367,25 +1367,40 @@ return (
                 overscrollBehavior: "contain" as never,
               }}
             >
-              {mainEvents.map((event) => (
-                event.type === "progress_report" ? (
-                  <ProgressCard
-                    key={event.id}
-                    event={event}
-                    onNextStep={(step) => handleSendCommand(step)}
-                  />
-                ) : (
-                  <EventCard
-                    key={event.id}
-                    event={event}
-                    onDecision={event.decision ? (input) => handleDecision(event.id, input) : undefined}
-                    onQuote={handleQuote}
-                    onSaveObsidian={(text) => handleSaveObsidian(text, event)}
-                    onViewDiff={onEventDiff}
-                  />
-                )
+              {/* L1: Only ProgressCards — EventCards are on L2 (Details panel) */}
+              {mainEvents.filter(e => e.type === "progress_report").map((event) => (
+                <ProgressCard
+                  key={event.id}
+                  event={event}
+                  onNextStep={(step) => handleSendCommand(step)}
+                />
               ))}
-              {mainEvents.length === 0 && (
+              {/* Decision requests still show on L1 (agent needs user input) */}
+              {mainEvents.filter(e => e.type === "decision_request" && e.status === "waiting").map((event) => (
+                <EventCard
+                  key={event.id}
+                  event={event}
+                  onDecision={event.decision ? (input) => handleDecision(event.id, input) : undefined}
+                  onQuote={handleQuote}
+                  onSaveObsidian={(text) => handleSaveObsidian(text, event)}
+                  onViewDiff={onEventDiff}
+                />
+              ))}
+              {/* Thinking indicator — show when agent is working but no progress yet */}
+              {agentStatus === "working" && (
+                <div style={{
+                  textAlign: "center",
+                  padding: "12px 0",
+                  color: "var(--text-secondary)",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  opacity: 0.6,
+                  animation: "pulse 2s ease-in-out infinite",
+                }}>
+                  ...
+                </div>
+              )}
+              {mainEvents.filter(e => e.type === "progress_report" || (e.type === "decision_request" && e.status === "waiting")).length === 0 && (
                 <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)", opacity: 0.5 }}>
                   <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.4 }}>
@@ -1442,9 +1457,9 @@ return (
                 background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
               }}>
                 {([
-                  { id: "thinking" as const, label: t("detail.thinking"), count: parsedBlocks.filter(b => b.type === "thinking" || b.type === "response").length },
+                  { id: "events" as const, label: "Events", count: mainEvents.filter(e => e.type !== "progress_report" && e.type !== "decision_request").length },
                   { id: "code" as const, label: "Diff", count: events.filter(e => e.type === "file_edit" || e.type === "file_create").length || parsedBlocks.filter(b => b.type === "tool" && /(?:Edit|Write)\(/.test(b.content)).length || mergedCodeBlocks.length },
-                  { id: "tools" as const, label: t("detail.tools"), count: parsedBlocks.filter(b => b.type === "tool").length },
+                  { id: "thinking" as const, label: t("detail.thinking"), count: parsedBlocks.filter(b => b.type === "thinking" || b.type === "response").length },
                 ]).map((tab) => (
                   <button
                     key={tab.id}
@@ -1472,7 +1487,24 @@ return (
             </div>
 
             {/* Block content */}
-            {detailTab === "code" ? (() => {
+            {detailTab === "events" ? (
+              <div style={{ flex: 1, overflowY: "auto", padding: 16, minHeight: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+                {mainEvents.filter(e => e.type !== "progress_report" && e.type !== "decision_request").map((event) => (
+                  <EventCard
+                    key={event.id}
+                    event={event}
+                    onQuote={handleQuote}
+                    onSaveObsidian={(text) => handleSaveObsidian(text, event)}
+                    onViewDiff={onEventDiff}
+                  />
+                ))}
+                {mainEvents.filter(e => e.type !== "progress_report" && e.type !== "decision_request").length === 0 && (
+                  <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)", opacity: 0.5 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>No events yet</div>
+                  </div>
+                )}
+              </div>
+            ) : detailTab === "code" ? (() => {
               /* Diff tab ??file_edit events with DiffPanel, fallback to AnsiParser diff blocks */
               const fileEvents = events.filter(e => e.type === "file_edit" || e.type === "file_create")
               // Fallback: extract Edit/Write tool calls from AnsiParser tool blocks
@@ -1568,9 +1600,7 @@ return (
                 </div>
               )
             })() : (() => {
-              const activeBlocks = detailTab === "tools"
-                ? parsedBlocks.filter(b => b.type === "tool")
-                : parsedBlocks.filter(b => b.type === "thinking" || b.type === "response")
+              const activeBlocks = parsedBlocks.filter(b => b.type === "thinking" || b.type === "response")
               return (
                 <div
                   ref={(el) => {

@@ -1125,9 +1125,11 @@ export function App() {
           setScreen("overview")
           setViewMode("board")
         }
-      } else if (screenRef.current === "overview") {
-        setScreen("launchpad")
+      } else if (screenRef.current === "launchpad") {
+        // LaunchPad is only for creating new sessions — back goes to overview
+        setScreen("overview")
       } else {
+        // overview is home — minimize app
         CapApp.minimizeApp()
       }
     }).then((h) => { handle = h })
