@@ -21,6 +21,7 @@ import { loadConfig, getConfigDir } from "../shared/config.js"
 import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
+import { getBehaviorRules, getCommandPrompt } from "./behavior-rules.js"
 import { log } from "../shared/logger.js"
 import type { AgentEvent, TaskStore, Project } from "../shared/types.js"
 
@@ -956,19 +957,41 @@ export function createServer(portOverride?: number) {
           }
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted }))
+
+          // Inject behavior rules for new sessions (not resumed)
+          if (!alreadyExisted) {
+            setTimeout(() => {
+              const rules = getBehaviorRules()
+              sessions.write(session.id, `\n${rules}\n`)
+              log.info(`Injected behavior rules for session ${session.id}`)
+            }, 2000)  // Wait for agent to initialize
+          }
           break
         }
 
         case "input": {
           const sessionId = clientSessions.get(ws)
           if (sessionId) {
-            // Reset resume state when user types /resume (allows new resume decision)
             const inputStr = msg.data as string
+
+            // Reset resume state when user types /resume (allows new resume decision)
             if (/\/resume\b/i.test(inputStr)) {
               resumeDecisionDone.delete(sessionId)
               resumeTimers.delete(sessionId + "_scrolled")
               resumeCursorOffset.delete(sessionId)
             }
+
+            // Detect /command and inject prompt instead of raw text
+            const cmdMatch = inputStr.trim().replace(/\r?\n$/, "").match(/^(\/\w+)$/)
+            if (cmdMatch) {
+              const commandPrompt = getCommandPrompt(cmdMatch[1])
+              if (commandPrompt) {
+                sessions.write(sessionId, `${commandPrompt}\n`)
+                log.info(`Injected /${cmdMatch[1]} command prompt for session ${sessionId}`)
+                break
+              }
+            }
+
             sessions.write(sessionId, inputStr)
           }
           break

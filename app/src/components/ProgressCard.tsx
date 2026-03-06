@@ -26,6 +26,7 @@ export function ProgressCard({ event, onNextStep }: ProgressCardProps) {
       WebkitBackdropFilter: "blur(20px)",
       borderRadius: 20,
       border: `1px solid ${cfg.border}`,
+      borderLeft: `3px solid ${cfg.color}`,
       boxShadow: "var(--glass-shadow)",
       padding: 16,
       transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",

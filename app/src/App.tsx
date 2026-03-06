@@ -5,6 +5,7 @@ import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnab
 import { LaunchPad } from "./components/LaunchPad"
 import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
+import { SessionOverview } from "./components/SessionOverview"
 import { DiffPanel } from "./components/DiffPanel"
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
@@ -227,6 +228,10 @@ function useWs() {
 
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
+      // Handle token refresh from daemon (e.g. after daemon restart)
+      if (msg.type === "token_refresh" && msg.sessionToken) {
+        tokenRef.current = msg.sessionToken as string
+      }
       const handlers = handlersRef.current.get(msg.type)
       if (handlers) for (const h of handlers) h(msg)
     }
@@ -930,7 +935,7 @@ const IS_DEV_PREVIEW = typeof window !== "undefined" &&
 
 // ─── Main App (Router) ──────────────────────────────────────────
 
-type Screen = "launchpad" | "session"
+type Screen = "launchpad" | "overview" | "session"
 
 export function App() {
   // Cloud mode: user logged in via AgentLore — reactive state so login completes without reload
@@ -949,6 +954,8 @@ export function App() {
     { id: "demo", name: "Demo Project", cwd: "/home/user/project" },
   ] : [])
   const [screen, setScreen] = useState<Screen>("launchpad")
+  // Auto-switch to overview when sessions load
+  const [initialScreenSet, setInitialScreenSet] = useState(false)
   const [selectedProject, setSelectedProject] = useState<string | null>(IS_DEV_PREVIEW ? "demo" : null)
   const [activeAgentId, setActiveAgentId] = useState<string>("terminal")
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
@@ -956,6 +963,7 @@ export function App() {
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
   const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
   const [allDiffEvents, setAllDiffEvents] = useState<AgentEvent[]>([])
+  const [sessionEventsMap, setSessionEventsMap] = useState<Map<string, AgentEvent[]>>(new Map())
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
@@ -990,11 +998,17 @@ export function App() {
     fetch(`${base}/api/sessions`)
       .then((r) => r.json())
       .then((data: { id: string; projectId: string; agentId: string }[]) => {
-        setActiveSessions(data.map((s) => ({
+        const sessions = data.map((s) => ({
           id: s.id,
           projectId: s.projectId,
           agentId: s.agentId,
-        })))
+        }))
+        setActiveSessions(sessions)
+        // Auto-switch to overview if sessions exist on initial load
+        if (!initialScreenSet && sessions.length > 0) {
+          setScreen("overview")
+          setInitialScreenSet(true)
+        }
       })
       .catch(() => { })
   }, [isAuthed, serverUrl])
@@ -1108,9 +1122,11 @@ export function App() {
         if (viewModeRef.current === "terminal") {
           setViewMode("board")
         } else {
-          setScreen("launchpad")
+          setScreen("overview")
           setViewMode("board")
         }
+      } else if (screenRef.current === "overview") {
+        setScreen("launchpad")
       } else {
         CapApp.minimizeApp()
       }
@@ -1209,9 +1225,9 @@ export function App() {
     } catch { }
   }
 
-  // Back to launchpad
+  // Back to overview (or launchpad if no sessions)
   const handleBack = () => {
-    setScreen("launchpad")
+    setScreen(activeSessions.length > 0 ? "overview" : "launchpad")
   }
 
   if (screen === "session" && selectedProject) {
@@ -1249,7 +1265,7 @@ export function App() {
               sessionToken={sessionToken}
               send={send}
               on={on}
-              onBack={() => { setScreen("launchpad"); setViewMode("board") }}
+              onBack={() => { setScreen(activeSessions.length > 1 ? "overview" : "launchpad"); setViewMode("board") }}
               onOpenTerminal={() => setViewMode("terminal")}
               viewMode={viewMode}
               projects={projects}
@@ -1267,11 +1283,34 @@ export function App() {
               allDiffEvents={allDiffEvents}
               onClose={() => setDiffEvent(null)}
               onSelectEvent={(e) => setDiffEvent(e)}
+              projectId={selectedProject || undefined}
+              apiBase={getApiBase() || undefined}
             />
           </div>
         </ErrorBoundary>
       )
     }
+  }
+
+  // SessionOverview screen — shows all active sessions
+  if (screen === "overview" && activeSessions.length > 0) {
+    return (
+      <ErrorBoundary>
+        <SessionOverview
+          activeSessions={activeSessions}
+          sessionEvents={sessionEventsMap}
+          onSelectSession={handleResume}
+          onNewSession={() => setScreen("launchpad")}
+          onNextStep={(sessionId, step) => {
+            handleResume(sessionId)
+            // Send the step as input after a short delay to let session attach
+            setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
+          }}
+          theme={theme}
+          toggleTheme={toggleTheme}
+        />
+      </ErrorBoundary>
+    )
   }
 
   return (
@@ -1298,6 +1337,8 @@ export function App() {
           localStorage.setItem("agentrune_cloud_token", token)
           setCloudSessionToken(token)
         }
+        // Trigger auth re-check against the new server URL
+        recheckAuth()
       }}
     />
     </ErrorBoundary>
