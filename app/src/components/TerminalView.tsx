@@ -58,6 +58,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
   const promptReadyRef = useRef(false)
   const parserRef = useRef(new AnsiParser())
 
+  // Force re-render for parser blocks (debounced to avoid jank during scroll)
   const [, setParserTick] = useState(0)
   const parserTickTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastScreenTextRef = useRef("")
@@ -95,6 +96,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     return looksShell && !looksCodex
   }, [agentId])
 
+  // Track viewport height (keyboard-aware via visualViewport)
   useEffect(() => {
     const update = () => setViewH(window.visualViewport?.height ?? window.innerHeight)
     window.visualViewport?.addEventListener("resize", update)
@@ -105,6 +107,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     }
   }, [])
 
+  // Swipe-to-open detail panel
   const touchStartRef = useRef({ x: 0, y: 0 })
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }
@@ -112,6 +115,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
   const handleTouchEnd = (e: React.TouchEvent) => {
     const dx = e.changedTouches[0].clientX - touchStartRef.current.x
     const dy = Math.abs(e.changedTouches[0].clientY - touchStartRef.current.y)
+    // Swipe left to open detail panel (at least 150px, mostly horizontal, strict angle)
     if (dx < -150 && dy < 30) {
       setShowDetail(true)
     }
@@ -142,13 +146,18 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       sendInput(text)
       return
     }
-    if (text === "\r") { sendInput(text); return }
-    if (!text.trim()) return
+    if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
+    if (!text.trim()) return  // Don't send empty commands
+    // Send text first, then Enter separately after a delay.
+    // TUI apps like Claude Code process input as a stream ??if text+\r arrives
+    // as one chunk, \r gets treated as a newline in the input buffer instead of
+    // triggering submission. Splitting them ensures \r is handled as Enter.
     sendInput(text)
     setTimeout(() => sendInput("\r"), 30)
     addRecentCommand(project.id, text)
   }, [sendInput, project.id])
 
+  // Image paste handler
   const handleImagePaste = useCallback(async (base64: string, filename: string) => {
     try {
       const res = await fetch(`${getApiBase()}/api/upload`, {
@@ -158,6 +167,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       })
       if (res.ok) {
         const data = await res.json()
+        // Paste the file path into terminal
         sendInput(data.path)
       }
     } catch {}
@@ -219,7 +229,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       cursorBlink: true,
       fontSize: isMobile ? 12 : 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-      disableStdin: isMobile,
+      disableStdin: isMobile,  // On mobile, InputBar handles all input
       theme: {
         background: "#0f172a",
         foreground: "#e2e8f0",
@@ -242,6 +252,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     term.loadAddon(fit)
     term.open(termRef.current)
 
+    // WebGL renderer ??significantly faster scrolling and rendering
     let webglAddon: WebglAddon | null = null
     try {
       webglAddon = new WebglAddon()
@@ -249,7 +260,9 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       term.loadAddon(webglAddon)
     } catch {
       webglAddon = null
+      // WebGL not available ??falls back to canvas 2D
     }
+    // Store ref for safe cleanup
     ;(term as any)._webglAddon = webglAddon
 
     requestAnimationFrame(() => {
@@ -272,6 +285,9 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     })
     resizeObs.observe(termRef.current)
 
+    // Mobile touch scroll: xterm disableStdin=true may break touch scrolling
+    // We manually translate vertical touch drags into scrollLines() calls
+    // with sensitivity multiplier and momentum/inertia for smooth scrolling
     if (isMobile) {
       const el = termRef.current
       let touchY = 0
@@ -280,7 +296,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       let lastTime = 0
       let momentumId = 0
       const lineH = term.options.fontSize ? term.options.fontSize * 1.0 : 14
-      const sensitivity = 3.5
+      const sensitivity = 3.5 // scroll 3.5x faster than finger movement
 
       const stopMomentum = () => {
         if (momentumId) { cancelAnimationFrame(momentumId); momentumId = 0 }
@@ -296,10 +312,11 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       const onTouchMove = (e: TouchEvent) => {
         const now = Date.now()
         const dt = Math.max(now - lastTime, 1)
-        const dy = touchY - e.touches[0].clientY
+        const dy = touchY - e.touches[0].clientY // positive = scroll down
         touchY = e.touches[0].clientY
         lastTime = now
 
+        // Track velocity for momentum (pixels per ms)
         velocity = 0.7 * velocity + 0.3 * (dy / dt)
 
         accum += dy * sensitivity
@@ -308,15 +325,17 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
           term.scrollLines(lines)
           accum -= lines * lineH
         }
+        // Always prevent default in terminal area to avoid browser intercepting scroll
         e.preventDefault()
       }
       const onTouchEnd = () => {
-        let v = velocity * sensitivity
+        // Momentum: continue scrolling with decaying velocity
+        let v = velocity * sensitivity // px/ms scaled
         const friction = 0.95
         const tick = () => {
           v *= friction
           if (Math.abs(v) < 0.01) { momentumId = 0; return }
-          accum += v * 16
+          accum += v * 16 // ~16ms per frame
           const lines = Math.trunc(accum / lineH)
           if (lines !== 0) {
             term.scrollLines(lines)
@@ -360,6 +379,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
       const data = msg.data as string
       xtermRef.current?.write(data)
 
+      // Feed ANSI parser (debounce re-render to avoid scroll jank)
       parserRef.current.feed(data)
       if (!parserTickTimer.current) {
         parserTickTimer.current = setTimeout(() => {
@@ -368,9 +388,11 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         }, 300)
       }
 
+      // Keep a recent plain-text snapshot for resumed-session health checks.
       const plain = stripAnsiForDetection(data)
       lastScreenTextRef.current = (lastScreenTextRef.current + "\n" + plain).slice(-8000)
 
+      // Detect shell prompt
       const promptRe = agentId === "codex"
         ? /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/
         : /[$%>]\s*$/
@@ -403,15 +425,19 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     unsubs.push(on("scrollback", (msg) => {
       const scrollback = msg.data as string
       lastScreenTextRef.current = stripAnsiForDetection(scrollback).slice(-8000)
+      // Clear terminal before writing scrollback to avoid duplicate content on reconnect
       xtermRef.current?.clear()
       xtermRef.current?.write(scrollback, () => {
+        // Scroll after xterm finishes rendering the write buffer
         xtermRef.current?.scrollToBottom()
       })
+      // Fallback: also scroll after a delay in case write callback does not fire
       setTimeout(() => xtermRef.current?.scrollToBottom(), 300)
     }))
 
     unsubs.push(on("attached", (msg) => {
       if (!isMobile) xtermRef.current?.focus()
+      // Scroll to bottom after attach ??use multiple delays since scrollback arrives separately
       setTimeout(() => xtermRef.current?.scrollToBottom(), 100)
       setTimeout(() => xtermRef.current?.scrollToBottom(), 500)
       setTimeout(() => xtermRef.current?.scrollToBottom(), 1000)
@@ -428,6 +454,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
           launchAgentCommand(true)
         }
       }
+
 
       setTimeout(() => {
         if (xtermRef.current && isIdle(xtermRef.current)) {
@@ -449,6 +476,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     return () => { for (const u of unsubs) u() }
   }, [on, send, agent, settings, buildIdleSuggestions, launchAgentCommand, shouldRecoverCodexSession, sessionId, agentId])
 
+  // Android back button ??close overlays first
   useEffect(() => {
     const handler = (e: Event) => {
       if (showBrowser) { setShowBrowser(false); e.preventDefault(); return }
@@ -459,6 +487,8 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     return () => document.removeEventListener("app:back", handler)
   }, [showBrowser, showSettings, showDetail])
 
+  // Attach on mount + re-attach on every WS reconnect.
+  // Re-attaching is idempotent and keeps WS->session mapping correct after reconnect.
   useEffect(() => {
     promptReadyRef.current = false
     parserRef.current.clear()
@@ -494,6 +524,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         background: "#0f172a",
         zIndex: 1,
         color: "#e2e8f0",
+        // Force dark CSS vars so QuickActions/InputBar are visible on dark bg
         "--text-primary": "#f8fafc",
         "--text-secondary": "#94a3b8",
         "--glass-bg": "rgba(30, 41, 59, 0.3)",
@@ -562,6 +593,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
           </span>
         )}
 
+        {/* Detail panel button (shows when there's content) */}
         {hasDetails && (
           <button
             onClick={() => setShowDetail(true)}
@@ -605,6 +637,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         style={{ flex: 1, padding: 4, overflow: "hidden", willChange: "transform" }}
       />
 
+      {/* Smart suggestions */}
       <SmartSuggestions
         actions={smartActions}
         idleSuggestions={idleSuggestions}
@@ -612,8 +645,10 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         onAction={sendInput}
       />
 
+      {/* Quick actions */}
       <QuickActions onAction={sendInput} />
 
+      {/* Input bar with image paste, voice, browse */}
       <InputBar
         onSend={handleSendCommand}
         onImagePaste={handleImagePaste}
@@ -622,6 +657,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
         slashCommands={agent?.slashCommands}
       />
 
+      {/* Overlays */}
       <SettingsSheet
         open={showSettings}
         settings={settings}
@@ -651,3 +687,7 @@ export function TerminalView({ project, agentId, sessionId, send, on, onBack }: 
     </div>
   )
 }
+
+
+
+

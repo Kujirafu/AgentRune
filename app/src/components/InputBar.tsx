@@ -117,20 +117,21 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     setIsListening(true)
   }
 
-  // Clipboard history
+  // ─── Clipboard history ───
   const [showClipboard, setShowClipboard] = useState(false)
   const [clipHistory, setClipHistory] = useState<{ text: string; time: number; isImage?: boolean }[]>(() => {
     try { return JSON.parse(localStorage.getItem("clipboard_history") || "[]") } catch { return [] }
   })
 
   const saveClipHistory = (items: typeof clipHistory) => {
-    const capped = items.slice(0, 30)
+    const capped = items.slice(0, 30) // keep last 30
     setClipHistory(capped)
     localStorage.setItem("clipboard_history", JSON.stringify(capped))
   }
 
   const addToClipHistory = (text: string, isImage = false) => {
     if (!text || text.length < 1) return
+    // Dedupe: don't add if same as most recent
     setClipHistory(prev => {
       if (prev[0]?.text === text) return prev
       const next = [{ text, time: Date.now(), isImage }, ...prev.filter(h => h.text !== text)].slice(0, 30)
@@ -139,6 +140,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     })
   }
 
+  // Read system clipboard and add to history
   const readSystemClipboard = async () => {
     try {
       const { type, value } = await Clipboard.read()
@@ -160,6 +162,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     setShowClipboard(true)
   }
 
+  // Auto-read clipboard when app regains focus (builds history over time)
   useEffect(() => {
     const onFocus = () => { readSystemClipboard() }
     window.addEventListener("focus", onFocus)
@@ -179,6 +182,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     setShowClipboard(false)
   }
 
+  // Hardware back button closes clipboard panel
   useEffect(() => {
     if (!showClipboard) return
     const listener = CapApp.addListener("backButton", () => {
@@ -187,6 +191,8 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     return () => { listener.then(h => h.remove()) }
   }, [showClipboard])
 
+  // Document-level paste listener: catches image paste from Samsung keyboard clipboard
+  // that <input type="text"> can't handle natively
   useEffect(() => {
     const handleDocPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items
@@ -212,6 +218,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     return () => document.removeEventListener("paste", handleDocPaste)
   }, [onImagePaste])
 
+  // Fixed height textarea — use expand button for long content
   useEffect(() => {
     const el = inputRef.current
     if (!el) return
@@ -224,6 +231,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     }
   }, [autoFocus])
 
+  // Auto-scroll history to bottom when new items arrive
   useEffect(() => {
     if (historyRef.current) {
       historyRef.current.scrollTop = historyRef.current.scrollHeight
@@ -233,6 +241,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
   const handleSend = () => {
     const trimmed = input.trim()
     if (!trimmed && pasteImages.length === 0) {
+      // Empty input (no image) → send Enter key to terminal (for TUI menu confirmation)
       onSend("\r")
       return
     }
@@ -240,6 +249,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
       addSent({ text: trimmed, time: Date.now() })
       onSend(input)
     } else if (pasteImages.length > 0) {
+      // Image attached but no text — send empty message to trigger submission
       onSend("")
     }
     setInput("")
@@ -263,6 +273,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     const items = e.clipboardData?.items
     if (!items) return
 
+    // Save pasted text to clipboard history
     const pastedText = e.clipboardData?.getData("text/plain")
     if (pastedText) addToClipHistory(pastedText)
 
@@ -298,9 +309,11 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
       }
       reader.readAsDataURL(file)
     }
+    // Reset so same file can be picked again
     e.target.value = ""
   }
 
+  // Tap to resend
   const handleResend = (text: string) => {
     setInput(text)
     inputRef.current?.focus()
@@ -308,6 +321,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
 
   const hasInput = input.trim().length > 0 || pasteImages.length > 0
 
+  // Slash command suggestions
   const filteredSlash = useMemo(() => {
     if (!slashCommands || !input.startsWith("/")) return []
     const q = input.toLowerCase()
@@ -386,7 +400,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         </div>
       )}
 
-      {/* Image paste preview */}
+      {/* Image paste preview — horizontal scrollable thumbnails */}
       {pasteImages.length > 0 && (
         <div style={{
           padding: "8px 14px",
@@ -452,7 +466,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         </div>
       )}
 
-      {/* Sent command history */}
+      {/* Sent command history — persistent, scrollable */}
       {sentHistory.length > 0 && (
         <div
           ref={historyRef}
@@ -515,7 +529,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         </div>
       )}
 
-      {/* Input row */}
+      {/* Input row — floating glass bar */}
       <div style={{
         display: "flex",
         gap: 8,
@@ -523,6 +537,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         paddingBottom: "calc(10px + env(safe-area-inset-bottom, 0px))",
         alignItems: "center",
       }}>
+        {/* Browse files button */}
         {onBrowse && (
           <button
             onClick={onBrowse}
@@ -535,6 +550,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         )}
 
+        {/* Image pick button */}
         {onImagePaste && (
           <>
             <input
@@ -559,6 +575,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </>
         )}
 
+        {/* Clipboard button — opens editable clipboard panel */}
         {hasClipboardSupport && (
           <button
             onClick={handleClipboardOpen}
@@ -572,6 +589,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         )}
 
+        {/* Glass text input — wrapped in form for reliable mobile Enter/Send */}
         <form
           onSubmit={(e) => { e.preventDefault(); handleSend() }}
           style={{
@@ -619,6 +637,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
               lineHeight: 1.4,
             }}
           />
+          {/* Expand button — always visible for fullscreen editing */}
           <button
             type="button"
             onClick={() => setExpandedEditor(true)}
@@ -648,6 +667,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         </form>
 
+        {/* Voice input button */}
         {hasSpeechSupport && (
           <button
             onClick={toggleVoice}
@@ -674,6 +694,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           </button>
         )}
 
+        {/* Send / Enter button — circular glass */}
         <button
           onClick={handleSend}
           style={{
@@ -737,7 +758,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
               display: "flex", alignItems: "center", justifyContent: "center",
               flexShrink: 0,
             }}>
-              {"\u2190"}
+              {"←"}
             </button>
             <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
               {t("input.placeholder")}
@@ -783,7 +804,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
         document.body
       )}
 
-      {/* Clipboard history panel */}
+      {/* Clipboard history panel — portal to escape overflow:hidden parents */}
       {showClipboard && createPortal(
         <div
           onClick={() => setShowClipboard(false)}
@@ -799,6 +820,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
           <div onClick={(e) => e.stopPropagation()} style={{
             flex: 1, display: "flex", flexDirection: "column", minHeight: 0,
           }}>
+            {/* Header */}
             <div style={{
               display: "flex", alignItems: "center", gap: 12,
               marginBottom: 16,
@@ -812,12 +834,12 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
                 display: "flex", alignItems: "center", justifyContent: "center",
                 flexShrink: 0,
               }}>
-                {"\u2190"}
+                {"←"}
               </button>
               <div style={{ flex: 1, fontSize: 18, fontWeight: 700, color: "#fff" }}>
                 {t("input.clipboard") || "Clipboard"}
               </div>
-              <button onClick={() => { saveClipHistory([]) }} style={{
+              <button onClick={() => { saveClipHistory([]); }} style={{
                 padding: "6px 12px", borderRadius: 10,
                 border: "1px solid rgba(255,255,255,0.15)",
                 background: "rgba(255,255,255,0.05)",
@@ -829,6 +851,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
               </button>
             </div>
 
+            {/* History list */}
             <div style={{
               flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8,
               WebkitOverflowScrolling: "touch" as never,
