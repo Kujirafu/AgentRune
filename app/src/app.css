@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-glass: rgba(255, 255, 255, 0.08);
+  --color-glass-border: rgba(255, 255, 255, 0.12);
+  --color-glass-hover: rgba(255, 255, 255, 0.15);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.glass {
+  background: var(--color-glass);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 16px;
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+@keyframes borderGlowBlue {
+  0%, 100% { box-shadow: inset 0 0 20px 2px rgba(96,165,250,0.1), inset 0 0 5px 1px rgba(96,165,250,0.2); }
+  50% { box-shadow: inset 0 0 25px 3px rgba(96,165,250,0.2), inset 0 0 8px 2px rgba(96,165,250,0.35); }
+}
+
+@keyframes borderGlowBlueLight {
+  0%, 100% { box-shadow: inset 0 0 12px 2px rgba(255,127,80,0.15), inset 0 0 4px 1px rgba(255,127,80,0.25); }
+  50% { box-shadow: inset 0 0 16px 3px rgba(255,127,80,0.25), inset 0 0 6px 2px rgba(255,127,80,0.35); }
+}

@@ -1,2 +1,13 @@
+import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
-createRoot(document.getElementById("root")!).render(<div>AgentRune</div>)
+import { App } from "./App"
+import { LocaleProvider } from "./lib/i18n/index.js"
+import "./app.css"
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <LocaleProvider>
+      <App />
+    </LocaleProvider>
+  </StrictMode>
+)
