@@ -7,8 +7,6 @@ export default defineConfig({
   outDir: "dist",
   clean: true,
   sourcemap: true,
-  banner: {
-    js: "#!/usr/bin/env node",
-  },
+  shims: true,
   external: ["node-pty"],
 })
