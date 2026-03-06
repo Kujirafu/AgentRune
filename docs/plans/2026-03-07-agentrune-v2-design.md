@@ -125,6 +125,12 @@ CLI 監控 agent PTY 輸出，在關鍵時機自動注入提示。
 
 每個 agent session 是 fresh 的，但透過 Obsidian vault 獲得完整專案知識。Obsidian 是 agent 之間的共享記憶體。
 
+**儲存位置：**
+- 設定檔 `~/.agentrune/config.json` 裡的 `vaultPath` 欄位
+- 預設：`~/.agentrune/knowledge/`（不依賴 Obsidian）
+- 有 Obsidian 的用戶可設成自己的 vault 路徑（例如 `~/Documents/Obsidian/MyVault/`）
+- 寫入的都是標準 markdown 檔案，任何編輯器都能看
+
 **MCP Documentation Tools：**
 
 寫入（agent 做完事後呼叫）：
