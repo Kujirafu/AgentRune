@@ -1,0 +1,17 @@
+{
+  "id": "session_1772805341292_fpti",
+  "projectId": "default",
+  "agentId": "terminal",
+  "startedAt": 1772805341292,
+  "status": "completed",
+  "events": [],
+  "endedAt": 1772805341566,
+  "summary": {
+    "filesModified": 0,
+    "filesCreated": 0,
+    "linesAdded": 0,
+    "linesRemoved": 0,
+    "decisionsAsked": 0,
+    "duration": 274
+  }
+}
