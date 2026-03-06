@@ -262,3 +262,15 @@ Project Panel（左滑進入）
 5. **多 Session / Worktree** — worktree manager + 多 session UI
 6. **APP 導航重構** — Project Panel + Session Overview + Session Detail
 7. **Command Registry** — AgentLore 端 command 定義 + CLI 拉取 + APP 選單
+
+---
+
+## 補充設計決策
+
+| 議題 | 決策 | 理由 |
+|------|------|------|
+| 通知 | Capacitor Local Notification 先做，FCM 未來 | 零成本零依賴，主動監控場景為主 |
+| 合併衝突 | 派 agent 解決 + 記錄到 vault | 手機上解 conflict 體驗差，符合「指令→結果」 |
+| Agent 啟動流程 | CLI 先讀 vault，直接注入上下文到 PTY | 不依賴 agent 配合，所有 agent 通用 |
+| 成本追蹤 | Parse engine 從 PTY 輸出解析 | agent 不知道自己花費，只能被動收集 |
+| 斷線恢復 | 現有 events_replay 機制 | progress_report 存入現有 event 存儲，零額外工作 |
