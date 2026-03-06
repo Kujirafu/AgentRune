@@ -40,6 +40,18 @@ export async function startMcpServer() {
   }, {
     instructions: `AgentRune MCP server — proxies AgentLore knowledge base tools + local device tools.
 
+IMPORTANT: After completing any task or reaching a milestone, you MUST call report_progress
+to notify the user. The user monitors your work from a mobile APP and can only see structured
+progress reports — they cannot see your raw terminal output.
+
+## Progress Reporting (REQUIRED)
+- report_progress: Report work progress to the user (MUST call after completing tasks)
+
+## Knowledge Management
+- log_prerequisite: Record prerequisites, constraints, or lessons learned
+- log_decision: Record architecture/design decisions
+- get_project_context: Read project context from shared knowledge vault
+
 ## AgentLore Tools
 - search: Search the AI-verified knowledge base for solutions
 - get_entry: Get full details of a knowledge entry
@@ -184,6 +196,118 @@ export async function startMcpServer() {
     async () => {
       const text = readClipboard()
       return { content: [{ type: "text" as const, text: text || "(clipboard empty)" }] }
+    }
+  )
+
+  // --- Progress Reporting (MCP Gate Keeper) ---
+
+  server.tool(
+    "report_progress",
+    "REQUIRED: Report your work progress to the user. Call this after completing a task or reaching a milestone. The user's APP will display a structured summary card based on your report. Write everything in the user's language.",
+    {
+      title: z.string().describe("Short title of what was accomplished, in user's language"),
+      status: z.enum(["done", "blocked", "in_progress"]).describe("Current status"),
+      summary: z.string().describe("Natural language summary of the work, in user's language"),
+      nextSteps: z.array(z.string()).describe("Suggested next actions, in user's language"),
+      details: z.string().optional().describe("Detailed explanation for expandable panel"),
+    },
+    async ({ title, status, summary, nextSteps, details }) => {
+      // Validation
+      if (!title.trim()) return { content: [{ type: "text" as const, text: "Error: title cannot be empty. Please provide a short title describing what you accomplished." }], isError: true }
+      if (!summary.trim()) return { content: [{ type: "text" as const, text: "Error: summary cannot be empty. Please write a natural language summary of your work." }], isError: true }
+      if (status === "done" && nextSteps.length === 0) return { content: [{ type: "text" as const, text: "Error: when status is 'done', nextSteps must have at least one item." }], isError: true }
+
+      const report = { title, status, summary, nextSteps, details }
+
+      const config = loadConfig()
+      try {
+        await fetch(`http://localhost:${config.port}/api/progress`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(report),
+        })
+      } catch {
+        // ws-server may not be running — still return success to agent
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `${title}\n\n_reminder: 回報成功。提醒：summary 寫人話、用用戶語言、卡住了就說你需要什麼、每完成一段有意義的工作就報一次。`,
+        }],
+      }
+    }
+  )
+
+  // --- Knowledge Management (Obsidian Vault — Shared Memory) ---
+
+  server.tool(
+    "get_project_context",
+    "Read the project's shared knowledge context from the vault. Call this at the start of a new session to understand the project state, prerequisites, recent progress, and architecture decisions.",
+    {},
+    async () => {
+      const config = loadConfig()
+      try {
+        const res = await fetch(`http://localhost:${config.port}/api/vault/context`)
+        const data = await res.json() as { context: string }
+        return { content: [{ type: "text" as const, text: `${data.context}\n\n_reminder: 上下文已載入。提醒：先讀完再開始工作、注意前提條件中的限制和踩坑。` }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not read project context. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
+    "log_prerequisite",
+    "Record a prerequisite, constraint, or lesson learned. This gets stored in the project's shared knowledge vault so future agent sessions can avoid the same pitfalls.",
+    {
+      title: z.string().describe("Short title (e.g. 'Node 18 required for native ESM')"),
+      content: z.string().describe("Detailed explanation of the prerequisite/constraint"),
+    },
+    async ({ title, content }) => {
+      const config = loadConfig()
+      try {
+        await fetch(`http://localhost:${config.port}/api/vault/prerequisite`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, content }),
+        })
+      } catch { /* non-fatal */ }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Prerequisite recorded: "${title}".\n\n_reminder: 前提條件已記錄。提醒：記錄「為什麼」不是「是什麼」、未來的 agent 會讀這份紀錄。`,
+        }],
+      }
+    }
+  )
+
+  server.tool(
+    "log_decision",
+    "Record an architecture or design decision. This gets stored in the project's shared knowledge vault for future reference.",
+    {
+      title: z.string().describe("Decision title (e.g. 'Use SQLite instead of PostgreSQL')"),
+      decision: z.string().describe("What was decided"),
+      alternatives: z.string().optional().describe("What alternatives were considered"),
+      rationale: z.string().optional().describe("Why this decision was made"),
+    },
+    async ({ title, decision, alternatives, rationale }) => {
+      const config = loadConfig()
+      try {
+        await fetch(`http://localhost:${config.port}/api/vault/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, decision, alternatives, rationale }),
+        })
+      } catch { /* non-fatal */ }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Decision recorded: "${title}" → ${decision}.\n\n_reminder: 決策已記錄。提醒：包含替代方案和理由、不要推翻已有決策除非有明確理由。`,
+        }],
+      }
     }
   )
 
