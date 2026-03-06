@@ -5,6 +5,7 @@ import type { AgentEvent } from "../types"
 import { AGENTS } from "../types"
 import { getSettings, saveSettings, addRecentCommand, getApiBase } from "../lib/storage"
 import { EventCard } from "./EventCard"
+import { ProgressCard } from "./ProgressCard"
 import type { AgentStatus } from "./StatusIndicator"
 import { QuickActions } from "./QuickActions"
 import { InputBar } from "./InputBar"
@@ -83,6 +84,7 @@ export function MissionControl({
   const [previewFile, setPreviewFile] = useState<string | null>(null)
   // Multi-session activity tracking
   const [sessionActivity, setSessionActivity] = useState<Record<string, { title: string; status: string; unread: number }>>({})
+  const [sessionProgress, setSessionProgress] = useState<Record<string, AgentEvent>>({})
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [renamingSession, setRenamingSession] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -266,11 +268,15 @@ export function MissionControl({
   // ?????? Swipe gesture handlers ??????
   const onTouchStart = useCallback((e: React.TouchEvent) => {
     // Don't start swipe tracking when touching interactive elements (buttons, inputs, textareas)
-    const tag = (e.target as HTMLElement).closest("button, input, textarea, a, [role=button]")
+    const tag = (e.target as HTMLElement).closest("input, textarea")
+    const x = e.touches[0].clientX
+    const screenW = window.innerWidth
+    // Block swipe tracking near screen edges (Android back gesture zones)
+    const isEdge = x < 30 || x > screenW - 30
     dragRef.current = {
-      startX: e.touches[0].clientX, startY: e.touches[0].clientY,
-      lastX: e.touches[0].clientX, lastY: e.touches[0].clientY,
-      direction: tag ? "blocked" : "", isDragging: false, offset: 0, startTime: Date.now(),
+      startX: x, startY: e.touches[0].clientY,
+      lastX: x, lastY: e.touches[0].clientY,
+      direction: (tag || isEdge) ? "blocked" : "", isDragging: false, offset: 0, startTime: Date.now(),
     }
   }, [])
 
@@ -399,6 +405,17 @@ export function MissionControl({
       if (/^[\w.-]+\s*[\u00B7\u2022]\s*\d+%\s*left/i.test(line)) continue
       if (/^\/model\b/i.test(line)) continue
 
+      // Claude Code banner / status bar / resume noise filters
+      if (/Claude Code v\d/i.test(line)) continue
+      if (/Opus \d|Sonnet \d|Haiku \d|Claude Max|Claude Pro/i.test(line)) continue
+      if (/^~\/|^[A-Z]:\\|^\/[a-z]/i.test(line) && line.length < 80 && !/\u25cf/.test(line)) continue
+      if (/^\/resume\b|^\/doctor\b|^\/fast\b|Resume a previous/i.test(line)) continue
+      if (/Found \d+ settings issue|0 tokens/i.test(line)) continue
+      if (/plan mode on|shift\+tab to cycle/i.test(line)) continue
+      if (/Resume Session \(\d+ of \d+\)/i.test(line)) continue
+      if (/^Ctrl\+[A-Z]|^Enter to select/i.test(line)) continue
+      if (/^\$ node -e/i.test(line)) continue
+
       if (isCodex) {
         if (/^OpenAI\s+Codex\b/i.test(line)) continue
         if (/\/model\s+to\s+change/i.test(line)) continue
@@ -488,7 +505,9 @@ export function MissionControl({
     const trimmedInput = text.trim()
     if (!trimmedInput) return
     lastUserInputRef.current = trimmedInput
-    awaitingReplyRef.current = true
+    // Don't accumulate reply buffer for TUI commands — they produce menu rendering, not text replies
+    const isTuiCommand = /^\/(resume|status)\b/i.test(trimmedInput)
+    awaitingReplyRef.current = !isTuiCommand
     replyBufferRef.current = ""
     lastParsedBlockCountRef.current = parserRef.current.getBlocks().length
     if (replyFlushTimerRef.current) {
@@ -552,7 +571,7 @@ export function MissionControl({
       setTimeout(() => sendInput(part), i * 150)
     })
     setEvents((prev) =>
-      prev.map((e) => e.id === eventId ? { ...e, status: "completed" as const } : e)
+      prev.map((e) => e.id === eventId ? { ...e, status: "completed" as const, _selectedInput: input } as any : e)
     )
     // Clear dedup state + allow fresh scrollback parsing for restored session content
     parseStateRef.current.seenTools.clear()
@@ -642,7 +661,7 @@ export function MissionControl({
       const event = msg.event as AgentEvent
       if (!event) return
       // Filter tool events ??those belong in Details > Tools panel
-      if (isToolEvent(event)) return
+      // No filtering — all events from server are meaningful (JSONL watcher + parse engine)
       setEvents(prev => {
         const existingIds = new Set(prev.map(e => e.id))
         if (existingIds.has(event.id)) return prev
@@ -662,36 +681,29 @@ export function MissionControl({
           if (evtDetail && pTitle && evtDetail === pTitle) return prev
           if (evtTitle && pDetail && evtTitle === pDetail) return prev
         }
-        return [...prev, event].sort((a, b) => a.timestamp - b.timestamp).slice(-100)
+        return [...prev, event].slice(-100)
       })
       if (event.type === "decision_request" && event.status === "waiting") {
         setAgentStatus("waiting")
         if (navigator.vibrate) navigator.vibrate([200, 100, 200])
       }
+      // Track last progress report for current session
+      if (event.type === "progress_report" && event.progress && sessionId) {
+        setSessionProgress(prev => ({ ...prev, [sessionId]: event }))
+      }
     }))
 
     // Replay stored events on re-attach (from server adapter)
-    // Filter out tool call events ??those belong in Details > Tools panel only.
-    const isToolEvent = (e: AgentEvent) => {
-      if (e.type === "command_run") return true
-      if (e.type === "info") {
-        const t = e.title || ""
-        if (/^(Reading|Editing|Creating|Running command|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit|Skill)\b/.test(t)) return true
-        if (/^\d[\d,]*\s*tokens?\s/i.test(t)) return true
-        if (/^Thinking/i.test(t)) return true
-      }
-      return false
-    }
     unsubs.push(on("events_replay", (msg) => {
       const replayed = (msg.events as AgentEvent[]) || []
-      const filtered = replayed.filter(e => !isToolEvent(e))
+      const filtered = replayed
       if (filtered.length > 0) {
         // Merge server events with any client-side events (dedupe by id)
         setEvents(prev => {
           const existingIds = new Set(prev.map(e => e.id))
           const newEvents = filtered.filter(e => !existingIds.has(e.id))
           if (newEvents.length === 0) return prev
-          return [...newEvents, ...prev].sort((a, b) => a.timestamp - b.timestamp)
+          return [...prev, ...newEvents]
         })
         const latest = filtered[filtered.length - 1]
         if (latest?.type === "decision_request" && latest.status === "waiting") {
@@ -834,6 +846,18 @@ export function MissionControl({
     }))
 
     // Track WS connection status + re-attach session on reconnect
+    // Worktree operation results
+    unsubs.push(on("worktree_result", (msg) => {
+      const success = msg.success as boolean
+      const message = msg.message as string
+      setEvents(prev => [...prev, {
+        id: `wt_${Date.now()}`, timestamp: Date.now(),
+        type: "info" as const,
+        status: success ? "completed" as const : "failed" as const,
+        title: success ? message : (t("mc.worktreeFailed") + ": " + message),
+      }].slice(-200))
+    }))
+
     unsubs.push(on("__ws_open__", () => {
       setWsConnected(true)
       // Re-attach to session so server restores WS??????????ion mapping
@@ -888,9 +912,26 @@ export function MissionControl({
       "error",
       "test_result",
       "info",
+      "response",
       "session_summary",
+      "progress_report",
     ].includes(e.type)) return false
     if (!e.title && !e.detail) return false
+    // Filter out noise from info events — keep only actionable/meaningful ones
+    if (e.type === "info") {
+      const t = e.title || ""
+      const d = e.detail || ""
+      const combined = t + " " + d
+      // Noise: only skip truly useless status bar noise
+      // NOTE: "Thinking..." and "Compacting context" are useful status — DO NOT filter them
+      // Banner / status bar / TUI leak filter
+      if (/Claude Code v\d/i.test(combined)) return false
+      if (/Opus \d|Sonnet \d|Haiku \d|Claude Max|Claude Pro/i.test(combined)) return false
+      if (/Resume Session \(\d+ of \d+\)/i.test(combined)) return false
+      if (/plan mode on|shift\+tab to cycle/i.test(combined)) return false
+      if (/Found \d+ settings issue|0 tokens/i.test(combined)) return false
+      if (/^\$ node -e/i.test(t)) return false
+    }
     return true
   })
 return (
@@ -1048,16 +1089,46 @@ return (
                         {agentDef?.name || s.agentId}
                         {label && <span style={{ opacity: 0.7 }}> ??{proj?.name || s.projectId}</span>}
                       </div>
-                      {/* Last event summary */}
-                      {!isCurrent && sessionActivity[s.id]?.title && (
-                        <div style={{
-                          fontSize: 11, color: "var(--text-secondary)", fontWeight: 500,
-                          marginTop: 4, opacity: 0.6,
-                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                        }}>
-                          {sessionActivity[s.id].title}
-                        </div>
-                      )}
+                      {/* Inline progress summary */}
+                      {(() => {
+                        const prog = sessionProgress[s.id]?.progress
+                        if (!prog) {
+                          // Fallback to last event title
+                          if (!isCurrent && sessionActivity[s.id]?.title) {
+                            return (
+                              <div style={{
+                                fontSize: 11, color: "var(--text-secondary)", fontWeight: 500,
+                                marginTop: 4, opacity: 0.6,
+                                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                              }}>
+                                {sessionActivity[s.id].title}
+                              </div>
+                            )
+                          }
+                          return null
+                        }
+                        const statusColor = prog.status === "done" ? "rgba(74,222,128,0.8)"
+                          : prog.status === "blocked" ? "rgba(248,113,113,0.9)"
+                          : "var(--accent-primary)"
+                        return (
+                          <div style={{
+                            marginTop: 6, padding: "8px 10px",
+                            background: "var(--icon-bg)",
+                            border: "1px solid var(--glass-border)",
+                            borderRadius: 10,
+                          }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                              <div style={{ width: 5, height: 5, borderRadius: "50%", background: statusColor, flexShrink: 0 }} />
+                              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {prog.title}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {prog.summary}
+                            </div>
+                          </div>
+                        )
+                      })()}
                     </div>
                     {/* Tap for options */}
                     <div
@@ -1297,18 +1368,26 @@ return (
               }}
             >
               {mainEvents.map((event) => (
-                <EventCard
-                  key={event.id}
-                  event={event}
-                  onDecision={event.decision ? (input) => handleDecision(event.id, input) : undefined}
-                  onQuote={handleQuote}
-                  onSaveObsidian={(text) => handleSaveObsidian(text, event)}
-                  onViewDiff={onEventDiff}
-                />
+                event.type === "progress_report" ? (
+                  <ProgressCard
+                    key={event.id}
+                    event={event}
+                    onNextStep={(step) => handleSendCommand(step)}
+                  />
+                ) : (
+                  <EventCard
+                    key={event.id}
+                    event={event}
+                    onDecision={event.decision ? (input) => handleDecision(event.id, input) : undefined}
+                    onQuote={handleQuote}
+                    onSaveObsidian={(text) => handleSaveObsidian(text, event)}
+                    onViewDiff={onEventDiff}
+                  />
+                )
               ))}
               {mainEvents.length === 0 && (
                 <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)", opacity: 0.5 }}>
-                  <div style={{ marginBottom: 16 }}>
+                  <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.4 }}>
                       <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
                     </svg>
@@ -1696,6 +1775,33 @@ return (
                     label: t("mc.rename"),
                     desc: t("mc.renameDesc"),
                     onClick: () => { setRenameValue(label || ""); setRenamingSession(s.id); setContextSession(null) },
+                  })}
+                  {isCurrent && actionRow({
+                    icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9" /></svg>,
+                    label: t("settings.title"),
+                    desc: t("settings.model") + " / " + t("settings.mode"),
+                    onClick: () => { setShowSettings(true); setContextSession(null) },
+                  })}
+                  {actionRow({
+                    icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>,
+                    label: t("mc.watchOnComputer"),
+                    desc: t("mc.watchOnComputerDesc"),
+                    onClick: () => { send({ type: "start_watch", sessionId: s.id }); setContextSession(null) },
+                  })}
+                  <div style={{ height: 1, margin: "2px 20px", background: "var(--glass-border)" }} />
+                  {actionRow({
+                    icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>,
+                    label: t("mc.mergeWorktree"),
+                    desc: t("mc.mergeWorktreeDesc"),
+                    color: "#22c55e",
+                    onClick: () => { send({ type: "merge_worktree", sessionId: s.id }); setContextSession(null) },
+                  })}
+                  {actionRow({
+                    icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>,
+                    label: t("mc.discardWorktree"),
+                    desc: t("mc.discardWorktreeDesc"),
+                    color: "#f59e0b",
+                    onClick: () => { send({ type: "discard_worktree", sessionId: s.id }); setContextSession(null) },
                   })}
                   <div style={{ height: 1, margin: "2px 20px", background: "var(--glass-border)" }} />
                   {actionRow({

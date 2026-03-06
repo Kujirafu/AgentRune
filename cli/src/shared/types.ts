@@ -14,7 +14,9 @@ export interface AgentEvent {
     | "decision_request"
     | "error"
     | "info"
+    | "response"
     | "session_summary"
+    | "progress_report"
   status: "in_progress" | "completed" | "failed" | "waiting"
   title: string
   detail?: string
@@ -27,12 +29,21 @@ export interface AgentEvent {
   decision?: {
     options: DecisionOption[]
   }
+  progress?: ProgressReport
 }
 
 export interface DecisionOption {
   label: string
   input: string
   style: "primary" | "danger" | "default"
+}
+
+export interface ProgressReport {
+  title: string
+  status: "done" | "blocked" | "in_progress"
+  summary: string
+  nextSteps: string[]
+  details?: string
 }
 
 export interface SessionSummary {
@@ -71,6 +82,7 @@ export interface ParseContext {
   lastEventType?: string
   isIdle: boolean
   resumeCursorOffset?: number  // net cursor position after server auto-scroll in /resume TUI
+  resumeTuiActive?: boolean    // signal from parse engine: resume TUI is on screen (trigger only, no decision event)
 }
 
 export interface Project {
