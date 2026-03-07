@@ -37,6 +37,7 @@ export const en: Record<string, string> = {
   "launchpad.resume": "Resume",
   "launchpad.quickConnect": "Quick Connect",
   "launchpad.tapToConnect": "Tap to connect",
+  "launchpad.connected": "Connected",
   "launchpad.noCloudDevices": "Run npx agentrune on your computer to appear here",
 
   // Settings
@@ -125,7 +126,9 @@ export const en: Record<string, string> = {
   "event.decisionRequest": "Needs Decision",
   "event.error": "Error",
   "event.info": "Info",
+  "event.response": "Response",
   "event.sessionSummary": "Summary",
+  "event.progressReport": "Progress",
 
   // EventCard context menu
   "event.copy": "Copy",
@@ -175,6 +178,8 @@ export const en: Record<string, string> = {
   "mc.openTerminalDesc": "View raw terminal output",
   "mc.rename": "Rename",
   "mc.renameDesc": "Set a custom label for this session",
+  "mc.watchOnComputer": "Watch on Computer",
+  "mc.watchOnComputerDesc": "Open terminal sync on your computer",
   "mc.killSession": "Kill Session",
   "mc.killSessionDesc": "Permanently end this session",
   "mc.cancelAction": "Cancel",
@@ -183,6 +188,13 @@ export const en: Record<string, string> = {
   "mc.sessionLabelPlaceholder": "Session label...",
   "mc.save": "Save",
   "mc.bypass": "BYPASS",
+  "mc.mergeWorktree": "Merge to Main",
+  "mc.mergeWorktreeDesc": "Merge this session's changes into main branch",
+  "mc.discardWorktree": "Discard Changes",
+  "mc.discardWorktreeDesc": "Delete worktree and discard all changes",
+  "mc.worktreeMerged": "Worktree merged successfully",
+  "mc.worktreeDiscarded": "Worktree discarded",
+  "mc.worktreeFailed": "Worktree operation failed",
 
   // Detail Panel
   "detail.title": "Details",
@@ -268,4 +280,52 @@ export const en: Record<string, string> = {
   "slash.permissions": "Manage permissions",
   "slash.status": "Show session status",
   "slash.mcp": "Manage MCP servers",
+
+  // Settings — Codex
+  "settings.codexModel": "Codex Model",
+  "settings.codexReasoning": "Codex Reasoning",
+
+  // ProjectOverview
+  "overview.noSessions": "no sessions",
+  "overview.tapToStart": "Tap to start a session",
+  "overview.newSession": "New Session",
+  "overview.viewPrd": "View PRD",
+  "overview.killAll": "Kill All Sessions",
+  "overview.devices": "Devices",
+  "overview.notConnected": "Not connected",
+  "overview.connectedTo": "Connected: {url}",
+  "overview.noDevices": "No devices found. Login to AgentLore to register devices.",
+  "overview.tapToConnect": "Tap to connect",
+  "overview.connected": "Connected",
+  "overview.offline": "Offline",
+  "overview.manualConnection": "Manual Connection",
+  "overview.connect": "Connect",
+  "overview.statusDone": "Done",
+  "overview.statusBlocked": "Blocked",
+  "overview.statusWorking": "Working",
+
+  // NewSessionSheet
+  "newSession.title": "New Session",
+  "newSession.project": "Project",
+  "newSession.agent": "Agent",
+  "newSession.projectName": "Project name",
+  "newSession.projectPath": "Path (e.g. /home/user/project)",
+  "newSession.creating": "Creating...",
+  "newSession.create": "Create",
+  "newSession.cancel": "Cancel",
+  "newSession.newProject": "+ New Project...",
+  "newSession.startSession": "Start Session",
+
+  // Session Dashboard (Panel 1)
+  "sessions.title": "Sessions",
+  "sessions.noSessions": "No sessions yet",
+  "sessions.startFirst": "Start your first session",
+  "sessions.replyPlaceholder": "Reply to agent...",
+  "sessions.blocked": "Blocked",
+  "sessions.showMore": "Show more",
+  "sessions.showLess": "Show less",
+
+  // Settings — Worktree
+  "settings.worktreeIsolation": "Worktree Isolation",
+  "settings.worktreeIsolationDesc": "Run each session in its own git worktree",
 }

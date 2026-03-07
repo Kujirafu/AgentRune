@@ -26,17 +26,18 @@ export const zhTW: Record<string, string> = {
   "app.vpnWarning": "如果您正在使用 VPN，請先關閉 — VPN 可能會導致手機無法連線到本地伺服器。",
 
   // LaunchPad
-  "launchpad.title": "AI 智能體指揮中心",
+  "launchpad.title": "AI Agent 指揮中心",
   "launchpad.projects": "專案",
   "launchpad.projectName": "專案名稱",
   "launchpad.projectPath": "/專案/路徑",
   "launchpad.create": "建立",
   "launchpad.cancel": "取消",
-  "launchpad.launchAgent": "啟動智能體",
+  "launchpad.launchAgent": "啟動 Agent",
   "launchpad.activeSessions": "執行中的工作階段",
   "launchpad.resume": "繼續",
   "launchpad.quickConnect": "快速連線",
   "launchpad.tapToConnect": "點擊連線",
+  "launchpad.connected": "已連線",
   "launchpad.noCloudDevices": "在電腦終端機執行 npx agentrune 後即可顯示",
 
   // 設定
@@ -129,7 +130,9 @@ export const zhTW: Record<string, string> = {
   "event.decisionRequest": "需要決定",
   "event.error": "錯誤",
   "event.info": "資訊",
+  "event.response": "回應",
   "event.sessionSummary": "摘要",
+  "event.progressReport": "進度報告",
 
   // 事件卡片選單
   "event.copy": "複製",
@@ -143,7 +146,7 @@ export const zhTW: Record<string, string> = {
   "mc.events": "事件",
   "mc.details": "詳情",
   "mc.noSessions": "沒有執行中的工作階段",
-  "mc.launchFromPad": "從啟動台開啟一個智能體",
+  "mc.launchFromPad": "從啟動台開啟一個 Agent",
   "mc.backToLaunchpad": "返回啟動台",
   "mc.current": "目前",
   "mc.inUse": "使用中",
@@ -161,7 +164,7 @@ export const zhTW: Record<string, string> = {
   "mc.sendFailedDetail": "訊息無法送達，正在重新連線...",
   "mc.reconnecting": "重新連線中...",
   "mc.agentWorking": "運作中",
-  "mc.waitingActivity": "等待智能體活動...",
+  "mc.waitingActivity": "等待 Agent 活動...",
   "mc.swipeToSwitch": "左右滑動切換面板",
   "mc.sessionStarted": "工作階段已開始",
   "mc.sessionResumed": "工作階段已恢復",
@@ -179,6 +182,8 @@ export const zhTW: Record<string, string> = {
   "mc.openTerminalDesc": "查看原始終端機輸出",
   "mc.rename": "重新命名",
   "mc.renameDesc": "為此工作階段設定自訂標籤",
+  "mc.watchOnComputer": "在電腦上同步",
+  "mc.watchOnComputerDesc": "在電腦終端機開啟同步畫面",
   "mc.killSession": "終止工作階段",
   "mc.killSessionDesc": "永久結束此工作階段",
   "mc.cancelAction": "取消",
@@ -187,6 +192,13 @@ export const zhTW: Record<string, string> = {
   "mc.sessionLabelPlaceholder": "工作階段標籤...",
   "mc.save": "儲存",
   "mc.bypass": "略過",
+  "mc.mergeWorktree": "合併到 Main",
+  "mc.mergeWorktreeDesc": "將此工作階段的變更合併回主分支",
+  "mc.discardWorktree": "捨棄變更",
+  "mc.discardWorktreeDesc": "刪除工作樹並捨棄所有變更",
+  "mc.worktreeMerged": "工作樹已成功合併",
+  "mc.worktreeDiscarded": "工作樹已捨棄",
+  "mc.worktreeFailed": "工作樹操作失敗",
 
   // 詳細面板 (Panel 2)
   "detail.title": "詳細資訊",
@@ -197,7 +209,7 @@ export const zhTW: Record<string, string> = {
   "detail.noThinking": "尚無思考內容",
   "detail.noCode": "尚無程式碼變更",
   "detail.noTools": "尚無工具使用紀錄",
-  "detail.emptyThinking": "智能體思考過程會顯示在這裡...",
+  "detail.emptyThinking": "Agent 思考過程會顯示在這裡...",
   "detail.emptyCode": "程式碼變更會顯示在這裡...",
   "detail.emptyTools": "工具使用紀錄會顯示在這裡...",
   "detail.emptyUrls": "網址會顯示在這裡...",
@@ -236,13 +248,13 @@ export const zhTW: Record<string, string> = {
   "detect.no": "否",
   "detect.continue": "繼續",
 
-  // 智能體定義
+  // Agent定義
   "agent.claude.desc": "AI 程式助手",
-  "agent.codex.desc": "OpenAI 程式智能體",
-  "agent.openclaw.desc": "開源 AI 智能體",
+  "agent.codex.desc": "OpenAI 程式 Agent",
+  "agent.openclaw.desc": "開源 AI Agent",
   "agent.aider.desc": "AI 配對程式設計",
   "agent.cline.desc": "AI 程式助手",
-  "agent.gemini.desc": "Google AI 智能體",
+  "agent.gemini.desc": "Google AI Agent",
   "agent.terminal.name": "終端機",
   "agent.terminal.desc": "純 Shell 環境",
 
@@ -273,4 +285,52 @@ export const zhTW: Record<string, string> = {
   "slash.resume": "恢復先前的工作階段",
   "slash.status": "顯示工作階段狀態",
   "slash.mcp": "管理 MCP 伺服器",
+
+  // 設定 — Codex
+  "settings.codexModel": "Codex 模型",
+  "settings.codexReasoning": "Codex 推理模式",
+
+  // 專案總覽
+  "overview.noSessions": "沒有工作階段",
+  "overview.tapToStart": "點擊開始一個工作階段",
+  "overview.newSession": "新增工作階段",
+  "overview.viewPrd": "查看 PRD",
+  "overview.killAll": "終止所有工作階段",
+  "overview.devices": "裝置管理",
+  "overview.notConnected": "未連線",
+  "overview.connectedTo": "已連線：{url}",
+  "overview.noDevices": "找不到裝置。請登入 AgentLore 註冊裝置。",
+  "overview.tapToConnect": "點擊連線",
+  "overview.connected": "已連線",
+  "overview.offline": "離線",
+  "overview.manualConnection": "手動連線",
+  "overview.connect": "連線",
+  "overview.statusDone": "完成",
+  "overview.statusBlocked": "受阻",
+  "overview.statusWorking": "進行中",
+
+  // 新增工作階段
+  "newSession.title": "新增工作階段",
+  "newSession.project": "專案",
+  "newSession.agent": "Agent",
+  "newSession.projectName": "專案名稱",
+  "newSession.projectPath": "路徑（例：/home/user/project）",
+  "newSession.creating": "建立中...",
+  "newSession.create": "建立",
+  "newSession.cancel": "取消",
+  "newSession.newProject": "+ 新增專案...",
+  "newSession.startSession": "開始工作階段",
+
+  // Session Dashboard (Panel 1)
+  "sessions.title": "工作階段",
+  "sessions.noSessions": "尚無工作階段",
+  "sessions.startFirst": "開始第一個工作階段",
+  "sessions.replyPlaceholder": "回覆 Agent...",
+  "sessions.blocked": "需要回應",
+  "sessions.showMore": "展開",
+  "sessions.showLess": "收合",
+
+  // Settings — Worktree
+  "settings.worktreeIsolation": "Worktree 隔離",
+  "settings.worktreeIsolationDesc": "每個 Session 在獨立的 git worktree 中執行",
 }

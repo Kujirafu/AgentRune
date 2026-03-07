@@ -1,9 +1,21 @@
-import { useState, useRef, useEffect, useMemo } from "react"
+import { useState, useRef, useEffect, useMemo, useCallback } from "react"
 import { createPortal } from "react-dom"
 import { Clipboard } from "@capacitor/clipboard"
 import { App as CapApp } from "@capacitor/app"
 import type { SlashCommand } from "../types"
 import { useLocale } from "../lib/i18n/index.js"
+
+const AGENTLORE_MCP_URL = "https://agentlore.vercel.app/api/mcp"
+
+interface SkillCard {
+  skill: string
+  trigger: string
+  steps: string[]
+  gotchas: string[]
+  tools: string[]
+  confidence: number
+  sources: string[]
+}
 
 interface InputBarProps {
   onSend: (text: string) => void
@@ -72,6 +84,49 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     document.addEventListener("app:back", handler)
     return () => document.removeEventListener("app:back", handler)
   }, [expandedEditor])
+
+  // MCP skill search
+  const [mcpSkills, setMcpSkills] = useState<SkillCard[]>([])
+  const [mcpLoading, setMcpLoading] = useState(false)
+  const [mcpScenario, setMcpScenario] = useState<string | null>(null)
+  const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
+  const mcpDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const searchMcpSkills = useCallback((query: string) => {
+    if (mcpDebounce.current) clearTimeout(mcpDebounce.current)
+    if (query.length < 2) { setMcpSkills([]); setMcpScenario(null); return }
+    setMcpLoading(true)
+    mcpDebounce.current = setTimeout(async () => {
+      try {
+        const res = await fetch(AGENTLORE_MCP_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tool: "find_skills", arguments: { query, limit: 5 } }),
+        })
+        const data = await res.json()
+        const parsed = JSON.parse(data.content?.[0]?.text || "{}")
+        setMcpSkills(parsed.skills || [])
+        setMcpScenario(parsed.matched_scenario || null)
+      } catch {
+        setMcpSkills([])
+        setMcpScenario(null)
+      } finally {
+        setMcpLoading(false)
+      }
+    }, 400)
+  }, [])
+
+  // Trigger MCP search when input starts with / (but not //)
+  useEffect(() => {
+    if (input.startsWith("/") && !input.startsWith("//")) {
+      const query = input.slice(1).trim()
+      searchMcpSkills(query)
+    } else {
+      setMcpSkills([])
+      setMcpScenario(null)
+      setExpandedSkill(null)
+    }
+  }, [input, searchMcpSkills])
 
   const hasClipboardSupport = true // Capacitor Clipboard plugin always available
 
@@ -321,13 +376,18 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
 
   const hasInput = input.trim().length > 0 || pasteImages.length > 0
 
-  // Slash command suggestions
+  // Native slash command suggestions (triggered by //)
   const filteredSlash = useMemo(() => {
-    if (!slashCommands || !input.startsWith("/")) return []
-    const q = input.toLowerCase()
+    if (!slashCommands || !input.startsWith("//")) return []
+    // Convert //xxx to /xxx for matching
+    const rawCmd = "/" + input.slice(2)
+    const q = rawCmd.toLowerCase()
     if (q === "/") return slashCommands
     return slashCommands.filter((c) => c.command.toLowerCase().startsWith(q))
   }, [input, slashCommands])
+
+  // When selecting a native command, send the real /command (without the extra /)
+  const isMcpMode = input.startsWith("/") && !input.startsWith("//")
 
   const handleSlashSelect = (cmd: SlashCommand) => {
     addSent({ text: cmd.command, time: Date.now() })
@@ -341,9 +401,145 @@ export function InputBar({ onSend, onImagePaste, onBrowse, autoFocus = true, sla
     return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`
   }
 
+  const handleSkillSelect = (skill: SkillCard) => {
+    // Format skill steps as instructions and send to agent
+    const instructions = [
+      `[AgentLore Skill: ${skill.skill}]`,
+      ...skill.steps.map((s, i) => `${i + 1}. ${s}`),
+      ...(skill.gotchas.length > 0 ? [`\nGotchas: ${skill.gotchas.join("; ")}`] : []),
+    ].join("\n")
+    addSent({ text: `/${skill.skill}`, time: Date.now() })
+    onSend(instructions)
+    setInput("")
+    setMcpSkills([])
+    setExpandedSkill(null)
+    inputRef.current?.focus()
+  }
+
   return (
     <div style={{ flexShrink: 0 }}>
-      {/* Slash command suggestions */}
+      {/* MCP Skill suggestions (/ trigger) */}
+      {isMcpMode && (mcpSkills.length > 0 || mcpLoading) && (
+        <div style={{
+          maxHeight: 320,
+          overflowY: "auto",
+          padding: "6px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          WebkitOverflowScrolling: "touch" as never,
+        }}>
+          {mcpScenario && (
+            <div style={{
+              fontSize: 10, fontWeight: 700, color: "var(--accent-primary)",
+              textTransform: "uppercase", letterSpacing: 1.2,
+              padding: "4px 8px",
+            }}>
+              {mcpScenario}
+            </div>
+          )}
+          {mcpLoading && mcpSkills.length === 0 && (
+            <div style={{
+              padding: "12px 14px", fontSize: 13,
+              color: "var(--text-secondary)", textAlign: "center",
+            }}>
+              Searching skills...
+            </div>
+          )}
+          {mcpSkills.map((skill) => {
+            const isOpen = expandedSkill === skill.skill
+            return (
+              <div key={skill.skill} style={{
+                borderRadius: 14,
+                border: "1px solid var(--glass-border)",
+                background: "var(--glass-bg)",
+                backdropFilter: "blur(16px)",
+                WebkitBackdropFilter: "blur(16px)",
+                boxShadow: "var(--glass-shadow)",
+                overflow: "hidden",
+              }}>
+                <button
+                  onClick={() => setExpandedSkill(isOpen ? null : skill.skill)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 14px",
+                    border: "none",
+                    background: "transparent",
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                  }}
+                >
+                  <span style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontWeight: 700, fontSize: 13,
+                    color: "var(--accent-primary)",
+                    flexShrink: 0,
+                  }}>
+                    /{skill.skill}
+                  </span>
+                  <span style={{
+                    fontSize: 12, color: "var(--text-secondary)",
+                    overflow: "hidden", textOverflow: "ellipsis",
+                    whiteSpace: "nowrap", flex: 1,
+                  }}>
+                    {skill.trigger}
+                  </span>
+                  <span style={{
+                    fontSize: 10, color: "var(--text-secondary)", opacity: 0.6,
+                    flexShrink: 0,
+                  }}>
+                    {Math.round(skill.confidence * 100)}%
+                  </span>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.4, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s", flexShrink: 0 }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {isOpen && (
+                  <div style={{ padding: "0 14px 12px" }}>
+                    <div style={{
+                      fontSize: 12, color: "var(--text-secondary)",
+                      lineHeight: 1.6, marginBottom: 10,
+                    }}>
+                      {skill.steps.map((step, i) => (
+                        <div key={i} style={{ marginBottom: 4 }}>
+                          <span style={{ color: "var(--accent-primary)", fontWeight: 600 }}>{i + 1}.</span> {step}
+                        </div>
+                      ))}
+                      {skill.gotchas.length > 0 && (
+                        <div style={{ marginTop: 6, color: "#f59e0b", fontSize: 11 }}>
+                          {skill.gotchas.map((g, i) => (
+                            <div key={i}>⚠ {g}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleSkillSelect(skill)}
+                      style={{
+                        width: "100%",
+                        padding: "8px 12px", borderRadius: 10,
+                        border: "1px solid var(--accent-primary)",
+                        background: "var(--accent-primary-bg)",
+                        color: "var(--accent-primary)",
+                        fontSize: 12, fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("input.send") || "Send"} /{skill.skill}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Native slash command suggestions (// trigger) */}
       {filteredSlash.length > 0 && (
         <div style={{
           maxHeight: 240,

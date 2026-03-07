@@ -60,3 +60,12 @@ export function getLastProject(): string | null {
 export function saveLastProject(projectId: string) {
   localStorage.setItem("agentrune_last_project", projectId)
 }
+
+export function getWorktreeEnabled(): boolean {
+  const val = localStorage.getItem("agentrune_worktree_enabled")
+  return val === null ? true : val === "true"  // default true
+}
+
+export function setWorktreeEnabled(enabled: boolean) {
+  localStorage.setItem("agentrune_worktree_enabled", enabled ? "true" : "false")
+}

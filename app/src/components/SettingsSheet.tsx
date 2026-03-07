@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react"
 import type { ProjectSettings, CodexMode, CodexModel, CodexReasoningEffort, AiderModel, OpenClawProvider } from "../types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
-import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled } from "../lib/storage"
+import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled, getWorktreeEnabled, setWorktreeEnabled } from "../lib/storage"
 import { App } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 
@@ -27,11 +27,13 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
   const [phoneToken, setPhoneToken] = useState<string | null>(null)
   const [volumeKeys, setVolumeKeys] = useState(false)
   const [keepAwake, setKeepAwake] = useState(false)
+  const [worktreeIsolation, setWorktreeIsolation] = useState(true)
 
   useEffect(() => {
     setPhoneToken(localStorage.getItem("agentrune_phone_token"))
     setVolumeKeys(getVolumeKeysEnabled())
     setKeepAwake(getKeepAwakeEnabled())
+    setWorktreeIsolation(getWorktreeEnabled())
   }, [open])
 
   useEffect(() => {
@@ -343,7 +345,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
         {/* Model Selection - Codex */}
         {isCodexAgent && (
           <div style={{ marginBottom: 24 }}>
-            <div style={sectionLabelStyle}>Codex Model</div>
+            <div style={sectionLabelStyle}>{t("settings.codexModel")}</div>
             <div style={{
               display: "grid",
               gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
@@ -389,7 +391,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
         {/* Reasoning - Codex */}
         {isCodexAgent && (
           <div style={{ marginBottom: 24 }}>
-            <div style={sectionLabelStyle}>Codex Reasoning</div>
+            <div style={sectionLabelStyle}>{t("settings.codexReasoning")}</div>
             <div style={{
               display: "flex",
               flexDirection: "column",
@@ -802,6 +804,16 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
                 window.dispatchEvent(new CustomEvent("keepAwakeChanged", { detail: v }))
               }}
             />
+            <ToggleCard
+              label={t("settings.worktreeIsolation")}
+              description={t("settings.worktreeIsolationDesc")}
+              icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>}
+              active={worktreeIsolation}
+              onChange={(v) => {
+                setWorktreeIsolation(v)
+                setWorktreeEnabled(v)
+              }}
+            />
           </div>
         </div>
         {/* Donate Section */}
@@ -826,7 +838,9 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose }: Se
               {t("settings.supportDesc")}
               {locale === "zh-TW" && (
                 <span style={{ display: "block", marginTop: 4, fontSize: 11, opacity: 0.7 }}>
-                  ?漲????USD????
+
+                  以美元計價
+
                 </span>
               )}
             </div>
