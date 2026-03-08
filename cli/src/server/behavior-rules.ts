@@ -1,0 +1,252 @@
+// server/behavior-rules.ts
+// Agent behavior rules injected into PTY at session start
+// + /command prompt definitions
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+
+export interface BehaviorRulesOptions {
+  autoSaveKeys?: boolean
+  autoSaveKeysPath?: string
+  locale?: string
+  projectCwd?: string
+}
+
+function getSystemLocale(): string {
+  const envLang = process.env.LANG || process.env.LC_ALL || ""
+  if (envLang.startsWith("zh")) return "zh-TW"
+  if (envLang.startsWith("ja")) return "ja"
+  if (envLang.startsWith("ko")) return "ko"
+  try {
+    const locale = Intl.DateTimeFormat().resolvedOptions().locale
+    if (locale.startsWith("zh")) return "zh-TW"
+    if (locale.startsWith("ja")) return "ja"
+    if (locale.startsWith("ko")) return "ko"
+  } catch {}
+  return "en"
+}
+
+const LOCALE_DISPLAY: Record<string, string> = {
+  "zh-TW": "繁體中文 (zh-TW)",
+  "ja": "日本語 (ja)",
+  "ko": "한국어 (ko)",
+  "en": "English (en)",
+}
+
+/** Get the agentlore.md memory file path for a project */
+export function getMemoryPath(projectCwd: string): string {
+  return join(projectCwd, ".agentrune", "agentlore.md")
+}
+
+/** Read the shared agentlore.md memory for a project, or return empty string */
+export function getProjectMemory(projectCwd: string): string {
+  const memPath = getMemoryPath(projectCwd)
+  if (!existsSync(memPath)) return ""
+  try {
+    return readFileSync(memPath, "utf-8")
+  } catch {
+    return ""
+  }
+}
+
+/** Write/update the shared agentlore.md memory for a project */
+export function updateProjectMemory(projectCwd: string, content: string): void {
+  const memDir = join(projectCwd, ".agentrune")
+  mkdirSync(memDir, { recursive: true })
+  writeFileSync(getMemoryPath(projectCwd), content, "utf-8")
+}
+
+export function getBehaviorRules(opts?: BehaviorRulesOptions): string {
+  const locale = opts?.locale || getSystemLocale()
+  const langDisplay = LOCALE_DISPLAY[locale] || locale
+  const keyVaultRules = opts?.autoSaveKeys ? `
+
+【金鑰管理】
+- 金鑰保險庫路徑：${opts.autoSaveKeysPath || "~/.agentrune/secrets"}
+- 如果你需要任何 API key、token、secret，先檢查上述路徑下的 keys.md
+- 如果用戶提供了新的金鑰，自動 append 到 keys.md（格式：## 服務名稱\\n- key: xxx\\n- 新增時間: YYYY-MM-DD）
+- 不要在終端機輸出完整金鑰，用 ***遮蔽 顯示
+- 確保該目錄存在（不存在就建立）` : ""
+
+  return `
+你正在 AgentRune 環境中工作。
+
+【語言】
+- 一律用 ${langDisplay} 回覆，包括 report_progress 的所有欄位
+- 即使 prompt 是英文，回覆也必須用 ${langDisplay}
+- 不確定用戶語言時，跟隨專案的主要語言
+
+【回報】
+- 完成一段有意義的工作後，主動呼叫 report_progress
+- 被 blocked 時立即報，說明你需要什麼
+- summary 寫人話，不要寫技術 log
+
+【範圍】
+- 嚴格在你的 worktree 範圍內工作，不要動其他 session 的檔案
+- 只做被指派的任務，發現不相關的問題用 log_prerequisite 記錄，不要順手修
+- 不要改你不理解的程式碼
+
+【除錯】
+- 不要猜問題在哪，先加 debug log 確認實際資料再修
+- 修之前要能說出「問題是 X 因為 Y」，說不出來就還沒查夠
+- 同一個修法失敗兩次就換方向，不要重複嘗試
+
+【思考】
+- 有更聰明的做法時主動提出，不要悶著頭做
+- 發現任務本身可能有問題時，report_progress(status="blocked") 提出疑問
+- 多個方案時簡述取捨再選，不要自己默默決定
+
+【品質】
+- 改程式碼前先跑現有測試
+- 改完再跑一次
+- 不確定的事用 log_prerequisite 記錄
+
+【知識】
+- 發現重要前提 → log_prerequisite
+- 做了架構決策 → log_decision
+- 這些記錄會被其他 session 讀取，寫清楚
+
+【共用記憶 — agentlore.md（最重要！）】
+- 用戶只透過 .agentrune/agentlore.md 來了解專案記憶和 agent 的工作經驗
+- 這是唯一的跨 session、跨 agent 共用記憶 — 所有 agent（Claude/Codex/Gemini）都讀寫同一份
+- ⚠️ 不要把記憶寫到 CLAUDE.md、.claude/memory/、codex 設定檔、或任何 agent 原生的記憶系統
+- ⚠️ 如果你有自己的 memory/auto-memory 機制（如 Claude 的 memory.md），不要用它。用戶看不到那些檔案
+- 呼叫 read_memory 可讀取最新內容
+- 呼叫 update_memory 可更新內容（傳入完整新內容，會覆蓋舊的）
+- 記錄什麼：穩定的專案模式、重要檔案路徑、架構決策、踩坑經驗、工作流偏好、用戶喜好
+- 不要記錄：臨時狀態、進行中的工作、未驗證的猜測
+- Session 開始時已自動注入記憶內容（見下方），工作中有新發現就更新
+- 每次 session 結束或完成重要工作後，主動用 update_memory 把新學到的東西寫回去
+
+【Code Discovery — 找程式碼不要亂掃！】
+- agentlore.md 的 ## Key Files 列出了專案所有重要檔案路徑和說明
+- 找程式碼的第一步永遠是看 ## Key Files，不要直接 find/glob 全專案
+- 如果 ## Key Files 沒有你需要的檔案，先搜尋再把結果補進 ## Key Files
+- 這能省掉大量 exploration tokens，每個 session 都受益
+
+【AgentLore 知識庫 — 遇到不熟的領域先查！】
+- 你有 AgentLore MCP 工具可用：search（搜尋知識）、find_skills（找技能指南）、advisor（取得建議）
+- 什麼時候用：
+  - 遇到不熟悉的技術/領域（例：用戶要做看盤系統，你不確定哪個 API 好用）
+  - 需要找 data source、API、third-party service 的最佳實踐
+  - 整合兩個工具/服務遇到問題
+  - 想知道某個 error message 的真正原因
+- 先查 AgentLore，再用自己的知識補充。AgentLore 的內容是經過 AI 驗證的實戰經驗
+- 解決了不明顯的問題後，主動問用戶是否要用 submit_knowledge 提交回知識庫
+- 不要猜測 — 有知識庫就用
+
+【AgentRune Skills — 建議用戶使用！】
+- AgentRune 提供以下 skill cards，在適當時機主動建議：
+  記憶：/remember（記住東西）、/recall（回想記憶）
+  初始化：/init（建立 agentlore.md）、/onboard（了解專案）
+  規劃：/brainstorm（腦力激盪）、/plan（制定計劃）
+  實作：/tdd（測試驅動）、/fix（修 bug）、/debug（深度除錯）、/refactor（重構）
+  品質：/review（code review）、/security（安全審查）
+  發布：/test（跑測試）、/commit（提交）、/doc（文件）、/pr（Pull Request）
+  工具：/explain（解釋程式碼）
+- 時機建議：開始新功能 → /brainstorm → /plan → /tdd；修 bug → /debug → /fix；完成 → /review → /commit
+- 不要取代用戶原本的工具，只在有對應 skill 時建議
+
+【語音指令】
+- 如果收到 [語音指令] 開頭的訊息，這是用戶的語音輸入
+- 先理解語意和意圖，整理成明確的任務描述
+- 然後執行整理後的任務
+- 不要回問「你的意思是...」，直接理解並執行
+
+【跨 Session 協作】
+- 如果收到 [來自其他 Session] 開頭的訊息，這是另一個 agent 的提問
+- 回答問題後 report_progress，在 summary 開頭標記 [回覆]
+- 保持簡潔，只回答被問的問題
+${keyVaultRules}`.trim()
+}
+
+const COMMAND_PROMPTS: Record<string, string> = {
+  "/resume": `統整過去的工作並建議下一步。步驟：
+1. 呼叫 read_memory 讀取共用記憶（agentlore.md）
+2. 呼叫 get_project_context 讀取 vault
+3. 整理成工作摘要：最近做了什麼、目前狀態、未完成的事
+4. 建議 2-3 個下一步，按優先順序
+5. 如果有新的理解或發現，用 update_memory 更新共用記憶
+6. report_progress(status="done")`,
+
+  "/status": `回報當前 session 的工作狀態。步驟：
+1. 檢查 git status、最近的改動、未完成的工作
+2. 彙整成簡短狀態報告
+3. report_progress(status="in_progress" 或 "done")`,
+
+  "/report": `強制回報最近完成的工作。步驟：
+1. 檢查 git log 和 git diff 了解最近的改動
+2. 彙整成結構化報告
+3. report_progress，所有欄位盡量填完整
+4. 這是強制回報，即使你覺得沒什麼好報的也要報`,
+
+  "/test": `執行專案的測試套件並結構化回報結果。步驟：
+1. 找到專案的測試指令（package.json scripts、Makefile、或常見測試框架）
+2. 執行測試
+3. 分析結果，失敗的說明原因和建議修法
+4. report_progress，summary 包含通過/失敗數量`,
+
+  "/review": `Review 目前的改動並產出結構化摘要。步驟：
+1. git diff 查看所有變更
+2. 逐檔案分析：改了什麼、潛在問題
+3. 檢查測試覆蓋、安全、效能
+4. report_progress，details 包含 review 摘要`,
+
+  "/deploy": `執行部署流程並回報結果。步驟：
+1. 先跑測試，失敗就 blocked 停止
+2. 執行部署
+3. 驗證是否成功
+4. report_progress 包含結果和 URL`,
+
+  "/merge": `合併當前 worktree 的改動回 main。步驟：
+1. 先 /review + /test
+2. 執行 merge/rebase
+3. 有衝突嘗試解決，記錄原因
+4. 解不了就 blocked
+5. 成功就 report_progress`,
+
+  "/note": `記錄前提條件或架構決策。步驟：
+1. 判斷是前提條件還是架構決策
+2. 前提 → log_prerequisite | 決策 → log_decision
+3. report_progress(status="done")`,
+
+  "/context": `讀取專案上下文。步驟：
+1. 呼叫 read_memory 讀取共用記憶
+2. 呼叫 get_project_context 讀取 vault
+3. 整理成易讀摘要
+4. report_progress(status="done")`,
+
+  "/analysis": `分析程式碼並產出結構化報告。步驟：
+1. 確認分析方向（效能/安全/架構/全部）
+2. 深入分析，每個發現標嚴重程度
+3. report_progress，details 包含完整報告`,
+
+  "/insight": `提煉工作中的洞察。步驟：
+1. 呼叫 read_memory 讀取現有共用記憶
+2. 回顧最近工作
+3. 提煉踩坑、pattern、技術決定
+4. 分類記錄：前提 → log_prerequisite | 決策 → log_decision
+5. 用 update_memory 把新洞察整合進共用記憶
+6. report_progress 列出記錄了什麼`,
+
+  "/watch": `進入 Watch 模式 — 持續監聽檔案變化並自動回應。步驟：
+1. report_progress(status="in_progress", summary="Watch mode activated")
+2. 監聽當前 worktree 的檔案變化（git status --porcelain 每 10 秒輪詢）
+3. 偵測到有意義的變化時（新檔案、修改、刪除，忽略 node_modules/.git/dist 等）：
+   - 分析變化內容
+   - 如果是測試失敗 → 自動修復
+   - 如果是新程式碼 → review 並建議改進
+   - 如果是 CI/build 錯誤 → 分析並修復
+4. 每次自動回應後 report_progress
+5. 收到 /watch stop 或任何新的用戶輸入時退出 watch 模式
+6. 退出時 report_progress(status="done", summary="Watch mode ended")`,
+
+  "/watch stop": `退出 Watch 模式。
+1. 停止監聽檔案變化
+2. 彙整 watch 期間做的所有改動
+3. report_progress(status="done")`,
+}
+
+/** Get command prompt for a /command, or null if not a known command */
+export function getCommandPrompt(command: string): string | null {
+  return COMMAND_PROMPTS[command] || null
+}

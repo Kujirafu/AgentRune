@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dist-server/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Android build outputs
+android/app/build/
+app/android/build/
+app/android/app/build/
+app/android/capacitor-cordova-android-plugins/build/
+app/android/.gradle/
+app/android/local.properties
+
+# Internal context
+.agentrune/
+
+# IDE
+.idea/
+*.iml
+.vscode/
