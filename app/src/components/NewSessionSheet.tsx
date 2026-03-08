@@ -407,59 +407,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
         {/* Agent list */}
         {!showAddProject && (
           <div style={{ position: "relative", zIndex: 1 }}>
-            <div style={{
-              fontSize: 11, fontWeight: 700, color: "var(--text-secondary)",
-              textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10,
-            }}>
-              {t("newSession.agent")}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-              {AGENTS.map((agent) => {
-                const selected = agent.id === agentId
-                return (
-                  <button
-                    key={agent.id}
-                    onClick={() => {
-                      if (selected && projectId) {
-                        onLaunch(projectId, agent.id)
-                        onClose()
-                      } else {
-                        setAgentId(agent.id)
-                        setShowResume(false)
-                      }
-                    }}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 12,
-                      padding: "12px 16px",
-                      borderRadius: 14,
-                      border: selected
-                        ? "1.5px solid var(--accent-primary)"
-                        : "1px solid var(--glass-border)",
-                      background: selected ? "var(--accent-primary-bg)" : "transparent",
-                      color: "var(--text-primary)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      transition: "all 0.2s ease",
-                    }}
-                  >
-                    <div style={{
-                      width: 8, height: 8, borderRadius: "50%",
-                      background: selected ? "var(--accent-primary)" : "var(--text-secondary)",
-                      opacity: selected ? 1 : 0.3,
-                      transition: "all 0.2s",
-                    }} />
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 600 }}>{agent.name}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
-                        {agent.description}
-                      </div>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* Resume past session toggle — for agents that support it */}
+            {/* Resume past session toggle — ABOVE agent list */}
             {supportsResume && projectId && (
               <div style={{ marginBottom: 16 }}>
                 <button
@@ -489,7 +437,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                     <path d="M3 3v5h5" />
                     <path d="M12 7v5l4 2" />
                   </svg>
-                  Resume Past Session
+                  {t("newSession.resumePastSession")}
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "auto", opacity: 0.5, transform: showResume ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
                     <polyline points="6 9 12 15 18 9" />
                   </svg>
@@ -515,7 +463,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                         color: "var(--text-secondary)",
                         fontSize: 13,
                       }}>
-                        Loading sessions...
+                        {t("newSession.loadingSessions")}
                       </div>
                     )}
                     {!loadingSessions && agentSessions.length === 0 && (
@@ -525,7 +473,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                         color: "var(--text-secondary)",
                         fontSize: 13,
                       }}>
-                        No past sessions found
+                        {t("newSession.noSessions")}
                       </div>
                     )}
                     {!loadingSessions && agentSessions.map((session) => (
@@ -582,6 +530,59 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                 )}
               </div>
             )}
+
+            {/* Agent list */}
+            <div style={{
+              fontSize: 11, fontWeight: 700, color: "var(--text-secondary)",
+              textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10,
+            }}>
+              {t("newSession.agent")}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {AGENTS.map((agent) => {
+                const selected = agent.id === agentId
+                return (
+                  <button
+                    key={agent.id}
+                    onClick={() => {
+                      if (selected && projectId) {
+                        onLaunch(projectId, agent.id)
+                        onClose()
+                      } else {
+                        setAgentId(agent.id)
+                        setShowResume(false)
+                      }
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12,
+                      padding: "12px 16px",
+                      borderRadius: 14,
+                      border: selected
+                        ? "1.5px solid var(--accent-primary)"
+                        : "1px solid var(--glass-border)",
+                      background: selected ? "var(--accent-primary-bg)" : "transparent",
+                      color: "var(--text-primary)",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    <div style={{
+                      width: 8, height: 8, borderRadius: "50%",
+                      background: selected ? "var(--accent-primary)" : "var(--text-secondary)",
+                      opacity: selected ? 1 : 0.3,
+                      transition: "all 0.2s",
+                    }} />
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{agent.name}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
+                        {agent.description}
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
 
             {/* Launch button */}
             <button
@@ -762,7 +763,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                   cursor: "pointer",
                 }}
               >
-                Resume This Session
+                {t("newSession.resumeThisSession")}
               </button>
             </div>
           </div>

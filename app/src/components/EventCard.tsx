@@ -32,6 +32,7 @@ const TYPE_LABEL_KEYS: Record<string, string> = {
   error: "event.error",
   info: "event.info",
   response: "event.response",
+  user_message: "event.userMessage",
   session_summary: "event.sessionSummary",
 }
 

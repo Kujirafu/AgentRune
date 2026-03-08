@@ -233,6 +233,14 @@ function useWs() {
   // Exponential backoff for reconnect: resets on successful open
   const backoffRef = useRef(300)
   const [wsConnected, setWsConnected] = useState(false)
+  // Client-side heartbeat: ping every 15s, expect pong within 5s
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pongTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
+    if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null }
+  }, [])
 
   const doConnect = useCallback((sessionToken: string) => {
     // Avoid duplicate connections
@@ -253,10 +261,33 @@ function useWs() {
       setWsConnected(true)
       const handlers = handlersRef.current.get("__ws_open__")
       if (handlers) for (const h of handlers) h({})
+      // Start client-side heartbeat — ping every 15s, expect pong within 5s
+      stopHeartbeat()
+      heartbeatRef.current = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) return
+        try {
+          ws.send(JSON.stringify({ type: "ping" }))
+          if (pongTimeoutRef.current) clearTimeout(pongTimeoutRef.current)
+          pongTimeoutRef.current = setTimeout(() => {
+            console.warn("[WS] No pong in 5s — connection dead")
+            stopHeartbeat()
+            // Close ws to trigger onclose → auto-reconnect
+            try { ws.close() } catch {}
+          }, 5000)
+        } catch {
+          stopHeartbeat()
+          try { ws.close() } catch {}
+        }
+      }, 15000)
     }
 
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
+      // Handle pong — clear the dead-connection timeout
+      if (msg.type === "pong") {
+        if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null }
+        return
+      }
       // Handle token refresh from daemon (e.g. after daemon restart)
       if (msg.type === "token_refresh" && msg.sessionToken) {
         tokenRef.current = msg.sessionToken as string
@@ -268,6 +299,7 @@ function useWs() {
     ws.onclose = () => {
       connectingRef.current = false
       setWsConnected(false)
+      stopHeartbeat()
       const handlers = handlersRef.current.get("__ws_close__")
       if (handlers) for (const h of handlers) h({})
       // Auto-reconnect with exponential backoff (300ms → 600ms → 1200ms → max 5s)
@@ -1224,12 +1256,14 @@ export function App() {
   // Cloud mode WITH server URL but NO cloudSessionToken = must authenticate locally
   const isAuthed = IS_DEV_PREVIEW || (isCloudMode && !serverUrl) || !!cloudSessionToken || status === "authenticated"
 
-  // Load projects after auth (or when server URL changes via Quick Connect)
+  // Load projects after auth, server URL change, or WS reconnect
   useEffect(() => {
     if (!isAuthed) return
-    const base = serverUrl || getApiBase()
+    // Always read fresh URL from localStorage (serverUrl state may be stale after tunnel refresh)
+    const base = getApiBase() || serverUrl
     // base="" is valid for same-origin browser access (relative URL)
     if (isCapacitor() && !base) return
+    console.log(`[App] Loading projects: base=${base} wsConnected=${wsConnected} isAuthed=${isAuthed}`)
     fetch(`${base}/api/projects`)
       .then((r) => r.json())
       .then((data) => {
@@ -1257,7 +1291,28 @@ export function App() {
         setActiveSessions(sessions)
       })
       .catch(() => { })
-  }, [isAuthed, serverUrl])
+  }, [isAuthed, serverUrl, wsConnected])
+
+  // Also reload projects whenever WS reconnects (catches tunnel URL changes)
+  useEffect(() => {
+    if (!isAuthed) return
+    return on("__ws_open__", () => {
+      const base = getApiBase()
+      if (!base && isCapacitor()) return
+      fetch(`${base}/api/projects`)
+        .then((r) => r.json())
+        .then((data) => {
+          setProjects(data)
+          const last = getLastProject()
+          if (last && data.find((p: Project) => p.id === last)) {
+            setSelectedProject(last)
+          } else if (data.length > 0 && !selectedProject) {
+            setSelectedProject(data[0].id)
+          }
+        })
+        .catch(() => { })
+    })
+  }, [isAuthed, on])
 
   // Connect WS after auth — use cloudSessionToken (from Quick Connect) or local sessionToken
   const wsToken = cloudSessionToken || sessionToken

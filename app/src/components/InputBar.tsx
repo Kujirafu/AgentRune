@@ -1100,18 +1100,18 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
           }}>
             {/* Image thumbnails — tap to preview, X to remove (with confirm) */}
             {pasteImages.map((img, i) => (
-              <div key={`img_${i}`} style={{ position: "relative", flexShrink: 0 }}>
+              <div key={`img_${i}`} style={{ position: "relative", flexShrink: 0, padding: 4 }}>
                 <img src={img} alt={`preview ${i + 1}`} onClick={() => setPreviewImage(img)} style={{
-                  width: 44, height: 44, objectFit: "cover",
-                  borderRadius: 10, border: "1px solid var(--glass-border)",
+                  width: 72, height: 72, objectFit: "cover",
+                  borderRadius: 12, border: "1px solid var(--glass-border)",
                   cursor: "pointer",
                 }} />
                 <button onClick={() => setConfirmRemove({ type: "image", index: i })} style={{
-                  position: "absolute", top: -4, right: -4,
-                  width: 18, height: 18, borderRadius: 9,
+                  position: "absolute", top: 0, right: 0,
+                  width: 22, height: 22, borderRadius: 11,
                   border: "1px solid var(--glass-border)",
                   background: "rgba(0,0,0,0.7)", color: "#fff",
-                  fontSize: 10, cursor: "pointer",
+                  fontSize: 12, cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   padding: 0, lineHeight: 1,
                 }}>

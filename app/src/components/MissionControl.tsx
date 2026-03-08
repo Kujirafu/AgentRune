@@ -1026,23 +1026,31 @@ export function MissionControl({
       // Filter tool events ??those belong in Details > Tools panel
       // No filtering — all events from server are meaningful (JSONL watcher + parse engine)
       setEvents(prev => {
-        const existingIds = new Set(prev.map(e => e.id))
-        if (existingIds.has(event.id)) return prev
+        const existingIdx = prev.findIndex(e => e.id === event.id)
+        if (existingIdx !== -1) {
+          // Same ID: merge status update (e.g. in_progress → completed)
+          const existing = prev[existingIdx]
+          if (event.status && event.status !== existing.status) {
+            const updated = [...prev]
+            updated[existingIdx] = { ...existing, status: event.status }
+            return updated
+          }
+          return prev
+        }
         // For decision_request (e.g. Resume Session), check dedup by title
         if (event.type === "decision_request" && event.status === "waiting") {
           const existing = prev.find(e =>
             e.type === "decision_request" && e.status === "waiting" && e.title === event.title)
           if (existing) return prev
         }
-        // Content dedup: "Claude responded" detail vs scrollback event title (same text, different source)
-        const evtDetail = event.detail?.slice(0, 40) || ""
+        // Content dedup: only for recent events (last 5) to avoid dropping replay history
         const evtTitle = (event.title || "").slice(0, 40)
-        for (const e of prev) {
-          const pTitle = (e.title || "").slice(0, 40)
-          const pDetail = (e.detail || "").slice(0, 40)
-          if (evtTitle && pTitle && evtTitle === pTitle) return prev
-          if (evtDetail && pTitle && evtDetail === pTitle) return prev
-          if (evtTitle && pDetail && evtTitle === pDetail) return prev
+        if (evtTitle) {
+          const recentSlice = prev.slice(-5)
+          for (const e of recentSlice) {
+            const pTitle = (e.title || "").slice(0, 40)
+            if (pTitle === evtTitle) return prev
+          }
         }
         return [...prev, event].slice(-100)
       })
@@ -1109,7 +1117,7 @@ export function MissionControl({
         })
       }
 
-      if (/(?:\(y\/n\/a\)|\(y\/n\))/i.test(text) && /(allow|approve|permission)/i.test(text)) {
+      if (/\(y\/n\/a\)/i.test(text) || (/\(y\/n\)/i.test(text) && /(allow|approve|permission|run|execute|write|edit|create|delete)/i.test(text))) {
         const detail = text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
         setEvents((prev) => [...prev, {
           id: `perm_${Date.now()}`,

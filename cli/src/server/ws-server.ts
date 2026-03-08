@@ -22,7 +22,7 @@ import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager } from "./automation-manager.js"
-import { getBehaviorRules, getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath } from "./behavior-rules.js"
+import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath } from "./behavior-rules.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { log } from "../shared/logger.js"
 import type { AgentEvent, TaskStore, Project } from "../shared/types.js"
@@ -805,6 +805,31 @@ export function createServer(portOverride?: number) {
     if (typeof text !== "string") return res.status(400).json({ error: "Missing text" })
     const ok = writeClipboard(text)
     res.json({ ok })
+  })
+
+  // --- Image upload ---
+  // Save base64 image to project temp dir so Claude Code can read it
+  app.post("/api/upload", (req, res) => {
+    try {
+      const { projectId, data, filename } = req.body
+      if (!data || !filename) {
+        return res.status(400).json({ error: "Missing data or filename" })
+      }
+      // Find project cwd
+      const project = projects.find(p => p.id === projectId)
+      const targetDir = project ? project.cwd : homedir()
+      const uploadDir = join(targetDir, ".agentrune", "uploads")
+      mkdirSync(uploadDir, { recursive: true })
+      // Strip data URI prefix if present
+      const base64Data = data.replace(/^data:image\/\w+;base64,/, "")
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_")
+      const filePath = join(uploadDir, `${Date.now()}_${safeName}`)
+      writeFileSync(filePath, Buffer.from(base64Data, "base64"))
+      res.json({ path: filePath })
+    } catch (err) {
+      log.error(`Upload failed: ${err instanceof Error ? err.message : "unknown"}`)
+      res.status(500).json({ error: "Upload failed" })
+    }
   })
 
   // --- Voice cleanup ---
@@ -1823,9 +1848,14 @@ export function createServer(portOverride?: number) {
       }
 
       switch (msg.type) {
+        case "ping": {
+          ws.send(JSON.stringify({ type: "pong" }))
+          break
+        }
         case "attach": {
           const projectId = msg.projectId as string
           const project = projects.find((p) => p.id === projectId)
+          log.info(`[attach] projectId=${projectId} found=${!!project} agentId=${msg.agentId} sessionId=${msg.sessionId || "new"}`)
           if (!project) {
             ws.send(JSON.stringify({ type: "error", message: "Project not found" }))
             return
@@ -1857,20 +1887,25 @@ export function createServer(portOverride?: number) {
               log.warn(`Worktree creation failed, using project cwd: ${err instanceof Error ? err.message : "unknown"}`)
             }
           } else {
-            // Resumed session — check if worktree exists
+            // Resumed session — check if worktree exists and restore CWD
             const wtm = worktreeManagers.get(project.id)
             const existingWt = wtm?.get(requestedSessionId)
-            if (existingWt) worktreeBranch = existingWt.branch
+            if (existingWt) {
+              worktreeBranch = existingWt.branch
+              sessionProject = { ...project, cwd: existingWt.path }
+            }
           }
 
           const alreadyExisted = requestedSessionId ? sessions.get(requestedSessionId) !== undefined : false
+          log.info(`[attach] sessionProject.cwd=${sessionProject.cwd} alreadyExisted=${alreadyExisted} requestedSessionId=${requestedSessionId || "none"}`)
 
           // Load API keys from vault and inject into PTY environment
+          const attachCfg = loadConfig()
           const vaultKeys = agentId !== "terminal"
             ? loadVaultKeys({
                 autoSaveKeysPath: (msg.autoSaveKeysPath as string) || undefined,
-                vaultPath: cfg.vaultPath || undefined,
-                keyVaultPath: cfg.keyVaultPath || undefined,
+                vaultPath: attachCfg.vaultPath || undefined,
+                keyVaultPath: attachCfg.keyVaultPath || undefined,
               })
             : {}
           const session = sessions.create(sessionProject, agentId, newSessionId, vaultKeys)
@@ -1931,23 +1966,36 @@ export function createServer(portOverride?: number) {
             progressInterceptor.onData(sid, hasToolEvents)
           }
 
+          log.info(`[attach] watcherExists=${sessionJsonlWatchers.has(session.id)} session.id=${session.id} agentId=${agentId}`)
           if (!sessionJsonlWatchers.has(session.id)) {
             const sid = session.id
             const cb = makeWatcherCallback(sid)
             let watcher: { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null } | null = null
 
+            // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
+            const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              watcher = new JsonlWatcher(project.cwd, cb)
+              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId)
+              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"}`)
             } else if (agentId === "codex") {
               watcher = new CodexWatcher(cb)
             } else if (agentId === "gemini") {
-              watcher = new GeminiWatcher(project.cwd, cb)
+              watcher = new GeminiWatcher(sessionProject.cwd, cb)
             }
 
             if (watcher) {
               (watcher as any).start()
+              // For resumed sessions with claudeSessionId, no need to rescan —
+              // the watcher already targets the specific file.
+              // For resumed sessions without claudeSessionId, clear filter.
+              if (requestedSessionId && !claudeSessionId && (watcher as any).rescan) {
+                log.info(`[attach] Calling rescan() for resumed session (no claudeSessionId)`)
+                ;(watcher as any).rescan()
+              }
               sessionJsonlWatchers.set(sid, watcher)
-              log.info(`Session watcher started for ${agentId} session ${sid}`)
+              log.info(`[attach] Session watcher started for ${agentId} session ${sid}`)
+            } else {
+              log.warn(`[attach] No watcher created for agentId=${agentId}`)
             }
           }
 
@@ -1963,11 +2011,15 @@ export function createServer(portOverride?: number) {
             ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
           }
 
-          // Replay stored events — only for resumed sessions
-          if (alreadyExisted) {
+          // Replay stored events — for resumed sessions (requestedSessionId means user chose "resume")
+          // Note: after daemon restart, alreadyExisted is false because in-memory Map is empty,
+          // but persisted events on disk may still exist. Use requestedSessionId as the trigger.
+          if (requestedSessionId) {
             let storedEvents = sessionRecentEvents.get(session.id) || []
+            log.info(`[attach] events_replay: inMemory=${storedEvents.length} for session.id=${session.id}`)
             if (storedEvents.length === 0) {
               storedEvents = loadPersistedEvents(session.id)
+              log.info(`[attach] events_replay: loadedFromDisk=${storedEvents.length}`)
               if (storedEvents.length > 0) {
                 sessionRecentEvents.set(session.id, storedEvents)
               }
@@ -1985,7 +2037,9 @@ export function createServer(portOverride?: number) {
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
 
-          // For new sessions: auto-install agent if not found, then wait for prompt before injecting rules.
+          // For new sessions: auto-install agent if not found.
+          // Rules are no longer PTY-injected — they live in .agentrune/rules.md
+          // and are enforced via --append-system-prompt (Claude) or initial prompt (Codex/Gemini).
           if (!alreadyExisted) {
             // --- Auto-install agent binary if missing ---
             const agentInstallMap: Record<string, { bin: string; npm?: string; pip?: string; script?: string }> = {
@@ -2002,7 +2056,6 @@ export function createServer(portOverride?: number) {
               const isWin = process.platform === "win32"
               let checkAndInstall: string
               if (isWin) {
-                // PowerShell: check if command exists, install if not
                 const installCmd = installInfo.npm
                   ? `npm install -g ${installInfo.npm}`
                   : installInfo.pip
@@ -2010,7 +2063,6 @@ export function createServer(portOverride?: number) {
                     : installInfo.script || ""
                 checkAndInstall = `if (-not (Get-Command ${installInfo.bin} -ErrorAction SilentlyContinue)) { Write-Host 'Installing ${agentId}...'; ${installCmd} }`
               } else {
-                // Bash: check with command -v
                 const installCmd = installInfo.npm
                   ? `npm install -g ${installInfo.npm}`
                   : installInfo.pip
@@ -2018,51 +2070,9 @@ export function createServer(portOverride?: number) {
                     : installInfo.script || ""
                 checkAndInstall = `command -v ${installInfo.bin} >/dev/null 2>&1 || { echo "Installing ${agentId}..."; ${installCmd}; }`
               }
-              sessions.write(session.id, `${checkAndInstall}\n`)
+              sessions.write(session.id, `${checkAndInstall}\r`)
               log.info(`Auto-install check injected for ${agentId} (bin: ${installInfo.bin})`)
             }
-
-            const injectRules = () => {
-              const rules = getBehaviorRules({
-                autoSaveKeys: !!msg.autoSaveKeys,
-                autoSaveKeysPath: (msg.autoSaveKeysPath as string) || undefined,
-                projectCwd: sessionProject.cwd,
-              })
-
-              // Read shared agentlore.md memory
-              const memory = getProjectMemory(sessionProject.cwd)
-              const memoryBlock = memory
-                ? `\n\n--- 以下是專案共用記憶（agentlore.md）---\n${memory}\n--- 共用記憶結束 ---`
-                : ""
-
-              sessions.write(session.id, `\n${rules}${memoryBlock}\n`)
-              log.info(`Injected behavior rules${memory ? " + agentlore.md" : ""} for session ${session.id}`)
-            }
-
-            // Wait for agent prompt before injecting rules.
-            // Agent is launched by the app (TerminalView.launchAgentCommand).
-            let attempts = 0
-            const pollAgent = setInterval(() => {
-              attempts++
-              const sb = sessions.getScrollback(session.id) || ""
-              // Agent-specific prompt detection (NOT shell prompt like PS C:\...>):
-              // Claude Code: "❯" prompt, or "Claude Code" banner
-              // Codex: startup banner
-              // Generic: sufficient output after agent launched
-              const agentReady =
-                /[\u276f]\s*$/.test(sb) ||  // ❯ prompt (Claude Code)
-                /Claude Code v\d/i.test(sb) ||  // Claude Code banner
-                /Tips:/i.test(sb) ||  // Claude Code tips section
-                /OpenAI\s+Codex/i.test(sb) ||  // Codex banner
-                /aider\s+v\d/i.test(sb) ||  // Aider banner
-                /Gemini\s+CLI/i.test(sb) ||  // Gemini CLI banner
-                /Cursor\s+Agent|agent>/i.test(sb) ||  // Cursor Agent banner/prompt
-                attempts >= 150  // 30s timeout (agent may take a while to start)
-              if (agentReady) {
-                clearInterval(pollAgent)
-                setTimeout(injectRules, 500)
-              }
-            }, 200)
           }
           break
         }
@@ -2412,10 +2422,11 @@ export function createServer(portOverride?: number) {
                 const project = currentSession.project
                 sessions.kill(currentSessionId)
                 // Reload all vault keys and create new session
+                const restartCfg = loadConfig()
                 const vaultKeys = loadVaultKeys({
                   autoSaveKeysPath: (msg.autoSaveKeysPath as string) || undefined,
-                  vaultPath: cfg.vaultPath || undefined,
-                  keyVaultPath: cfg.keyVaultPath || undefined,
+                  vaultPath: restartCfg.vaultPath || undefined,
+                  keyVaultPath: restartCfg.keyVaultPath || undefined,
                 })
                 const newSession = sessions.create(project, agentId, undefined, vaultKeys)
                 clientSessions.set(ws, newSession.id)
@@ -2720,6 +2731,18 @@ export function createServer(portOverride?: number) {
       const tunnel = await startTunnel(PORT)
       tunnelUrl = tunnel.url
       log.info(`Remote access: ${tunnelUrl}`)
+      // Auto-update AgentLore when tunnel restarts with new URL
+      tunnel.onRestart = (newUrl: string) => {
+        tunnelUrl = newUrl
+        log.info(`Tunnel URL changed: ${newUrl}`)
+        // Push new URL to AgentLore immediately
+        const agentloreConfig = config.agentlore
+        if (agentloreConfig) {
+          const cloudTokenPath = join(getConfigDir(), "cloud-token")
+          const cloudToken = existsSync(cloudTokenPath) ? readFileSync(cloudTokenPath, "utf-8").trim() : ""
+          if (cloudToken) agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, newUrl)
+        }
+      }
       // Clean up tunnel on server close
       server.on("close", () => tunnel.stop())
     } catch (err: any) {

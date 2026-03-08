@@ -24,7 +24,9 @@
 - **AgentLore**（`../AgentWiki/`）= AI 驗證知識庫 web app + MCP server
 - **AgentRune** = AI agent 手機控制台 App
 - AgentRune 的 agent 透過 AgentLore MCP 查詢知識
-- 兩者共用 GitHub repo：https://github.com/Kujirafu/agentlore
+- AgentLore GitHub: https://github.com/Kujirafu/agentlore（**PRIVATE 商業機密**）
+- AgentRune GitHub: https://github.com/Kujirafu/AgentRune（PUBLIC, AGPL-3.0）
+- **Release/APK 只放 AgentRune repo，絕對不放 agentlore repo**
 
 ## 社群發文
 - 發文腳本: `scripts/post-social.ts`（X + Threads）

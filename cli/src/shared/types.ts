@@ -15,6 +15,7 @@ export interface AgentEvent {
     | "error"
     | "info"
     | "response"
+    | "user_message"
     | "session_summary"
     | "progress_report"
   status: "in_progress" | "completed" | "failed" | "waiting"

@@ -504,7 +504,7 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
     parserRef.current.clear()
     lastScreenTextRef.current = ""
 
-    const attach = () => send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath() })
+    const attach = () => send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath(), isAgentResume: !!resumeSessionId, claudeSessionId: resumeSessionId || undefined })
     attach()
 
     const unsub = on("__ws_open__", () => {

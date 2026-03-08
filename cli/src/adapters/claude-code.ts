@@ -276,6 +276,7 @@ export const claudeCodeAdapter: AgentAdapter = {
     }
 
     // --- Permission prompt ---
+    // Legacy text-based prompt (older Claude Code versions)
     if (/\(y\/n\/a\)/.test(text) || (/allow/i.test(text) && /\(y\/n\)/.test(text))) {
       const detail = text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
       events.push({
@@ -294,6 +295,35 @@ export const claudeCodeAdapter: AgentAdapter = {
           ],
         },
       })
+    }
+
+    // TUI-based permission prompt (modern Claude Code)
+    // Detect by checking for "Allow" + "Deny" option text in TUI chunks
+    if (isTuiChunk && now - state.lastMenuTime > 3000) {
+      const hasAllow = /Allow\s+once|Always\s+allow|Allow/i.test(text)
+      const hasDeny = /Deny|Reject/i.test(text)
+      if (hasAllow && hasDeny) {
+        state.lastMenuTime = now
+        // Extract the tool/action description from the TUI text
+        const detailMatch = text.match(/(?:Run|Edit|Write|Read|Bash|execute|create|delete|modify)\s+[^\n]{3,80}/i)
+        const detail = detailMatch ? detailMatch[0].trim() : text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
+        events.push({
+          id: makeEventId(),
+          timestamp: now,
+          type: "decision_request",
+          status: "waiting",
+          title: "Permission requested",
+          detail,
+          raw: chunk,
+          decision: {
+            options: [
+              { label: "Allow once", input: "y", style: "primary" },
+              { label: "Always allow", input: "a", style: "primary" },
+              { label: "Deny", input: "n", style: "danger" },
+            ],
+          },
+        })
+      }
     }
 
     // --- Plan confirmation detection ---

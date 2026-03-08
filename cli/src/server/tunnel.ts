@@ -74,16 +74,14 @@ async function downloadCloudflared(): Promise<string> {
 export interface TunnelHandle {
   url: string           // e.g. https://xxx-yyy.trycloudflare.com
   stop: () => void
+  /** Called when tunnel restarts with a new URL */
+  onRestart?: (newUrl: string) => void
 }
 
-export async function startTunnel(localPort: number): Promise<TunnelHandle> {
-  let binPath = findCloudflared()
-  if (!binPath) {
-    binPath = await downloadCloudflared()
-  }
-
+/** Launch a single cloudflared process and resolve when URL is ready */
+function launchOnce(binPath: string, localPort: number): Promise<{ url: string; proc: ReturnType<typeof spawn> }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(binPath!, [
+    const proc = spawn(binPath, [
       "tunnel", "--url", `http://localhost:${localPort}`,
       "--no-autoupdate",
     ], {
@@ -101,48 +99,27 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
       }
     }, 30000)
 
-    // cloudflared prints the tunnel URL to stderr like:
-    // INF +----------------------------+
-    // INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |
-    // INF |  https://xxx-yyy-zzz.trycloudflare.com                                                    |
-    // INF +----------------------------+
-    // Or in newer versions: INF Registered tunnel connection ... url=https://...
     const urlRegex = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/
+
+    const tryResolve = (text: string) => {
+      if (resolved) return
+      const match = text.match(urlRegex) || stderr.match(urlRegex)
+      if (match) {
+        resolved = true
+        clearTimeout(timeout)
+        log.info(`Tunnel ready: ${match[0]}`)
+        resolve({ url: match[0], proc })
+      }
+    }
 
     proc.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString()
       stderr += text
-      if (!resolved) {
-        const match = text.match(urlRegex) || stderr.match(urlRegex)
-        if (match) {
-          resolved = true
-          clearTimeout(timeout)
-          const tunnelUrl = match[0]
-          log.info(`Tunnel ready: ${tunnelUrl}`)
-          resolve({
-            url: tunnelUrl,
-            stop: () => {
-              try { proc.kill() } catch {}
-            },
-          })
-        }
-      }
+      tryResolve(text)
     })
 
     proc.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString()
-      if (!resolved) {
-        const match = text.match(urlRegex)
-        if (match) {
-          resolved = true
-          clearTimeout(timeout)
-          log.info(`Tunnel ready: ${match[0]}`)
-          resolve({
-            url: match[0],
-            stop: () => { try { proc.kill() } catch {} },
-          })
-        }
-      }
+      tryResolve(chunk.toString())
     })
 
     proc.on("error", (err) => {
@@ -158,9 +135,56 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
         resolved = true
         clearTimeout(timeout)
         reject(new Error(`cloudflared exited with code ${code}. stderr: ${stderr.slice(-500)}`))
-      } else {
-        log.warn(`Tunnel process exited (code ${code})`)
       }
     })
   })
+}
+
+export async function startTunnel(localPort: number): Promise<TunnelHandle> {
+  let binPath = findCloudflared()
+  if (!binPath) {
+    binPath = await downloadCloudflared()
+  }
+
+  const { url, proc } = await launchOnce(binPath, localPort)
+
+  let stopped = false
+  let currentProc = proc
+
+  const handle: TunnelHandle = {
+    url,
+    stop: () => {
+      stopped = true
+      try { currentProc.kill() } catch {}
+    },
+  }
+
+  // Auto-restart on exit (unless manually stopped)
+  const watchExit = (p: ReturnType<typeof spawn>) => {
+    p.on("exit", (code) => {
+      if (stopped) return
+      log.warn(`Tunnel exited (code ${code}) — restarting in 3s...`)
+      setTimeout(async () => {
+        if (stopped) return
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const result = await launchOnce(binPath!, localPort)
+            handle.url = result.url
+            currentProc = result.proc
+            watchExit(result.proc)
+            log.info(`Tunnel restarted: ${result.url}`)
+            if (handle.onRestart) handle.onRestart(result.url)
+            return
+          } catch (err: any) {
+            log.warn(`Tunnel restart attempt ${attempt}/3 failed: ${err.message}`)
+            if (attempt < 3) await new Promise(r => setTimeout(r, 10000))
+          }
+        }
+        log.error("Tunnel restart failed after 3 attempts")
+      }, 3000)
+    })
+  }
+  watchExit(proc)
+
+  return handle
 }

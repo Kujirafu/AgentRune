@@ -172,6 +172,7 @@ export const zhTW: Record<string, string> = {
   "event.error": "錯誤",
   "event.info": "資訊",
   "event.response": "回應",
+  "event.userMessage": "你",
   "event.sessionSummary": "摘要",
   "event.progressReport": "進度報告",
 
@@ -390,6 +391,10 @@ export const zhTW: Record<string, string> = {
   "newSession.cancel": "取消",
   "newSession.newProject": "+ 新增專案...",
   "newSession.startSession": "開始工作階段",
+  "newSession.resumePastSession": "繼續過去的工作階段",
+  "newSession.resumeThisSession": "繼續此工作階段",
+  "newSession.loadingSessions": "載入中...",
+  "newSession.noSessions": "沒有過去的工作階段",
 
   // Session Dashboard (Panel 1)
   "sessions.title": "工作階段",

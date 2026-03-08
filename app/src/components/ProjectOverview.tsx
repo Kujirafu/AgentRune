@@ -638,19 +638,13 @@ export function ProjectOverview({
                   <line x1="8" y1="21" x2="16" y2="21" />
                   <line x1="12" y1="17" x2="12" y2="21" />
                 </svg>
-                {(() => {
-                  const currentServer = localStorage.getItem("agentrune_server") || ""
-                  const isConnected = !!currentServer && !!localStorage.getItem("agentrune_cloud_token")
-                  return (
-                    <div style={{
-                      position: "absolute", bottom: 2, right: 2,
-                      width: 8, height: 8, borderRadius: "50%",
-                      background: isConnected ? "#22c55e" : "#ef4444",
-                      boxShadow: isConnected ? "0 0 4px rgba(34,197,94,0.6)" : "0 0 4px rgba(239,68,68,0.6)",
-                      border: "1.5px solid var(--card-bg)",
-                    }} />
-                  )
-                })()}
+                <div style={{
+                  position: "absolute", bottom: 2, right: 2,
+                  width: 8, height: 8, borderRadius: "50%",
+                  background: wsConnected ? "#22c55e" : "#ef4444",
+                  boxShadow: wsConnected ? "0 0 4px rgba(34,197,94,0.6)" : "0 0 4px rgba(239,68,68,0.6)",
+                  border: "1.5px solid var(--card-bg)",
+                }} />
               </button>
               <button
                 onClick={toggleTheme}
@@ -2289,7 +2283,7 @@ export function ProjectOverview({
                   const url = device.tunnelUrl || `http://${device.localIp}:${device.port}`
                   const isOnline = device.status === "ONLINE"
                   const currentServer = localStorage.getItem("agentrune_server") || ""
-                  const isConnected = (currentServer === url || currentServer === `http://${device.localIp}:${device.port}`) && !!localStorage.getItem("agentrune_cloud_token")
+                  const isConnected = wsConnected && (currentServer === url || currentServer === `http://${device.localIp}:${device.port}`)
                   return (
                     <button
                       key={device.id}

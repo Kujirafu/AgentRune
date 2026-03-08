@@ -183,20 +183,14 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
 // AgentRune Protocol — injected into every agent's system/initial prompt.
 // FULL version for agents with system prompt support (Claude).
 // SHORT version for agents where it goes into visible user prompt (Codex, Gemini).
-// Both versions funnel into agentlore.md which contains the full workflow.
+// Rules live in .agentrune/rules.md, memory in .agentrune/agentlore.md — agents read both on start.
 const AGENT_PROTOCOL_FULL = [
   "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-  "1. FIRST ACTION: Read .agentrune/agentlore.md — if it DOES NOT EXIST, create it NOW: scan the project (package.json, README, folder structure, git log) and write .agentrune/agentlore.md with ## Stack, ## Conventions, ## Key Files, ## Context, ## Workflow, ## Lessons sections. Do this before anything else.",
-  "2. CODE DISCOVERY: Always check ## Key Files FIRST before exploring. It lists every important file path so you never waste tokens scanning the codebase.",
-  "3. MEMORY: When user says remember/save/note anything → update .agentrune/agentlore.md. When user asks to recall → read it. Do NOT use your own memory system (CLAUDE.md, .claude/memory/, etc) — user cannot see those.",
-  "4. KNOWLEDGE BASE: You have access to AgentLore — an AI-verified global knowledge base. When you encounter unfamiliar domains, need best practices, or want to find working data sources/APIs/tools, call the AgentLore MCP tools (search, find_skills, advisor). After solving non-obvious problems, offer to submit the insight back via submit_knowledge.",
-  "5. SKILLS: Suggest AgentRune skills when appropriate: /plan before big changes, /debug for complex bugs, /review before merging, /commit after milestones, /remember for new learnings, /brainstorm before creative work, /tdd for new features, /security for auth/input handling.",
-  "6. AFTER FIXING BUGS: Save root cause to .agentrune/agentlore.md ## Lessons. Offer to submit to AgentLore if the insight is generally useful.",
-  "7. BEFORE CODING: Check ## Conventions and ## Key Files first.",
-  "Never store secrets in agentlore.md.",
+  "FIRST ACTION (mandatory, before anything else): Read .agentrune/rules.md (your behavior rules) and .agentrune/agentlore.md (your project memory — treat it like memory.md). Follow rules.md strictly. If agentlore.md does not exist, create it by scanning the project.",
+  "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
 ].join(" ")
 
-const AGENT_PROTOCOL_SHORT = "Before starting, read .agentrune/agentlore.md — it has project context, conventions, key file paths, and workflow. If it does not exist, create it by scanning the project structure (mkdir -p .agentrune first). Check ## Key Files before exploring the codebase. Use it to remember and recall information across sessions. Do NOT use your own memory system — write everything to .agentrune/agentlore.md. You have access to AgentLore knowledge base — use its MCP tools (search, find_skills, advisor) when you need best practices, data sources, or domain knowledge. After solving non-obvious problems, offer to submit insights back."
+const AGENT_PROTOCOL_SHORT = "AGENTRUNE: Read .agentrune/rules.md (behavior rules) and .agentrune/agentlore.md (project memory) before starting. agentlore.md IS your memory — read on start, write when you learn. If agentlore.md missing, create it (mkdir -p .agentrune). Do NOT use your own memory system — only .agentrune/agentlore.md."
 
 export const AGENTS: AgentDef[] = [
   {

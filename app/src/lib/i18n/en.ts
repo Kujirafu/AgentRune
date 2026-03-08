@@ -168,6 +168,7 @@ export const en: Record<string, string> = {
   "event.error": "Error",
   "event.info": "Info",
   "event.response": "Response",
+  "event.userMessage": "You",
   "event.sessionSummary": "Summary",
   "event.progressReport": "Progress",
 
@@ -386,6 +387,10 @@ export const en: Record<string, string> = {
   "newSession.cancel": "Cancel",
   "newSession.newProject": "+ New Project...",
   "newSession.startSession": "Start Session",
+  "newSession.resumePastSession": "Resume Past Session",
+  "newSession.resumeThisSession": "Resume This Session",
+  "newSession.loadingSessions": "Loading sessions...",
+  "newSession.noSessions": "No past sessions found",
 
   // Session Dashboard (Panel 1)
   "sessions.title": "Sessions",

@@ -25,9 +25,8 @@ function cwdToClaudeDir(cwd: string): string {
 
 /** Find the most recently modified .jsonl in a Claude project dir.
  *  If excludeClaimed is true, skip files already claimed by another watcher.
- *  If existingFiles is set, skip files that already existed when the watcher started
- *  (to avoid picking up external sessions' JSONL files). */
-function findActiveJsonl(projectDir: string, opts?: { excludeClaimed?: boolean; existingFiles?: Set<string>; currentPath?: string }): string | null {
+ *  If existingFileMtimes is set, skip files that existed AND haven't been modified since watcher start. */
+function findActiveJsonl(projectDir: string, opts?: { excludeClaimed?: boolean; existingFileMtimes?: Map<string, number>; currentPath?: string }): string | null {
   try {
     const files = readdirSync(projectDir)
       .filter(f => f.endsWith(".jsonl") && !f.includes("subagent"))
@@ -44,8 +43,19 @@ function findActiveJsonl(projectDir: string, opts?: { excludeClaimed?: boolean; 
     for (const f of files) {
       // Skip files claimed by another watcher (but allow re-selecting our own current file)
       if (opts?.excludeClaimed && claimedJsonlFiles.has(f.path) && f.path !== opts.currentPath) continue
-      // Skip files that existed before this watcher started (prevents cross-contamination)
-      if (opts?.existingFiles && opts.existingFiles.has(f.path) && f.path !== opts.currentPath) continue
+      // Skip existing files EXCEPT the most recently modified one.
+      // The newest file is likely the active session (even if it existed before watcher start).
+      // Older existing files are from other sessions — skip them to prevent cross-contamination.
+      // Files are sorted by mtime desc, so the FIRST existing file we encounter is the most recent.
+      if (opts?.existingFileMtimes && opts.existingFileMtimes.has(f.path) && f.path !== opts.currentPath) {
+        // Check if this file has been modified AFTER watcher started — if so, it's active
+        const originalMtime = opts.existingFileMtimes.get(f.path)!
+        if (f.mtime > originalMtime + 1000) {
+          // File was modified after watcher start — this is the active session, allow it
+        } else {
+          continue  // Skip stale existing files
+        }
+      }
       return f.path
     }
     return null
@@ -238,21 +248,26 @@ function resultToEvents(line: JsonlLine): AgentEvent[] {
 
 /** Convert a JSONL user message to event */
 function userToEvents(line: JsonlLine): AgentEvent[] {
-  const content = line.message?.content || []
+  const rawContent = line.message?.content
   const ts = line.timestamp ? new Date(line.timestamp).getTime() : Date.now()
-  for (const block of content) {
-    if (block.type === "text" && block.text) {
-      const text = block.text.trim()
-      if (text.length < 2) return []
-      return [{
-        id: `usr_jw_${ts}`, timestamp: ts,
-        type: "info" as const, status: "completed" as const,
-        title: text.length > 60 ? text.slice(0, 60) + "..." : text,
-        detail: text.length > 60 ? text : undefined,
-      }]
-    }
+
+  // content can be a plain string (user typed text) or an array of blocks
+  let text = ""
+  if (typeof rawContent === "string") {
+    text = rawContent.trim()
+  } else if (Array.isArray(rawContent)) {
+    // Extract text blocks (skip tool_result blocks — those are Claude's tool outputs, not user input)
+    const textBlocks = rawContent.filter((b: any) => b.type === "text" && b.text)
+    text = textBlocks.map((b: any) => b.text).join("\n").trim()
   }
-  return []
+
+  if (text.length < 2) return []
+  return [{
+    id: `usr_jw_${ts}`, timestamp: ts,
+    type: "user_message" as const, status: "completed" as const,
+    title: text.length > 100 ? text.slice(0, 100) + "..." : text,
+    detail: text.length > 100 ? text : undefined,
+  }]
 }
 
 export type JsonlEventCallback = (events: AgentEvent[]) => void
@@ -266,18 +281,33 @@ export class JsonlWatcher {
   private callback: JsonlEventCallback
   private lastCheck = 0
   private seenIds = new Set<string>()  // dedup tool_use IDs
-  private existingFiles: Set<string>  // files that existed before this watcher — skip them
+  private pendingEventIds: string[] = []  // in_progress event IDs waiting for completion
+  private existingFileMtimes: Map<string, number>  // files + their mtime at watcher start
+  private startTime: number  // when this watcher was created
+  private targetSessionId: string | undefined  // specific Claude Code session UUID to watch
 
-  constructor(projectCwd: string, callback: JsonlEventCallback) {
+  constructor(projectCwd: string, callback: JsonlEventCallback, targetSessionId?: string) {
     const claudeBase = join(homedir(), ".claude", "projects")
     this.projectDir = join(claudeBase, cwdToClaudeDir(projectCwd))
     this.callback = callback
-    // Snapshot existing JSONL files so we don't pick up external sessions
-    this.existingFiles = new Set<string>()
+    this.startTime = Date.now()
+    this.targetSessionId = targetSessionId
+
+    // If targeting a specific session, skip existingFileMtimes — go straight to that file
+    if (targetSessionId) {
+      this.existingFileMtimes = new Map()
+      return
+    }
+
+    // Snapshot existing JSONL files + their mtimes so we can detect resumed ones
+    this.existingFileMtimes = new Map<string, number>()
     try {
       for (const f of readdirSync(this.projectDir)) {
         if (f.endsWith(".jsonl") && !f.includes("subagent")) {
-          this.existingFiles.add(join(this.projectDir, f))
+          const full = join(this.projectDir, f)
+          try {
+            this.existingFileMtimes.set(full, statSync(full).mtimeMs)
+          } catch {}
         }
       }
     } catch { /* dir may not exist yet */ }
@@ -298,34 +328,48 @@ export class JsonlWatcher {
   }
 
   private findAndWatch(): void {
-    const active = findActiveJsonl(this.projectDir, {
-      excludeClaimed: true,
-      existingFiles: this.existingFiles,
-      currentPath: this.jsonlPath || undefined,
-    })
-    if (!active) return
+    let active: string | null = null
 
-    if (active !== this.jsonlPath) {
-      // Release old claim
-      if (this.jsonlPath) claimedJsonlFiles.delete(this.jsonlPath)
-      if (this.watcher) { this.watcher.close(); this.watcher = null }
-      this.jsonlPath = active
-      claimedJsonlFiles.add(active)  // Claim this file
-      this.seenIds.clear()
-
-      // Always replay recent events (both first attach and resume)
-      this.offset = 0
-      this.replayRecent(active)
-      this.watchFile()
+    // If targeting a specific Claude session, always stick to that file
+    if (this.targetSessionId) {
+      const targetPath = join(this.projectDir, `${this.targetSessionId}.jsonl`)
+      try {
+        statSync(targetPath)
+        active = targetPath
+      } catch {
+        // Target file not found — fall back to generic search
+      }
     }
+
+    if (!active) {
+      active = findActiveJsonl(this.projectDir, {
+        excludeClaimed: true,
+        existingFileMtimes: this.existingFileMtimes,
+        currentPath: this.jsonlPath || undefined,
+      })
+    }
+    if (!active || active === this.jsonlPath) return
+
+    // Switch to new file
+    if (this.jsonlPath) claimedJsonlFiles.delete(this.jsonlPath)
+    if (this.watcher) { this.watcher.close(); this.watcher = null }
+    this.jsonlPath = active
+    claimedJsonlFiles.add(active)
+    this.seenIds.clear()
+
+    // Replay full history then watch for new lines
+    this.offset = 0
+    this.replayRecent(active)
+    this.watchFile()
+    console.log(`[JsonlWatcher] Now watching: ${active}`)
   }
 
   /** Read last portion of file and emit recent events (for resume) */
   private replayRecent(filePath: string): void {
     try {
       const size = statSync(filePath).size
-      // Read last 100KB to find recent events
-      const readStart = Math.max(0, size - 100_000)
+      // Read up to 1MB for full history (especially for resumed sessions)
+      const readStart = Math.max(0, size - 1_000_000)
       const bytesToRead = size - readStart
       const buf = Buffer.alloc(bytesToRead)
       const fd = openSync(filePath, "r")
@@ -349,15 +393,29 @@ export class JsonlWatcher {
           allEvents.push(...events)
         } else if (parsed.type === "result") {
           allEvents.push(...resultToEvents(parsed))
+        } else if (parsed.type === "user") {
+          allEvents.push(...userToEvents(parsed))
         }
       }
 
-      // Emit last 50 events for rich history
-      const recent = allEvents.slice(-50)
+      // Mark all in_progress events as completed (replay = already finished)
+      for (const ev of allEvents) {
+        if (ev.status === "in_progress") {
+          ev.status = "completed"
+        }
+      }
+
+      // Emit last 200 events for full history
+      const recent = allEvents.slice(-200)
+      const typeCounts: Record<string, number> = {}
+      for (const e of recent) typeCounts[e.type] = (typeCounts[e.type] || 0) + 1
+      console.log(`[JsonlWatcher] replayRecent: ${lines.length} lines → ${allEvents.length} total events → emitting ${recent.length} (types: ${JSON.stringify(typeCounts)})`)
       if (recent.length > 0) {
         this.callback(recent)
       }
-    } catch { /* ignore errors during replay */ }
+    } catch (err) {
+      console.log(`[JsonlWatcher] replayRecent ERROR: ${err instanceof Error ? err.message : err}`)
+    }
   }
 
   private watchFile(): void {
@@ -404,6 +462,22 @@ export class JsonlWatcher {
       let parsed: JsonlLine
       try { parsed = JSON.parse(raw) } catch { continue }
 
+      // When any new message arrives, complete all pending in_progress events
+      // (the previous tools must have finished for a new message to appear)
+      if (this.pendingEventIds.length > 0 && (parsed.type === "assistant" || parsed.type === "user" || parsed.type === "result")) {
+        const ts = parsed.timestamp ? new Date(parsed.timestamp).getTime() : Date.now()
+        for (const pendingId of this.pendingEventIds) {
+          allEvents.push({
+            id: pendingId,
+            timestamp: ts,
+            type: "info",
+            status: "completed",
+            title: "",  // empty title = update only, don't change display
+          })
+        }
+        this.pendingEventIds = []
+      }
+
       if (parsed.type === "assistant") {
         // Dedup by tool_use ID
         const content = parsed.message?.content || []
@@ -413,9 +487,17 @@ export class JsonlWatcher {
         toolIds.forEach(id => this.seenIds.add(id))
 
         const events = assistantToEvents(parsed)
+        // Track in_progress events for later completion
+        for (const ev of events) {
+          if (ev.status === "in_progress") {
+            this.pendingEventIds.push(ev.id)
+          }
+        }
         allEvents.push(...events)
       } else if (parsed.type === "result") {
         allEvents.push(...resultToEvents(parsed))
+      } else if (parsed.type === "user") {
+        allEvents.push(...userToEvents(parsed))
       }
     }
 
@@ -432,9 +514,9 @@ export class JsonlWatcher {
 
   /** Force re-scan (e.g. after /resume selects a new session) */
   rescan(): void {
-    // Clear existingFiles filter — after /resume we need to find ANY active JSONL,
+    // Clear existingFileMtimes filter — after /resume we need to find ANY active JSONL,
     // including files that existed before this watcher started
-    this.existingFiles.clear()
+    this.existingFileMtimes.clear()
     if (this.jsonlPath) { claimedJsonlFiles.delete(this.jsonlPath) }
     this.jsonlPath = null
     this.seenIds.clear()
