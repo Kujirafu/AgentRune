@@ -2037,10 +2037,8 @@ export function createServer(portOverride?: number) {
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
 
-          // For new sessions: auto-install agent if not found.
-          // Rules are no longer PTY-injected — they live in .agentrune/rules.md
-          // and are enforced via --append-system-prompt (Claude) or initial prompt (Codex/Gemini).
-          if (!alreadyExisted) {
+          // For new sessions: auto-install agent if not found, then inject rules prompt.
+          if (!alreadyExisted && agentId !== "terminal") {
             // --- Auto-install agent binary if missing ---
             const agentInstallMap: Record<string, { bin: string; npm?: string; pip?: string; script?: string }> = {
               claude:   { bin: "claude",   npm: "@anthropic-ai/claude-code" },
@@ -2052,7 +2050,7 @@ export function createServer(portOverride?: number) {
               cursor:   { bin: "agent",    script: "curl https://cursor.com/install -fsSL | bash" },
             }
             const installInfo = agentInstallMap[agentId]
-            if (installInfo && agentId !== "terminal") {
+            if (installInfo) {
               const isWin = process.platform === "win32"
               let checkAndInstall: string
               if (isWin) {
@@ -2072,6 +2070,49 @@ export function createServer(portOverride?: number) {
               }
               sessions.write(session.id, `${checkAndInstall}\r`)
               log.info(`Auto-install check injected for ${agentId} (bin: ${installInfo.bin})`)
+            }
+
+            // --- Wait for agent prompt, then inject short rules instruction ---
+            const rulesPath = join(sessionProject.cwd, ".agentrune", "rules.md")
+            const memoryPath = getMemoryPath(sessionProject.cwd)
+            const hasRules = existsSync(rulesPath)
+            const hasMemory = existsSync(memoryPath)
+
+            if (hasRules || hasMemory) {
+              let attempts = 0
+              const pollAgent = setInterval(() => {
+                attempts++
+                const sb = sessions.getScrollback(session.id) || ""
+                const agentReady =
+                  /[\u276f]\s*$/.test(sb) ||           // ❯ prompt (Claude Code)
+                  /Claude Code/i.test(sb) ||            // Claude Code banner
+                  /Tips:/i.test(sb) ||                  // Claude Code tips
+                  /OpenAI\s+Codex/i.test(sb) ||         // Codex banner
+                  /aider\s+v\d/i.test(sb) ||            // Aider banner
+                  /Gemini\s+CLI/i.test(sb) ||           // Gemini CLI banner
+                  /Cursor\s+Agent|agent>/i.test(sb)     // Cursor Agent
+
+                if (!agentReady && attempts < 150) return  // poll every 200ms, max 30s
+                clearInterval(pollAgent)
+
+                if (!agentReady) {
+                  log.warn(`Agent prompt not detected after 30s for session ${session.id}, skipping rules injection`)
+                  return
+                }
+
+                // Build short instruction pointing agent to rules + memory files
+                const files: string[] = []
+                if (hasRules) files.push(".agentrune/rules.md")
+                if (hasMemory) files.push(".agentrune/agentlore.md")
+                const instruction = `請先讀取 ${files.join(" 和 ")}，這是你的行為規範${hasMemory ? "和專案記憶" : ""}，讀完再開始工作。`
+
+                // Write text first, then send Enter separately (Claude Code TUI needs \r)
+                sessions.write(session.id, instruction)
+                setTimeout(() => {
+                  sessions.write(session.id, "\r")
+                }, 150)
+                log.info(`Rules instruction injected for session ${session.id} (files: ${files.join(", ")})`)
+              }, 200)
             }
           }
           break
