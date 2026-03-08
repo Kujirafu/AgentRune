@@ -259,9 +259,29 @@ async function agentloreHeartbeat(token: string, deviceId: string, port: number,
 
 // --- Create server ---
 
+// --- CLI version check (cached, non-blocking) ---
+const __wsDir = dirname(fileURLToPath(import.meta.url))
+const cliPkg = JSON.parse(readFileSync(join(__wsDir, "..", "package.json"), "utf-8"))
+let updateInfo: { latest: string; current: string } | null = null
+
+async function checkCliUpdate(): Promise<void> {
+  try {
+    const res = await fetch("https://registry.npmjs.org/agentrune/latest", { signal: AbortSignal.timeout(5000) })
+    if (!res.ok) return
+    const data = await res.json() as { version?: string }
+    if (data.version && data.version !== cliPkg.version) {
+      updateInfo = { latest: data.version, current: cliPkg.version }
+      log.info(`CLI update available: v${cliPkg.version} → v${data.version}`)
+    }
+  } catch {}
+}
+
 export function createServer(portOverride?: number) {
   const config = loadConfig()
   const PORT = portOverride || config.port || 3456
+
+  // Check for CLI updates on startup (non-blocking)
+  checkCliUpdate()
 
   const app = express()
   app.use(express.json({ limit: "10mb" }))
@@ -1815,6 +1835,11 @@ export function createServer(portOverride?: number) {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
     log.info(`WS connection from ${req.socket.remoteAddress} token=${(new URL(req.url || "/", "http://localhost").searchParams.get("token") || "").substring(0, 16)}...`)
+
+    // Push CLI update notification to app
+    if (updateInfo) {
+      ws.send(JSON.stringify({ type: "cli_update_available", latest: updateInfo.latest, current: updateInfo.current }))
+    }
 
     // Auth check for WebSocket
     // Session tokens are persisted to disk, so they survive daemon restarts.

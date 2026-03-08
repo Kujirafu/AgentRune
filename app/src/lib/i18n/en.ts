@@ -172,6 +172,10 @@ export const en: Record<string, string> = {
   "event.sessionSummary": "Summary",
   "event.progressReport": "Progress",
 
+  // Update banner
+  "update.available": "available",
+  "update.copyCommand": "Copy update command",
+
   // EventCard context menu
   "event.copy": "Copy",
   "event.copyPath": "Copy Path",

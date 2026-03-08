@@ -176,6 +176,10 @@ export const zhTW: Record<string, string> = {
   "event.sessionSummary": "摘要",
   "event.progressReport": "進度報告",
 
+  // 更新提示
+  "update.available": "已發佈",
+  "update.copyCommand": "複製更新指令",
+
   // 事件卡片選單
   "event.copy": "複製",
   "event.copyPath": "複製路徑",

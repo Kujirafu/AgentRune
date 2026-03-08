@@ -262,6 +262,12 @@ function userToEvents(line: JsonlLine): AgentEvent[] {
   }
 
   if (text.length < 2) return []
+
+  // Filter out AgentRune injected prompts (rules instruction, install checks, etc.)
+  if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md)/.test(text)) return []
+  if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(text)) return []
+  if (/command -v .* >\/dev\/null 2>&1 \|\|/.test(text)) return []
+
   return [{
     id: `usr_jw_${ts}`, timestamp: ts,
     type: "user_message" as const, status: "completed" as const,

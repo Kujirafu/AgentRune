@@ -1217,6 +1217,7 @@ export function App() {
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
   const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
   const [allDiffEvents, setAllDiffEvents] = useState<AgentEvent[]>([])
+  const [cliUpdate, setCliUpdate] = useState<{ latest: string; current: string } | null>(null)
   const requestVoiceRef = useRef<((callback: (text: string) => void, label?: string) => void) | null>(null)
   const [sessionEventsMap, setSessionEventsMap] = useState<Map<string, AgentEvent[]>>(new Map())
   const [theme, setTheme] = useState<"light" | "dark">(
@@ -1313,6 +1314,13 @@ export function App() {
         .catch(() => { })
     })
   }, [isAuthed, on])
+
+  // Listen for CLI update notification from daemon
+  useEffect(() => {
+    return on("cli_update_available", (msg) => {
+      setCliUpdate({ latest: msg.latest as string, current: msg.current as string })
+    })
+  }, [on])
 
   // Connect WS after auth — use cloudSessionToken (from Quick Connect) or local sessionToken
   const wsToken = cloudSessionToken || sessionToken
@@ -1836,6 +1844,32 @@ export function App() {
 
   return (
     <ErrorBoundary>
+    {cliUpdate && (
+      <div style={{
+        position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
+        background: "linear-gradient(90deg, #f59e0b, #d97706)", color: "#fff",
+        padding: "8px 16px", fontSize: 13, fontWeight: 500,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <span>AgentRune v{cliUpdate.latest} {t("update.available") || "available"} (v{cliUpdate.current})</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => {
+            navigator.clipboard?.writeText(
+              navigator.userAgent.includes("Win")
+                ? "irm https://agentrune.com/install.ps1 | iex"
+                : "curl -fsSL https://agentrune.com/install.sh | bash"
+            )
+          }} style={{
+            background: "rgba(255,255,255,0.2)", border: "none", color: "#fff",
+            padding: "4px 12px", borderRadius: 4, fontSize: 12, cursor: "pointer",
+          }}>{t("update.copyCommand") || "Copy update command"}</button>
+          <button onClick={() => setCliUpdate(null)} style={{
+            background: "none", border: "none", color: "rgba(255,255,255,0.7)",
+            fontSize: 16, cursor: "pointer", padding: "0 4px",
+          }}>×</button>
+        </div>
+      </div>
+    )}
     <LaunchPad
       projects={projects}
       activeSessions={activeSessions}
