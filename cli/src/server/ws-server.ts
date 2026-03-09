@@ -22,7 +22,7 @@ import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager } from "./automation-manager.js"
-import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath } from "./behavior-rules.js"
+import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, getRulesPath } from "./behavior-rules.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { log } from "../shared/logger.js"
 import type { AgentEvent, TaskStore, Project } from "../shared/types.js"
@@ -261,7 +261,9 @@ async function agentloreHeartbeat(token: string, deviceId: string, port: number,
 
 // --- CLI version check (cached, non-blocking) ---
 const __wsDir = dirname(fileURLToPath(import.meta.url))
-const cliPkg = JSON.parse(readFileSync(join(__wsDir, "..", "package.json"), "utf-8"))
+const cliPkgPath = [join(__wsDir, "..", "package.json"), join(__wsDir, "..", "..", "package.json")]
+  .find(p => { try { readFileSync(p); return true } catch { return false } })!
+const cliPkg = JSON.parse(readFileSync(cliPkgPath, "utf-8"))
 let updateInfo: { latest: string; current: string } | null = null
 
 async function checkCliUpdate(): Promise<void> {
@@ -284,7 +286,7 @@ export function createServer(portOverride?: number) {
   checkCliUpdate()
 
   const app = express()
-  app.use(express.json({ limit: "10mb" }))
+  app.use(express.json({ limit: "50mb" }))
 
   // CORS — allow cross-origin requests (phone app via tunnel)
   app.use((_req, res, next) => {
@@ -496,6 +498,16 @@ export function createServer(portOverride?: number) {
 
     writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
     res.json(project)
+  })
+
+  app.patch("/api/projects/:id", (req, res) => {
+    const idx = projects.findIndex((p) => p.id === req.params.id)
+    if (idx === -1) return res.status(404).json({ error: "Project not found" })
+    const { name } = req.body
+    if (!name) return res.status(400).json({ error: "Missing name" })
+    projects[idx].name = name
+    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    res.json(projects[idx])
   })
 
   app.delete("/api/projects/:id", (req, res) => {
@@ -2129,8 +2141,10 @@ export function createServer(portOverride?: number) {
             // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
             const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId)
-              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"}`)
+              // Skip JSONL replay when resuming — server already has stored events (events_replay)
+              const skipReplay = !!requestedSessionId
+              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, skipReplay)
+              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
               watcher = new CodexWatcher(cb)
             } else if (agentId === "gemini") {
@@ -2191,7 +2205,9 @@ export function createServer(portOverride?: number) {
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
 
           // For new sessions: auto-install agent if not found, then inject rules prompt.
-          if (!alreadyExisted && agentId !== "terminal") {
+          // Skip injection when resuming (requestedSessionId means user chose to resume an existing session —
+          // the agent already has context from the previous conversation).
+          if (!alreadyExisted && !requestedSessionId && agentId !== "terminal") {
             // --- Auto-install agent binary if missing ---
             const agentInstallMap: Record<string, { bin: string; npm?: string; pip?: string; script?: string }> = {
               claude:   { bin: "claude",   npm: "@anthropic-ai/claude-code" },
@@ -2225,13 +2241,14 @@ export function createServer(portOverride?: number) {
               log.info(`Auto-install check injected for ${agentId} (bin: ${installInfo.bin})`)
             }
 
-            // --- Wait for agent prompt, then inject short rules instruction ---
-            const rulesPath = join(sessionProject.cwd, ".agentrune", "rules.md")
+            // --- Ensure rules.md exists, then inject short rules instruction ---
+            ensureRulesFile(sessionProject.cwd)
+            const rulesPath = getRulesPath(sessionProject.cwd)
             const memoryPath = getMemoryPath(sessionProject.cwd)
             const hasRules = existsSync(rulesPath)
             const hasMemory = existsSync(memoryPath)
 
-            if (hasRules || hasMemory) {
+            {
               let attempts = 0
               const pollAgent = setInterval(() => {
                 attempts++
@@ -2254,10 +2271,14 @@ export function createServer(portOverride?: number) {
                 }
 
                 // Build short instruction pointing agent to rules + memory files
-                const files: string[] = []
-                if (hasRules) files.push(".agentrune/rules.md")
-                if (hasMemory) files.push(".agentrune/agentlore.md")
-                const instruction = `請先讀取 ${files.join(" 和 ")}，這是你的行為規範${hasMemory ? "和專案記憶" : ""}，讀完再開始工作。`
+                const parts: string[] = []
+                if (hasRules) parts.push("讀取 .agentrune/rules.md（行為規範）")
+                if (hasMemory) {
+                  parts.push("讀取 .agentrune/agentlore.md（專案記憶）")
+                } else {
+                  parts.push("建立 .agentrune/agentlore.md（專案記憶），先 mkdir -p .agentrune，再掃描專案產生初始內容")
+                }
+                const instruction = `請先${parts.join("，然後")}，完成後再開始工作。`
 
                 // Notify APP: initialization started (lock input)
                 const initEvent: AgentEvent = {
@@ -2266,7 +2287,9 @@ export function createServer(portOverride?: number) {
                   type: "info",
                   status: "in_progress",
                   title: "初始化中…",
-                  detail: `正在載入 ${files.join(", ")}`,
+                  detail: hasRules || hasMemory
+                    ? `正在載入 ${[hasRules && "rules.md", hasMemory && "agentlore.md"].filter(Boolean).join(", ")}`
+                    : "正在建立 agentlore.md…",
                 }
                 for (const [client, csid] of clientSessions) {
                   if (csid === session.id && client.readyState === WebSocket.OPEN) {
@@ -2282,7 +2305,7 @@ export function createServer(portOverride?: number) {
                 setTimeout(() => {
                   sessions.write(session.id, "\r")
                 }, 150)
-                log.info(`Rules instruction injected for session ${session.id} (files: ${files.join(", ")})`)
+                log.info(`Rules instruction injected for session ${session.id} (rules: ${hasRules}, memory: ${hasMemory})`)
 
                 // Poll for agent to finish processing injection (prompt reappears)
                 let doneAttempts = 0
@@ -2793,6 +2816,11 @@ export function createServer(portOverride?: number) {
       engine.setResumeCursorOffset(resumeCursorOffset.get(sessionId) || 0)
     }
     let events = engine ? engine.feed(data) : []
+    // Debug: log when decision_request events are produced
+    const decisionEvents = events.filter(e => e.type === "decision_request")
+    if (decisionEvents.length > 0) {
+      log.info(`[PTY-EVENTS] decision_request found! count=${decisionEvents.length} titles=${decisionEvents.map(e=>e.title).join(",")}`)
+    }
 
     // When structured watcher is active, parse engine only provides decision_request events
     // (approval prompts). All tool calls and response text come from JSONL watcher.
@@ -2805,9 +2833,18 @@ export function createServer(portOverride?: number) {
         // but filter as safety net in case of stale adapter code
         if (e.type === "decision_request" && /Resume Session/i.test(e.title || "")) return false
         if (e.type === "decision_request") {
-          // Dedup: don't re-emit if same title already exists in recent events
+          // When JSONL watcher is active, it handles response-based menus (numbered options).
+          // PTY should only provide permission prompts, login, API key, and plan confirmation.
+          // Generic "Agent is asking" menus from PTY are redundant — JSONL has better labels.
+          const isPermissionLike = /permission|login|api\s*key|execute\s*plan/i.test(e.title || "")
+          if (!isPermissionLike) return false
+
+          // Dedup: don't re-emit if same title exists within last 5 seconds
           const recent = sessionRecentEvents.get(sessionId) || []
-          const hasSame = recent.some(r => r.type === "decision_request" && r.title === e.title)
+          const hasSame = recent.some(r =>
+            r.type === "decision_request" && r.title === e.title
+            && (e.timestamp - r.timestamp) < 5000
+          )
           return !hasSame
         }
         if (e.type === "test_result") return true
@@ -2957,6 +2994,38 @@ export function createServer(portOverride?: number) {
     for (const evt of events) {
       if (evt.type === "decision_request" && /Resume Session/i.test(evt.title)) {
         resumeDecisionDone.add(sessionId)
+      }
+    }
+
+    // ─── PRD auto-detection ───
+    // When agent outputs <prd_output>...</prd_output>, parse and save to task store
+    for (const evt of events) {
+      const text = evt.detail || evt.title || ""
+      const prdMatch = text.match(/<prd_output>([\s\S]*?)<\/prd_output>/)
+      if (prdMatch) {
+        try {
+          const prd = JSON.parse(prdMatch[1].trim())
+          const sess = sessions.get(sessionId)
+          if (sess) {
+            const tasksDir = join(homedir(), ".agentrune", "tasks")
+            const taskPath = join(tasksDir, `${sess.project.id.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
+            let store: any = { projectId: sess.project.id, requirement: "", tasks: [], createdAt: Date.now(), updatedAt: Date.now() }
+            try { store = JSON.parse(readFileSync(taskPath, "utf-8")) } catch { /* new store */ }
+            store.prd = { goal: prd.goal || "", decisions: prd.decisions || [], approaches: prd.approaches || [], scope: prd.scope || { included: [], excluded: [] } }
+            if (prd.tasks?.length) {
+              store.tasks = prd.tasks.map((t: any, i: number) => ({ id: t.id || i + 1, title: t.title || "", description: t.description || "", status: "pending", dependsOn: t.dependsOn || [] }))
+            }
+            store.requirement = prd.goal || store.requirement
+            store.updatedAt = Date.now()
+            try { mkdirSync(tasksDir, { recursive: true }) } catch { /* ok */ }
+            writeFileSync(taskPath, JSON.stringify(store, null, 2))
+            // Notify all clients that PRD was generated
+            const prdNotif = JSON.stringify({ type: "prd_generated", projectId: sess.project.id })
+            for (const [client] of clientSessions) {
+              if (client.readyState === WebSocket.OPEN) client.send(prdNotif)
+            }
+          }
+        } catch { /* invalid JSON, skip */ }
       }
     }
 

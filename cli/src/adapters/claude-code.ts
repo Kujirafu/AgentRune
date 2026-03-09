@@ -4,7 +4,8 @@ import type { AgentEvent, ParseContext } from "../shared/types.js"
 import { makeEventId } from "./types.js"
 import { appendFileSync, readFileSync } from "node:fs"
 import { join, isAbsolute } from "node:path"
-function dbg(msg: string) { try { appendFileSync("debug.log", `${new Date().toISOString()} ${msg}\n`) } catch {} }
+const DBG_PATH = "C:\\Users\\agres\\Documents\\Test\\AgentRune-New\\debug.log"
+function dbg(msg: string) { try { appendFileSync(DBG_PATH, `${new Date().toISOString()} ${msg}\n`) } catch (e: any) { console.error(`[dbg-fail] ${e?.message}`) } }
 
 /** Strip ANSI escape codes for pattern matching (cursor positioning -> newline) */
 function stripAnsi(s: string): string {
@@ -31,9 +32,51 @@ function stripAnsiFlat(s: string): string {
     .replace(/\x1b\(B/g, "")
 }
 
+/**
+ * Detect if accumulated response text contains user-facing options (A/B/C or numbered).
+ * Returns parsed options array or null if no options found.
+ */
+function detectOptions(text: string): { label: string; input: string; style: "primary" | "default" }[] | null {
+  // Match lettered options: "A." "A:" "A、" "A )" or "**A.**" etc.
+  const letterRe = /(?:^|\n)\s*\*{0,2}([A-Z])[.:\u3001)]\*{0,2}\s*(.+)/g
+  const letterMatches: { key: string; label: string }[] = []
+  let m: RegExpExecArray | null
+  while ((m = letterRe.exec(text)) !== null) {
+    const label = m[2].replace(/\*{1,2}/g, "").trim()
+    if (label.length >= 2) letterMatches.push({ key: m[1], label })
+  }
+  if (letterMatches.length >= 2 && letterMatches.length <= 8) {
+    return letterMatches.map((o, i) => ({
+      label: `${o.key}. ${o.label.slice(0, 100)}`,
+      input: o.key,
+      style: i === 0 ? "primary" as const : "default" as const,
+    }))
+  }
+
+  // Match numbered options: "1." "1:" "1)" etc.
+  const numRe = /(?:^|\n)\s*\*{0,2}(\d+)[.:)]\*{0,2}\s*(.+)/g
+  const numMatches: { key: string; label: string }[] = []
+  while ((m = numRe.exec(text)) !== null) {
+    const label = m[2].replace(/\*{1,2}/g, "").trim()
+    if (label.length >= 2) numMatches.push({ key: m[1], label })
+  }
+  // Only treat as options if there are 2-8 numbered items AND text looks like a question
+  if (numMatches.length >= 2 && numMatches.length <= 8 && /[?\uff1f]|choose|select|\u9078|\u54ea\u500b/i.test(text)) {
+    return numMatches.map((o, i) => ({
+      label: `${o.key}. ${o.label.slice(0, 100)}`,
+      input: o.key,
+      style: i === 0 ? "primary" as const : "default" as const,
+    }))
+  }
+
+  return null
+}
+
 /** Per-session adapter state (stored on context object) */
 interface AdapterState {
   pending: string           // Text from previous chunk (for split bullet detection)
+  recentWindow: string      // Sliding window of recent clean text (for permission detection)
+  lastPermHash: string      // Hash of last emitted permission options (prevent re-fire on TUI repaints)
   lastThinkingTime: number
   lastResponseTime: number
   lastTokenTime: number
@@ -57,14 +100,14 @@ interface AdapterState {
     startTime: number
     eventId: string
   } | null
-  lastGenericMenuTime: number  // Debounce generic TUI menu detection
-  lastGenericMenuHash: string  // Dedup same menu
 }
 
 function getState(ctx: ParseContext): AdapterState {
   if (!(ctx as any)._as) {
     (ctx as any)._as = {
       pending: "",
+      recentWindow: "",
+      lastPermHash: "",
       lastThinkingTime: 0,
       lastResponseTime: 0,
       lastTokenTime: 0,
@@ -83,8 +126,6 @@ function getState(ctx: ParseContext): AdapterState {
       seenToolsExpire: Date.now() + 30000,
       pendingEdit: null,
       lastCompactTime: 0,
-      lastGenericMenuTime: 0,
-      lastGenericMenuHash: "",
     }
   }
   return (ctx as any)._as
@@ -133,6 +174,10 @@ export const claudeCodeAdapter: AgentAdapter = {
     const events: AgentEvent[] = []
     const now = Date.now()
     const state = getState(ctx)
+    // Heartbeat: log every 50th call to confirm parse() is being invoked
+    if (!((ctx as any)._parseCount)) (ctx as any)._parseCount = 0
+    ;(ctx as any)._parseCount++
+    if ((ctx as any)._parseCount % 50 === 1) dbg(`[PARSE-HEARTBEAT] call #${(ctx as any)._parseCount} chunkLen=${chunk.length}`)
 
     // --- Smart TUI detection ---
     // Claude Code's status bar uses cursor positioning (\x1b[row;colH) to render.
@@ -141,11 +186,6 @@ export const claudeCodeAdapter: AgentAdapter = {
     const cursorPosCount = (chunk.match(/\x1b\[\d+;\d+H/g) || []).length
     const isTuiChunk = cursorPosCount >= 5  // 5+ cursor positions = TUI rendering
 
-    // DEBUG: Log TUI chunks that look like menus (reverse video = \x1b[7m)
-    if (isTuiChunk && /\x1b\[7m/.test(chunk)) {
-      dbg(`[TUI-MENU-RAW] ${JSON.stringify(chunk).slice(0, 2000)}`)
-      dbg(`[TUI-MENU-CLEAN] ${stripAnsi(chunk).replace(/\n/g, "\\n").slice(0, 1000)}`)
-    }
 
     // Expire seen tools every 30s to prevent unbounded growth
     if (now > state.seenToolsExpire) {
@@ -188,7 +228,8 @@ export const claudeCodeAdapter: AgentAdapter = {
       const m = flatClean.match(pattern)
       if (m) {
         hasToolCall = true
-        // Tool call detected = Claude is working, not in TUI anymore
+        // Tool call detected = agent moved on, clear permission detection window
+        state.recentWindow = ""
         if (state.resumeInProgress) {
           state.resumeInProgress = false
           state.resumeFirstSeen = 0
@@ -285,138 +326,74 @@ export const claudeCodeAdapter: AgentAdapter = {
       state.pendingEdit.lines.push(...diffLines)
     }
 
-    // --- Permission prompt ---
-    // Legacy text-based prompt (older Claude Code versions)
-    if (/\(y\/n\/a\)/.test(text) || (/allow/i.test(text) && /\(y\/n\)/.test(text))) {
-      const detail = text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
-      events.push({
-        id: makeEventId(),
-        timestamp: now,
-        type: "decision_request",
-        status: "waiting",
-        title: "Permission requested",
-        detail,
-        raw: chunk,
-        decision: {
-          options: [
-            { label: "Allow once", input: "y", style: "primary" },
-            { label: "Always allow", input: "a", style: "primary" },
-            { label: "Deny", input: "n", style: "danger" },
-          ],
-        },
-      })
-    }
+    // --- Interactive menu detection (agent-agnostic, robust) ---
+    // Detects TWO kinds of menus from buffer tail:
+    // 1. Permission prompts: "requires approval" / "Do you want to proceed" / "(y/n/a)"
+    // 2. Agent questions: numbered options + question mark or "Enter to select" hint
+    //
+    // TUI cursor positioning corrupts text, so we DON'T parse option labels for permissions.
+    // For agent questions, we attempt to parse labels from buffer lines.
+    // Dedup: hash on detail context, cleared on tool call (user answered)
+    {
+      const bufTail = stripAnsi(ctx.buffer.slice(-2000))
+      const hasPermission = /requires?\s+approval|Do you want to proceed|allow.*permission/i.test(bufTail)
+      const hasLegacy = /\(y\/n\/a\)/i.test(text)
+      const hasInteractiveMenu = /Enter to select|to navigate.*Esc/i.test(bufTail)
 
-    // TUI-based permission prompt (modern Claude Code)
-    // Detect by checking for "Allow" + "Deny" option text in TUI chunks
-    if (isTuiChunk && now - state.lastMenuTime > 3000) {
-      const hasAllow = /Allow\s+once|Always\s+allow|Allow/i.test(text)
-      const hasDeny = /Deny|Reject/i.test(text)
-      if (hasAllow && hasDeny) {
-        state.lastMenuTime = now
-        // Extract the tool/action description from the TUI text
-        const detailMatch = text.match(/(?:Run|Edit|Write|Read|Bash|execute|create|delete|modify)\s+[^\n]{3,80}/i)
-        const detail = detailMatch ? detailMatch[0].trim() : text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
-        events.push({
-          id: makeEventId(),
-          timestamp: now,
-          type: "decision_request",
-          status: "waiting",
-          title: "Permission requested",
-          detail,
-          raw: chunk,
-          decision: {
-            options: [
-              { label: "Allow once", input: "y", style: "primary" },
-              { label: "Always allow", input: "a", style: "primary" },
-              { label: "Deny", input: "n", style: "danger" },
-            ],
-          },
-        })
-      }
-    }
+      // Count numbered items in buffer tail
+      const numMatches = [...bufTail.matchAll(/(?:^|\n)\s*(?:\u276f\s*)?(\d+)\.\s/gm)]
+      const maxNum = numMatches.reduce((max, m) => Math.max(max, parseInt(m[1])), 0)
 
-    // --- Generic TUI menu detection ---
-    // Ink-based TUI menus use reverse video (\x1b[7m) for the selected item.
-    // Extract all menu items from the raw chunk by looking for lines with/without highlight.
-    if (isTuiChunk && now - state.lastGenericMenuTime > 2000) {
-      // Skip if it's a permission prompt (already handled above) or resume menu
-      const hasPermission = /Allow\s+once|Always\s+allow|Deny|Reject/i.test(text)
-      const hasResume = /Resume\s+Session/i.test(text)
-      if (!hasPermission && !hasResume) {
-        // Extract items from raw chunk: look for reverse video markers
-        // \x1b[7m = reverse on, \x1b[27m or \x1b[0m = reverse off
-        const reverseMatches = chunk.match(/\x1b\[7m([^\x1b]+)(?:\x1b\[(?:27|0)m)/g)
-        if (reverseMatches && reverseMatches.length >= 1) {
-          // Parse the full scrollback to extract all menu items
-          // TUI menus render each item on its own "line" (cursor-positioned)
-          const cleanBuf = stripAnsi(ctx.buffer.slice(-3000))
-          const lines = cleanBuf.split("\n").map(l => l.trim()).filter(l => l.length > 1)
+      const isPermission = hasPermission || hasLegacy
 
-          // Find contiguous block of similar-looking menu items
-          // Menu items: lines without prompt markers ($, >, ❯ only at start), status bars, or garbled text
-          const menuCandidates: string[] = []
-          let selectedIdx = -1
-          const selectedText = reverseMatches[0]
-            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim()
+      // Only detect permission prompts here.
+      // Generic numbered menus are handled by responseAccum + detectOptions (better labels).
+      if (isPermission) {
+        const title = "Permission requested"
+        const options: { label: string; input: string; style: "primary" | "danger" | "default" }[] = []
+        const detailMatch = bufTail.match(/(?:Bash\s+(?:command)?|Edit|Write|Read\s*(?:file)?|execute|create|delete|modify|Tool\s+call)[:\s][^\n]{3,150}/i)
+          || bufTail.match(/(?:requires?\s+(?:manual\s+)?approval)[^\n]{0,150}/i)
+        const detail = detailMatch
+          ? detailMatch[0].replace(/\s+/g, " ").trim().slice(0, 200)
+          : "Agent is requesting permission"
 
-          // Walk backwards from the end of the buffer to find the menu block
-          for (let i = lines.length - 1; i >= 0; i--) {
-            const line = lines[i]
-            // Stop at prompt, banner, status bar
-            if (/^[$%>\u276f]\s*$/.test(line)) break
-            if (/Claude Code v\d|Opus \d|Sonnet \d|bypass|shift\+tab|Context\s+left/i.test(line)) break
-            if (/[\u2726\u2731\u2217\u2234]/.test(line)) break
-            if (/^\d+\s*tokens/i.test(line)) break
-            // Skip very short or empty lines
-            if (line.length < 3) continue
-            menuCandidates.unshift(line)
-            if (line.includes(selectedText) || line === selectedText) {
-              selectedIdx = 0  // Will be adjusted after
-            }
+        if (maxNum >= 2 && !hasLegacy) {
+          const labels = maxNum >= 3
+            ? ["Allow", "Allow always", "Deny"]
+            : ["Allow", "Deny"]
+          for (let i = 0; i < Math.min(maxNum, labels.length); i++) {
+            const isDeny = /deny/i.test(labels[i])
+            options.push({ label: labels[i], input: "\x1b[B".repeat(i) + "\r", style: isDeny ? "danger" as const : "primary" as const })
           }
+        } else {
+          options.push(
+            { label: "Allow", input: "y", style: "primary" as const },
+            { label: "Allow always", input: "a", style: "primary" as const },
+            { label: "Deny", input: "n", style: "danger" as const },
+          )
+        }
 
-          // Need at least 2 items for a menu
-          if (menuCandidates.length >= 2 && menuCandidates.length <= 30) {
-            // Find which one is selected
-            selectedIdx = menuCandidates.findIndex(l => l.includes(selectedText))
-
-            // Dedup: don't re-emit the same menu
-            const menuHash = menuCandidates.join("|").slice(0, 200)
-            if (menuHash !== state.lastGenericMenuHash) {
-              state.lastGenericMenuTime = now
-              state.lastGenericMenuHash = menuHash
-
-              const options = menuCandidates.map((label, idx) => {
-                // Calculate arrow key input: relative to current selection (selectedIdx)
-                // Arrow down = \x1b[B, Arrow up = \x1b[A
-                const delta = idx - (selectedIdx >= 0 ? selectedIdx : 0)
-                let input = ""
-                if (delta > 0) input = "\x1b[B".repeat(delta)
-                else if (delta < 0) input = "\x1b[A".repeat(-delta)
-                input += "\r"  // Enter to select
-                return {
-                  label: label.replace(/^[❯>\s]+/, "").trim(),
-                  input,
-                  style: "primary" as const,
-                }
-              })
-
-              events.push({
-                id: makeEventId(),
-                timestamp: now,
-                type: "decision_request",
-                status: "waiting",
-                title: "Select an option",
-                raw: chunk,
-                decision: { options },
-              })
-              dbg(`[TUI-MENU] Detected ${options.length} items, selected=${selectedIdx}`)
-            }
-          }
+        // Dedup by detail content — different prompts have different details
+        const menuHash = title + "|" + detail
+        if (menuHash !== state.lastPermHash) {
+          state.lastPermHash = menuHash
+          events.push({
+            id: makeEventId(), timestamp: now,
+            type: "decision_request", status: "waiting",
+            title, detail, raw: chunk,
+            decision: { options },
+          })
+          dbg(`[MENU-EMIT] title=${title} detail=${detail.slice(0,60)} opts=${options.length} maxNum=${maxNum}`)
         }
       }
+
+      // Clear hash when tool call detected (user answered, agent moved on)
+      if (hasToolCall) state.lastPermHash = ""
     }
+
+    // Generic TUI menu detection removed — scrollback parsing is inherently unreliable
+    // (status bar content, token counts, version strings get misidentified as menu items).
+    // Specific menus (permission, resume, plan) are handled above with targeted patterns.
 
     // --- Plan confirmation detection ---
     // Claude Code shows "Would you like to proceed?" with numbered options when a plan is ready
@@ -591,21 +568,35 @@ export const claudeCodeAdapter: AgentAdapter = {
         }
       }
 
-      const responseText = responseLines.join("\n").replace(/[\x00-\x1f]/g, " ").trim()
+      const responseText = responseLines.join("\n").replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, " ").trim()
       if (responseText.length >= 5) {
         if (now - state.responseAccumTime > 15000) {
           // New response block -- flush old if exists
           if (state.responseAccum.length > 10 && now - state.lastResponseTime > 2000) {
             state.lastResponseTime = now
-            events.push({
-              id: makeEventId(),
-              timestamp: state.responseAccumTime,
-              type: "info",
-              status: "completed",
-              title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
-              detail: state.responseAccum.slice(0, 3000),
-              raw: chunk,
-            })
+            const opts = detectOptions(state.responseAccum)
+            if (opts) {
+              events.push({
+                id: makeEventId(),
+                timestamp: state.responseAccumTime,
+                type: "decision_request",
+                status: "waiting",
+                title: state.responseAccum.split("\n")[0].slice(0, 200),
+                detail: state.responseAccum.slice(0, 3000),
+                raw: chunk,
+                decision: { options: opts },
+              })
+            } else {
+              events.push({
+                id: makeEventId(),
+                timestamp: state.responseAccumTime,
+                type: "info",
+                status: "completed",
+                title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
+                detail: state.responseAccum.slice(0, 3000),
+                raw: chunk,
+              })
+            }
           }
           state.responseAccum = responseText
           state.responseAccumTime = now
@@ -647,15 +638,29 @@ export const claudeCodeAdapter: AgentAdapter = {
     // Flush accumulated response on tool call or idle (response ended)
     if (state.responseAccum.length > 10 && (hasToolCall || ctx.isIdle) && now - state.lastResponseTime > 2000) {
       state.lastResponseTime = now
-      events.push({
-        id: makeEventId(),
-        timestamp: state.responseAccumTime,
-        type: "info",
-        status: "completed",
-        title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
-        detail: state.responseAccum.slice(0, 3000),
-        raw: chunk,
-      })
+      const opts = detectOptions(state.responseAccum)
+      if (opts) {
+        events.push({
+          id: makeEventId(),
+          timestamp: state.responseAccumTime,
+          type: "decision_request",
+          status: "waiting",
+          title: state.responseAccum.split("\n")[0].slice(0, 200),
+          detail: state.responseAccum.slice(0, 3000),
+          raw: chunk,
+          decision: { options: opts },
+        })
+      } else {
+        events.push({
+          id: makeEventId(),
+          timestamp: state.responseAccumTime,
+          type: "info",
+          status: "completed",
+          title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
+          detail: state.responseAccum.slice(0, 3000),
+          raw: chunk,
+        })
+      }
       state.responseAccum = ""
       state.responseAccumTime = 0
     }

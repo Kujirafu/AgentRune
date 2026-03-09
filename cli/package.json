@@ -1,13 +1,13 @@
 {
   "name": "agentrune",
-  "version": "0.1.4",
+  "version": "0.1.18",
   "description": "AgentRune CLI — AI agent mission control + AgentLore MCP server",
   "type": "module",
   "bin": {
     "agentrune": "dist/bin.js"
   },
   "scripts": {
-    "dev": "tsx watch src/bin.ts",
+    "dev": "tsx watch src/bin.ts -- start -p 3457 -f",
     "build": "tsup",
     "typecheck": "tsc --noEmit"
   },

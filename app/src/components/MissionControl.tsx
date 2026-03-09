@@ -88,6 +88,7 @@ export function MissionControl({
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle")
+  const [initializing, setInitializing] = useState(false)
   const prevSessionIdRef = useRef(sessionId)
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
   const [showSettings, setShowSettings] = useState(false)
@@ -117,6 +118,7 @@ export function MissionControl({
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const promptReadyRef = useRef(false)
   const scrollbackProcessedRef = useRef(false)
+  const pendingImagePathsRef = useRef<string[]>([])
 
   // Voice overlay state — Native Speech Recognition (Capacitor plugin)
   const [voicePhase, setVoicePhase] = useState<"recording" | "cleaning" | "result" | null>(null)
@@ -390,19 +392,15 @@ export function MissionControl({
       prevSessionIdRef.current = sessionId
       setEvents([])
       setAgentStatus("idle")
+      setInitializing(true) // Lock input until init_status:"done" or attached(resumed)
       parserRef.current = new AnsiParser()
       setParsedBlocks([])
       setUsageTokens({ input: 0, output: 0 })
       setWorktreeBranch(null)
       scrollbackProcessedRef.current = false
-      awaitingReplyRef.current = false
-      replyBufferRef.current = ""
-      lastParsedBlockCountRef.current = 0
-      lastUserInputRef.current = ""
-      if (replyFlushTimerRef.current) {
-        clearTimeout(replyFlushTimerRef.current)
-        replyFlushTimerRef.current = null
-      }
+      // Safety timeout: auto-unlock after 45s to prevent stuck state
+      const safetyTimer = setTimeout(() => setInitializing(false), 45000)
+      return () => clearTimeout(safetyTimer)
     }
   }, [sessionId])
 
@@ -414,13 +412,6 @@ export function MissionControl({
     pending: "",
     isThinking: false,
   })
-  // Capture assistant text output and emit one event when response settles.
-  const awaitingReplyRef = useRef(false)
-  const replyBufferRef = useRef("")
-  const lastReplySignatureRef = useRef("")
-  const lastParsedBlockCountRef = useRef(0)
-  const lastUserInputRef = useRef("")
-  const replyFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Rolling buffer for TUI detection (accumulates stripped output, capped at 8KB)
   const tuiBufferRef = useRef("")
   const lastTuiMenuTime = useRef(0)
@@ -697,87 +688,8 @@ export function MissionControl({
     }
   }, [project.id, settings, agentId, sessionId, send, showToast, t, onKillSession, onLaunchSession])
 
-  const normalizeAssistantChunk = useCallback((raw: string): string => {
-    const isCodex = agentId === "codex"
-    const lastUserInput = lastUserInputRef.current
-    const lines = raw.replace(/\r/g, "\n").split("\n")
-    const filtered: string[] = []
-    let skipTipContinuation = false
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim()
-      if (!line) continue
-
-      if (skipTipContinuation) {
-        skipTipContinuation = false
-        if (isCodex) continue
-      }
-
-      const promptMatch = line.match(/^[>\u203A\u276F\u00BB$%#]\s*(.*)$/)
-      if (promptMatch) {
-        const promptText = promptMatch[1]?.trim() || ""
-        if (!promptText) continue
-        if (lastUserInput && (promptText === lastUserInput || promptText.includes(lastUserInput))) continue
-        if (isCodex) continue
-      }
-
-      if (/^(model:|directory:)\s*/i.test(line)) continue
-      if (/^Tip:/i.test(line)) {
-        skipTipContinuation = true
-        continue
-      }
-      if (/^Run \/\w+/i.test(line)) continue
-      if (/^[\w.-]+\s*[\u00B7\u2022]\s*\d+%\s*left/i.test(line)) continue
-      if (/^\/model\b/i.test(line)) continue
-
-      // Claude Code banner / status bar / resume noise filters
-      if (/Claude Code v\d/i.test(line)) continue
-      if (/Opus \d|Sonnet \d|Haiku \d|Claude Max|Claude Pro/i.test(line)) continue
-      if (/^~\/|^[A-Z]:\\|^\/[a-z]/i.test(line) && line.length < 80 && !/\u25cf/.test(line)) continue
-      if (/^\/resume\b|^\/doctor\b|^\/fast\b|Resume a previous/i.test(line)) continue
-      if (/Found \d+ settings issue|0 tokens/i.test(line)) continue
-      if (/plan mode on|shift\+tab to cycle/i.test(line)) continue
-      if (/Resume Session \(\d+ of \d+\)/i.test(line)) continue
-      if (/^Ctrl\+[A-Z]|^Enter to select/i.test(line)) continue
-      if (/^\$ node -e/i.test(line)) continue
-
-      if (isCodex) {
-        if (/^OpenAI\s+Codex\b/i.test(line)) continue
-        if (/\/model\s+to\s+change/i.test(line)) continue
-        if (/included in your plan for free/i.test(line)) continue
-        if (/let['’]s build together/i.test(line)) continue
-        if (/gpt-[\w.-]*codex[\w\s.-]*[\u00B7\u2022]\s*\d+%\s*left/i.test(line)) continue
-        if (/^[~\-]+$/.test(line)) continue
-        if (lastUserInput && line === lastUserInput) continue
-      }
-
-      filtered.push(line)
-    }
-
-    return filtered.join("\n").trim()
-  }, [agentId])
-
-  const flushAssistantReplyEvent = useCallback(() => {
-    if (replyFlushTimerRef.current) {
-      clearTimeout(replyFlushTimerRef.current)
-      replyFlushTimerRef.current = null
-    }
-    const cleaned = normalizeAssistantChunk(replyBufferRef.current)
-    replyBufferRef.current = ""
-    awaitingReplyRef.current = false
-    if (cleaned.length < 16) return
-    const signature = cleaned.slice(0, 200)
-    if (signature === lastReplySignatureRef.current) return
-    lastReplySignatureRef.current = signature
-    setEvents((prev) => [...prev, {
-      id: `asst_${Date.now()}` ,
-      timestamp: Date.now(),
-      type: "info" as const,
-      status: "completed" as const,
-      title: cleaned.length > 72 ? cleaned.slice(0, 72) + "..." : cleaned,
-      detail: cleaned.length > 72 ? cleaned : undefined,
-    }].slice(-200))
-  }, [normalizeAssistantChunk])
+  // Agent responses now come from server-side JSONL watcher (type: "response" events)
+  // — no more client-side PTY output parsing for reply accumulation.
 
 
   // ?????? Input ??????
@@ -811,9 +723,8 @@ export function MissionControl({
         detail: `__IMG__${base64}`,
         raw: "",
       }].slice(-200))
-      // Send the file path to terminal and press Enter to submit it
-      sendInput(data.path)
-      setTimeout(() => sendInput("\r"), 50)
+      // Queue the path — will be sent together with the user's next message
+      pendingImagePathsRef.current.push(data.path)
     } catch (err) {
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`, timestamp: Date.now(),
@@ -845,18 +756,17 @@ export function MissionControl({
     if (flags?.task) {
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
     }
+    // Attach any pending uploaded image paths to the message
+    const pendingImages = pendingImagePathsRef.current.splice(0)
+    if (pendingImages.length > 0) {
+      const imagePaths = pendingImages.join("\n")
+      text = text.trim()
+        ? `${text}\n\n[Attached images — please read these files:]\n${imagePaths}`
+        : `[Attached images — please read these files:]\n${imagePaths}`
+    }
+
     const trimmedInput = text.trim()
     if (!trimmedInput) return
-    lastUserInputRef.current = trimmedInput
-    // Don't accumulate reply buffer for TUI commands — they produce menu rendering, not text replies
-    const isTuiCommand = /^\/(resume|status)\b/i.test(trimmedInput)
-    awaitingReplyRef.current = !isTuiCommand
-    replyBufferRef.current = ""
-    lastParsedBlockCountRef.current = parserRef.current.getBlocks().length
-    if (replyFlushTimerRef.current) {
-      clearTimeout(replyFlushTimerRef.current)
-      replyFlushTimerRef.current = null
-    }
 
     // Send text first, then Enter separately after a delay.
     // TUI apps like Claude Code process input as a stream ??if text+\r arrives
@@ -864,7 +774,6 @@ export function MissionControl({
     // triggering submission. Splitting them ensures \r is handled as Enter.
     const sent = sendInput(text)
     if (!sent) {
-      awaitingReplyRef.current = false
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`,
         timestamp: Date.now(),
@@ -891,14 +800,19 @@ export function MissionControl({
     }
 
     // Insert user message as event for message-output correspondence
-    setEvents(prev => [...prev, {
+    const userEvent = {
       id: `usr_${Date.now()}`,
       timestamp: Date.now(),
       type: "info" as const,
       status: "completed" as const,
       title: text.length > 60 ? text.slice(0, 60) + "..." : text,
       detail: text.length > 60 ? text : undefined,
-    }].slice(-200))
+    }
+    setEvents(prev => [...prev, userEvent].slice(-200))
+    // Persist to server so it survives navigation (replayed via events_replay)
+    if (sessionId) {
+      send({ type: "store_event", sessionId, event: userEvent })
+    }
 
     setAgentStatus("working")
     promptReadyRef.current = false  // Reset so idle timer doesn't fire until next prompt
@@ -1040,8 +954,6 @@ export function MissionControl({
     unsubs.push(on("event", (msg) => {
       const event = msg.event as AgentEvent
       if (!event) return
-      // Filter tool events ??those belong in Details > Tools panel
-      // No filtering — all events from server are meaningful (JSONL watcher + parse engine)
       setEvents(prev => {
         const existingIdx = prev.findIndex(e => e.id === event.id)
         if (existingIdx !== -1) {
@@ -1054,19 +966,20 @@ export function MissionControl({
           }
           return prev
         }
-        // For decision_request (e.g. Resume Session), check dedup by title
-        if (event.type === "decision_request" && event.status === "waiting") {
-          const existing = prev.find(e =>
-            e.type === "decision_request" && e.status === "waiting" && e.title === event.title)
-          if (existing) return prev
+        // For decision_request: dedup by ID only (same event re-sent)
+        // Don't dedup by title — multiple permission prompts share the same title
+        if (event.type === "decision_request") {
+          if (prev.some(e => e.id === event.id)) return prev
         }
-        // Content dedup: only for recent events (last 5) to avoid dropping replay history
-        const evtTitle = (event.title || "").slice(0, 40)
-        if (evtTitle) {
-          const recentSlice = prev.slice(-5)
-          for (const e of recentSlice) {
-            const pTitle = (e.title || "").slice(0, 40)
-            if (pTitle === evtTitle) return prev
+        // Content dedup: only for recent non-decision events (last 5)
+        if (event.type !== "decision_request") {
+          const evtTitle = (event.title || "").slice(0, 40)
+          if (evtTitle) {
+            const recentSlice = prev.slice(-5)
+            for (const e of recentSlice) {
+              const pTitle = (e.title || "").slice(0, 40)
+              if (pTitle === evtTitle) return prev
+            }
           }
         }
         // Insert in timestamp order (late-arriving events go to correct position)
@@ -1084,12 +997,47 @@ export function MissionControl({
       if (event.type === "progress_report" && event.progress && sessionId) {
         setSessionProgress(prev => ({ ...prev, [sessionId]: event }))
       }
+      // Note: initialization unlock is handled by init_status:"done" event, not response events.
+      // Response events fire during init injection (agent processing the rules prompt),
+      // which would prematurely unlock input.
+      // Token usage from JSONL watcher
+      if (event.type === "token_usage" && event.detail) {
+        try {
+          const { input, output } = JSON.parse(event.detail) as { input: number; output: number }
+          setUsageTokens(prev => {
+            const newInput = Math.max(prev.input, input)
+            const newOutput = Math.max(prev.output, output)
+            const deltaIn = newInput - prev.input
+            const deltaOut = newOutput - prev.output
+            if (deltaIn > 0) projectTotalTokens.current.input += deltaIn
+            if (deltaOut > 0) projectTotalTokens.current.output += deltaOut
+            return { input: newInput, output: newOutput }
+          })
+        } catch {}
+      }
     }))
 
     // Replay stored events on re-attach (from server adapter)
     unsubs.push(on("events_replay", (msg) => {
       const replayed = (msg.events as AgentEvent[]) || []
-      const filtered = replayed
+      // Past decision_requests are no longer actionable — drop them entirely on replay
+      // Extract token usage from replay to restore Usage display
+      const usageEvents = replayed.filter(e => e.type === "token_usage" && e.detail)
+      if (usageEvents.length > 0) {
+        let maxIn = 0, maxOut = 0
+        for (const ue of usageEvents) {
+          try {
+            const { input, output } = JSON.parse(ue.detail!) as { input: number; output: number }
+            if (input > maxIn) maxIn = input
+            if (output > maxOut) maxOut = output
+          } catch {}
+        }
+        if (maxIn > 0 || maxOut > 0) {
+          setUsageTokens({ input: maxIn, output: maxOut })
+          projectTotalTokens.current = { input: maxIn, output: maxOut }
+        }
+      }
+      const filtered = replayed.filter(e => e.type !== "decision_request" && e.type !== "token_usage")
       if (filtered.length > 0) {
         // Merge server events with any client-side events (dedupe by id, sort by timestamp)
         setEvents(prev => {
@@ -1108,8 +1056,6 @@ export function MissionControl({
     }))
     unsubs.push(on("output", (msg) => {
       const data = msg.data as string
-      const isPrompt = /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/.test(data)
-      if (isPrompt) promptReadyRef.current = true
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
 
       const stripped = data
@@ -1117,6 +1063,13 @@ export function MissionControl({
         .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
         .replace(/[\x00-\x08\x0b-\x1f]/g, "")
       const text = stripped.trim()
+
+      // Detect prompt on stripped text (raw data has trailing ANSI codes)
+      const isPrompt = /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/.test(text)
+      if (isPrompt) {
+        promptReadyRef.current = true
+        setInitializing(false)
+      }
 
       if (!isPrompt && text.length > 10) setAgentStatus("working")
 
@@ -1140,54 +1093,11 @@ export function MissionControl({
         })
       }
 
-      if (/\(y\/n\/a\)/i.test(text) || (/\(y\/n\)/i.test(text) && /(allow|approve|permission|run|execute|write|edit|create|delete)/i.test(text))) {
-        const detail = text.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
-        setEvents((prev) => [...prev, {
-          id: `perm_${Date.now()}`,
-          timestamp: Date.now(),
-          type: "decision_request" as const,
-          status: "waiting" as const,
-          title: t("mc.needsAuth"),
-          detail,
-          decision: {
-            options: [
-              { label: t("mc.allowOnce"), input: "y", style: "primary" as const },
-              { label: t("mc.alwaysAllow"), input: "a", style: "primary" as const },
-              { label: t("mc.deny"), input: "n", style: "danger" as const },
-            ],
-          },
-        }].slice(-200))
-        setAgentStatus("waiting")
-      }
+      // Permission detection is handled server-side (ParseEngine) only — no client-side
+      // duplicate detection. Server emits decision_request events via the event stream.
 
       parserRef.current.feed(data)
       setParsedBlocks(parserRef.current.getBlocks())
-
-      const blocks = parserRef.current.getBlocks()
-      const newBlocks = blocks.slice(lastParsedBlockCountRef.current)
-      lastParsedBlockCountRef.current = blocks.length
-
-      if (awaitingReplyRef.current) {
-        const blockChunk = newBlocks
-          .filter((b) => b.type === "response" || b.type === "text")
-          .map((b) => b.content)
-          .join("\n")
-        const rawCandidate = blockChunk || (agentId === "codex" ? "" : text)
-        const candidate = normalizeAssistantChunk(rawCandidate)
-        if (candidate && !replyBufferRef.current.includes(candidate)) {
-          replyBufferRef.current = replyBufferRef.current
-            ? `${replyBufferRef.current}\n${candidate}`
-            : candidate
-        }
-        if (replyFlushTimerRef.current) clearTimeout(replyFlushTimerRef.current)
-        replyFlushTimerRef.current = setTimeout(() => {
-          flushAssistantReplyEvent()
-        }, 900)
-      }
-
-      if (isPrompt && awaitingReplyRef.current) {
-        flushAssistantReplyEvent()
-      }
 
       const inMatch = text.match(/input[:\s]+(\d[\d,]*)\s*tokens?/i)
       const outMatch = text.match(/output[:\s]+(\d[\d,]*)\s*tokens?/i)
@@ -1219,6 +1129,8 @@ export function MissionControl({
       const resumed = msg.resumed as boolean
       const agentName = (msg.agentId as string) || "terminal"
       if (msg.worktreeBranch) setWorktreeBranch(msg.worktreeBranch as string)
+      // Resumed sessions don't need initialization — unlock input immediately
+      if (resumed) setInitializing(false)
       const title = resumed
         ? t("mc.sessionResumed") || `Session resumed (${agentName})`
         : t("mc.sessionStarted") || `Session started (${agentName})`
@@ -1272,6 +1184,11 @@ export function MissionControl({
       }].slice(-200))
     }))
 
+    // Init status: lock/unlock input during injection
+    unsubs.push(on("init_status", (msg) => {
+      setInitializing(msg.phase === "injecting")
+    }))
+
     unsubs.push(on("api_key_result", (msg) => {
       setApiKeySaving(false)
       if (msg.success) {
@@ -1302,12 +1219,8 @@ export function MissionControl({
         clearTimeout(idleTimerRef.current)
         idleTimerRef.current = null
       }
-      if (replyFlushTimerRef.current) {
-        clearTimeout(replyFlushTimerRef.current)
-        replyFlushTimerRef.current = null
-      }
     }
-  }, [on, send, agent, settings, project.id, agentId, sessionId, t, normalizeAssistantChunk, flushAssistantReplyEvent])
+  }, [on, send, agent, settings, project.id, agentId, sessionId, t])
 
   // Android back button — close overlays first (innermost → outermost)
   useEffect(() => {
@@ -1381,19 +1294,16 @@ return (
           inset: 0,
           zIndex: 9999,
           pointerEvents: "none",
-          animation: theme === "dark" ? "borderGlowBlue 2.5s ease-in-out infinite" : "borderGlowTealLight 2.5s ease-in-out infinite",
+          animation: theme === "dark" ? "borderGlowBlue 2s ease-in-out infinite" : "borderGlowTealLight 2s ease-in-out infinite",
           boxShadow: theme === "dark"
-            ? "inset 0 0 20px 2px rgba(96,165,250,0.15), inset 0 0 5px 1px rgba(96,165,250,0.25)"
-            : "inset 0 0 12px 2px rgba(55,172,192,0.15), inset 0 0 4px 1px rgba(55,172,192,0.25)",
+            ? "inset 0 0 30px 4px rgba(96,165,250,0.25), inset 0 0 8px 2px rgba(96,165,250,0.4)"
+            : "inset 0 0 20px 4px rgba(55,172,192,0.25), inset 0 0 6px 2px rgba(55,172,192,0.4)",
         }} />
       )}
       <div
         style={{
           position: "fixed",
-          top: 0,
-          left: 0,
-          height: viewH,
-          width: "100vw",
+          inset: 0,
           overflow: "hidden",
           zIndex: 1,
         }}
@@ -1620,7 +1530,7 @@ return (
             >
               {/* L1: Important events only — progress, decisions, responses, errors, file edits */}
               {mainEvents
-                .filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_"))
+                .filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_"))
                 .map((event) => (
                 event.type === "progress_report" ? (
                   <ProgressCard
@@ -1645,17 +1555,25 @@ return (
               {agentStatus === "working" && (
                 <div style={{
                   textAlign: "center",
-                  padding: "12px 0",
-                  color: "var(--text-secondary)",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  opacity: 0.6,
-                  animation: "pulse 2s ease-in-out infinite",
+                  padding: "16px 0",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
                 }}>
-                  ...
+                  {[0, 1, 2].map(i => (
+                    <div key={i} style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      background: "#37ACC0",
+                      boxShadow: "0 0 8px rgba(55,172,192,0.5)",
+                      animation: `typingDot 1.4s ease-in-out ${i * 0.2}s infinite`,
+                    }} />
+                  ))}
                 </div>
               )}
-              {mainEvents.filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_")).length === 0 && (
+              {mainEvents.filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_")).length === 0 && (
                 <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)", opacity: 0.5 }}>
                   <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.4 }}>
@@ -1685,6 +1603,8 @@ return (
               draftKey={`mc_${project.id}_${sessionId || "default"}`}
               attachedFiles={attachedFiles}
               onRemoveFile={(path) => setAttachedFiles((prev) => prev.filter((f) => f !== path))}
+              disabled={initializing}
+              disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
             />
           </div>
 
