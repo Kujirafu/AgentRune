@@ -330,16 +330,26 @@ export class JsonlWatcher {
   }
 
   private findAndWatch(): void {
+    // Once we've locked onto a file, STOP searching.
+    // This prevents cross-session contamination when multiple sessions run
+    // on the same project (each writing to different JSONL files).
+    // The poll only exists to find our file initially (before Claude creates it).
+    if (this.jsonlPath) {
+      // Already watching a file — stop polling, we're done searching
+      if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+      return
+    }
+
     let active: string | null = null
 
-    // If targeting a specific Claude session, always stick to that file
+    // If targeting a specific Claude session, look for that exact file
     if (this.targetSessionId) {
       const targetPath = join(this.projectDir, `${this.targetSessionId}.jsonl`)
       try {
         statSync(targetPath)
         active = targetPath
       } catch {
-        // Target file not found — fall back to generic search
+        // Target file not found yet — keep polling
       }
     }
 
@@ -347,32 +357,28 @@ export class JsonlWatcher {
       active = findActiveJsonl(this.projectDir, {
         excludeClaimed: true,
         existingFileMtimes: this.existingFileMtimes,
-        currentPath: this.jsonlPath || undefined,
+        currentPath: undefined,
       })
     }
-    if (!active || active === this.jsonlPath) return
+    if (!active) return
 
-    // Switch to new file
-    if (this.jsonlPath) claimedJsonlFiles.delete(this.jsonlPath)
-    if (this.watcher) { this.watcher.close(); this.watcher = null }
+    // Found our file — claim it and stop polling
     this.jsonlPath = active
     claimedJsonlFiles.add(active)
     this.seenIds.clear()
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
 
-    // For resumed sessions (targetSessionId), replay full history so user sees past events.
-    // For new sessions, check if this file existed before watcher start — if so, it's an old
-    // session's file that got its mtime bumped (race condition). Skip to end, only watch new lines.
+    // Replay for resumed sessions, skip to end for new sessions with pre-existing files
     const isPreExisting = !this.targetSessionId && this.existingFileMtimes.has(active)
     if (isPreExisting) {
-      // Old file selected during race — skip to end, don't replay stale events
       try { this.offset = statSync(active).size } catch { this.offset = 0 }
-      console.log(`[JsonlWatcher] Skipping replay for pre-existing file (race): ${active}`)
+      console.log(`[JsonlWatcher] Skipping replay for pre-existing file: ${active}`)
     } else {
       this.offset = 0
       this.replayRecent(active)
     }
     this.watchFile()
-    console.log(`[JsonlWatcher] Now watching: ${active}`)
+    console.log(`[JsonlWatcher] Locked onto: ${active}`)
   }
 
   /** Read last portion of file and emit recent events (for resume) */
@@ -525,12 +531,16 @@ export class JsonlWatcher {
 
   /** Force re-scan (e.g. after /resume selects a new session) */
   rescan(): void {
-    // Clear existingFileMtimes filter — after /resume we need to find ANY active JSONL,
-    // including files that existed before this watcher started
+    // Clear lock and filters — after /resume we need to find ANY active JSONL
     this.existingFileMtimes.clear()
     if (this.jsonlPath) { claimedJsonlFiles.delete(this.jsonlPath) }
+    if (this.watcher) { this.watcher.close(); this.watcher = null }
     this.jsonlPath = null
     this.seenIds.clear()
+    // Restart polling since we cleared the lock
+    if (!this.pollTimer) {
+      this.pollTimer = setInterval(() => this.findAndWatch(), 5000)
+    }
     this.findAndWatch()
   }
 
