@@ -285,7 +285,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose }: Automat
   const [submitting, setSubmitting] = useState(false)
 
   // Template browsing
-  const [templateTab, setTemplateTab] = useState<"all" | "pinned">("all")
+  const [templateTab, setTemplateTab] = useState<"all" | "pinned" | "recommended">("all")
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
   const [templateSearch, setTemplateSearch] = useState("")
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => {

@@ -63,6 +63,8 @@ export interface ProjectSettings {
   cursorMode: CursorMode
   cursorModel: string
   cursorSandbox: CursorSandbox
+  // Injected at launch time (not persisted)
+  locale?: string
 }
 
 export interface AppSession {
@@ -184,13 +186,17 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
 // FULL version for agents with system prompt support (Claude).
 // SHORT version for agents where it goes into visible user prompt (Codex, Gemini).
 // Rules live in .agentrune/rules.md, memory in .agentrune/agentlore.md — agents read both on start.
-const AGENT_PROTOCOL_FULL = [
-  "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-  "FIRST ACTION (mandatory, before anything else): Read .agentrune/rules.md (your behavior rules) and .agentrune/agentlore.md (your project memory — treat it like memory.md). Follow rules.md strictly. If agentlore.md does not exist, create it by scanning the project.",
-  "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
-].join(" ")
-
-const AGENT_PROTOCOL_SHORT = "AGENTRUNE: Read .agentrune/rules.md (behavior rules) and .agentrune/agentlore.md (project memory) before starting. agentlore.md IS your memory — read on start, write when you learn. If agentlore.md missing, create it (mkdir -p .agentrune). Do NOT use your own memory system — only .agentrune/agentlore.md."
+const buildProtocol = (locale?: string) => {
+  const langHint = locale ? ` Respond in the user's language (${locale}).` : ""
+  return {
+    full: [
+      "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
+      `FIRST ACTION (mandatory, before anything else): Read .agentrune/rules.md (your behavior rules) and .agentrune/agentlore.md (your project memory — treat it like memory.md). Follow rules.md strictly. If agentlore.md does not exist, create it by scanning the project.${langHint}`,
+      "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+    ].join(" "),
+    short: `AGENTRUNE: Read .agentrune/rules.md (behavior rules) and .agentrune/agentlore.md (project memory) before starting. agentlore.md IS your memory — read on start, write when you learn. If agentlore.md missing, create it (mkdir -p .agentrune). Do NOT use your own memory system — only .agentrune/agentlore.md.${langHint}`,
+  }
+}
 
 export const AGENTS: AgentDef[] = [
   {
@@ -203,7 +209,7 @@ export const AGENTS: AgentDef[] = [
       let cmd = "claude"
       if (s.model !== "sonnet") cmd += ` --model ${s.model}`
       if (s.bypass) cmd += " --dangerously-skip-permissions"
-      cmd += ` --append-system-prompt "${AGENT_PROTOCOL_FULL}"`
+      cmd += ` --append-system-prompt "${buildProtocol(s.locale).full}"`
       return cmd
     },
     slashCommands: [
@@ -251,7 +257,7 @@ export const AGENTS: AgentDef[] = [
       if (s.codexMode === "danger-full-access") {
         cmd += " --dangerously-bypass-approvals-and-sandbox"
       }
-      cmd += ` "${AGENT_PROTOCOL_SHORT}"`
+      cmd += ` "${buildProtocol(s.locale).short}"`
       return cmd
     },
     slashCommands: [
@@ -281,7 +287,7 @@ export const AGENTS: AgentDef[] = [
       if (s.cursorModel) cmd += ` --model ${s.cursorModel}`
       if (s.cursorMode !== "default") cmd += ` --mode=${s.cursorMode}`
       if (s.cursorSandbox !== "default") cmd += ` --sandbox ${s.cursorSandbox}`
-      cmd += ` -p "${AGENT_PROTOCOL_SHORT}"`
+      cmd += ` -p "${buildProtocol(s.locale).short}"`
       return cmd
     },
     slashCommands: [
@@ -365,7 +371,7 @@ export const AGENTS: AgentDef[] = [
       if (s.geminiModel) cmd += ` --model ${s.geminiModel}`
       if (s.geminiApprovalMode !== "default") cmd += ` --approval-mode ${s.geminiApprovalMode}`
       if (s.geminiSandbox) cmd += " --sandbox"
-      cmd += ` -i "${AGENT_PROTOCOL_SHORT}"`
+      cmd += ` -i "${buildProtocol(s.locale).short}"`
       return cmd
     },
     slashCommands: [

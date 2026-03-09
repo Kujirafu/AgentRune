@@ -202,6 +202,7 @@ export const en: Record<string, string> = {
   "mc.allowOnce": "Allow Once",
   "mc.alwaysAllow": "Always Allow",
   "mc.deny": "Deny",
+  "mc.bypassNeedsRestart": "Bypass mode requires restarting the session to take effect",
   "mc.sendFailed": "Send failed — disconnected",
   "mc.sendFailedDetail": "Message could not be sent, reconnecting...",
   "mc.reconnecting": "Reconnecting...",

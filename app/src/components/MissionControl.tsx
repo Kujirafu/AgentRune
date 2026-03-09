@@ -104,6 +104,8 @@ export function MissionControl({
   const [renameValue, setRenameValue] = useState("")
   const [sessionLabels, setSessionLabels] = useState<Record<string, string>>(getSessionLabels)
   const [worktreeBranch, setWorktreeBranch] = useState<string | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const showToast = useCallback((msg: string, duration = 3000) => { setToast(msg); setTimeout(() => setToast(null), duration) }, [])
   // Track Claude's actual fast mode state (from output detection)
   const actualFastModeRef = useRef<boolean | null>(null)
   const [panel, setPanel] = useState(0) // 0=events, 1=diff
@@ -677,8 +679,12 @@ export function MissionControl({
           setTimeout(() => send({ type: "input", data: "\r" }), 50)
         }
       }
+      // Bypass mode — CLI flag only, cannot toggle mid-session
+      if (newSettings.bypass !== prev.bypass) {
+        showToast(t("mc.bypassNeedsRestart") || "Bypass mode change requires restarting the session", 4000)
+      }
     }
-  }, [project.id, settings, agentId, send])
+  }, [project.id, settings, agentId, send, showToast, t])
 
   const normalizeAssistantChunk = useCallback((raw: string): string => {
     const isCodex = agentId === "codex"
@@ -1104,7 +1110,8 @@ export function MissionControl({
       if (!isPrompt && text.length > 10) setAgentStatus("working")
 
       // Sync fast mode state from Claude's actual output
-      if (/fast mode (?:is now )?enabled|快速模式已開啟/i.test(text)) {
+      // Claude Code outputs "Fast mode ON" / "Fast mode OFF" (not enabled/disabled)
+      if (/fast mode\s+on|快速模式已開啟/i.test(text)) {
         actualFastModeRef.current = true
         setSettings(prev => {
           if (prev.fastMode) return prev
@@ -1112,7 +1119,7 @@ export function MissionControl({
           saveSettings(project.id, next)
           return next
         })
-      } else if (/fast mode (?:is now )?disabled|快速模式已關閉/i.test(text)) {
+      } else if (/fast mode\s+off|快速模式已關閉/i.test(text)) {
         actualFastModeRef.current = false
         setSettings(prev => {
           if (!prev.fastMode) return prev
@@ -2447,6 +2454,20 @@ return (
           </div>
         )
       })()}
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)",
+          zIndex: 10000, padding: "10px 20px", borderRadius: 12,
+          background: "var(--glass-bg)", backdropFilter: "blur(16px)",
+          WebkitBackdropFilter: "blur(16px)", border: "1px solid var(--glass-border)",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.15)", color: "var(--text-primary)",
+          fontSize: 13, fontWeight: 500, maxWidth: "85vw", textAlign: "center",
+          animation: "fadeInUp 0.3s ease-out",
+        }}>
+          {toast}
+        </div>
+      )}
     </>
   )
 }

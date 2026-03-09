@@ -43,7 +43,7 @@ function stripAnsiForDetection(str: string): string {
 }
 
 export function TerminalView({ project, agentId, sessionId, resumeSessionId, send, on, onBack }: TerminalViewProps) {
-  const { t } = useLocale()
+  const { t, locale } = useLocale()
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
   const [showSettings, setShowSettings] = useState(false)
   const [showDetail, setShowDetail] = useState(false)
@@ -71,7 +71,7 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
   const launchAgentCommand = useCallback((force: boolean = false) => {
     if (!agent || !sessionId) return
     if (!force && commandSent.has(sessionId)) return
-    let cmd = agent.command(settings)
+    let cmd = agent.command({ ...settings, locale })
     if (!cmd) return
     // Inject --resume <id> for agents that support it
     if (resumeSessionId) {

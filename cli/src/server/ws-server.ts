@@ -852,6 +852,31 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  // --- Serve uploaded images ---
+
+  app.get("/api/uploads/:projectId/:filename", (req, res) => {
+    try {
+      const { projectId, filename } = req.params
+      const project = projects.find(p => p.id === projectId)
+      if (!project) return res.status(404).json({ error: "Project not found" })
+      // Sanitize filename to prevent path traversal
+      const safeName = basename(filename)
+      const filePath = join(project.cwd, ".agentrune", "uploads", safeName)
+      if (!existsSync(filePath)) return res.status(404).json({ error: "File not found" })
+      // Set content type based on extension
+      const ext = safeName.split(".").pop()?.toLowerCase() || ""
+      const mimeTypes: Record<string, string> = {
+        png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+        gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+      }
+      res.setHeader("Content-Type", mimeTypes[ext] || "application/octet-stream")
+      res.setHeader("Cache-Control", "public, max-age=86400")
+      res.send(readFileSync(filePath))
+    } catch (err) {
+      res.status(500).json({ error: "Failed to serve file" })
+    }
+  })
+
   // --- Voice cleanup ---
 
   app.post("/api/voice-cleanup", express.json(), async (req, res) => {

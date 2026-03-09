@@ -206,6 +206,7 @@ export const zhTW: Record<string, string> = {
   "mc.allowOnce": "允許一次",
   "mc.alwaysAllow": "總是允許",
   "mc.deny": "拒絕",
+  "mc.bypassNeedsRestart": "Bypass 模式需要重啟工作階段才能生效",
   "mc.sendFailed": "發送失敗 — 連線中斷",
   "mc.sendFailedDetail": "訊息無法送達，正在重新連線...",
   "mc.reconnecting": "重新連線中...",

@@ -2,6 +2,7 @@
 import { useState, useRef, useCallback, useEffect } from "react"
 import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { useLocale } from "../lib/i18n/index.js"
 import type { AgentEvent } from "../types"
 
@@ -11,6 +12,8 @@ interface EventCardProps {
   onQuote?: (text: string) => void
   onSaveObsidian?: (text: string) => void
   onViewDiff?: (event: AgentEvent) => void
+  apiBase?: string
+  projectId?: string
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -49,7 +52,7 @@ function stripAnsi(s: string): string {
 /** Strip Claude Code status bar metadata from text */
 function stripStatusBar(s: string): string {
   return s
-    .replace(/[*\u2217\u2234]\s*[A-Z][a-zA-Z]*ing\b[^\u276F]*/g, "")
+    .replace(/[*\u2217\u2234]\s*[A-Z][a-zA-Z]*ing\b[^\n\u276F]*/g, "")
     .replace(/\(running\s+stop\s+hooks[^)]*\)/gi, "")
     .replace(/\(\d+\.?\d*s\s*\u00B7[^)]*\)/g, "")
     .replace(/\(\d+\.?\d*s\s*[\u00B7.]\s*[\u2191\u2193]?\s*\d[\d,]*\s*tokens?\)/gi, "")
@@ -57,7 +60,7 @@ function stripStatusBar(s: string): string {
     .replace(/thought\s+for\s+\d+s/gi, "")
     .replace(/\d+\s*tokens?\s*used/gi, "")
     .replace(/[\u276F>$%]\s*$/, "")
-    .replace(/\s{2,}/g, " ")
+    .replace(/[^\S\n\r]{2,}/g, " ")
     .trim()
 }
 
@@ -82,7 +85,22 @@ function looksLikeMarkdown(text: string): boolean {
   return /#{1,3} |[*_]{2}|\*[^*]+\*|`[^`]+`|^\s*[-*] /m.test(text)
 }
 
-export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff }: EventCardProps) {
+/** Extract image URL from user message text containing upload paths */
+function extractImageUrl(text: string, apiBase?: string, projectId?: string): string | null {
+  if (!apiBase || !projectId) return null
+  // Match paths like .../.agentrune/uploads/1234_photo.png
+  const m = text.match(/[^\s]*\.agentrune[/\\]uploads[/\\]([^\s"']+\.(?:png|jpg|jpeg|gif|webp))/i)
+  if (m) return `${apiBase}/api/uploads/${projectId}/${m[1].replace(/\\/g, "/").split("/").pop()}`
+  // Match [Image: source: path] pattern
+  const im = text.match(/\[Image:\s*source:\s*([^\]]+\.(?:png|jpg|jpeg|gif|webp))\]/i)
+  if (im) {
+    const fn = im[1].replace(/\\/g, "/").split("/").pop()
+    return `${apiBase}/api/uploads/${projectId}/${fn}`
+  }
+  return null
+}
+
+export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff, apiBase, projectId }: EventCardProps) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -195,7 +213,10 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
 
   // User messages \u2014 distinct chat-bubble style with long-press support + expandable
   const hasDetail = isUserMsg && !!event.detail
+  const userImgUrl = isUserMsg ? (extractImageUrl(event.title, apiBase, projectId) || extractImageUrl(event.detail || "", apiBase, projectId)) : null
   if (isUserMsg) {
+    // Strip the [Image: source: ...] text from display title
+    const displayTitle = userImgUrl ? event.title.replace(/\[Image:\s*source:\s*[^\]]*\]/gi, "").trim() : event.title
     return (
       <>
         <div
@@ -219,17 +240,28 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
             cursor: hasDetail ? "pointer" : "default",
           }}
         >
+          {userImgUrl && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+              <img
+                src={userImgUrl}
+                alt="uploaded"
+                style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 10, objectFit: "contain" }}
+              />
+            </div>
+          )}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
             <span style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, flexShrink: 0 }}>
               {new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </span>
-            <span style={{
-              fontSize: 13, fontWeight: 600, color: "var(--accent-primary)",
-              fontFamily: "'JetBrains Mono', monospace",
-            }}>
-              {event.title}
-              {hasDetail && !expanded && <span style={{ opacity: 0.5, marginLeft: 4 }}>{"\u25BC"}</span>}
-            </span>
+            {(displayTitle || !userImgUrl) && (
+              <span style={{
+                fontSize: 13, fontWeight: 600, color: "var(--accent-primary)",
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                {displayTitle || event.title}
+                {hasDetail && !expanded && <span style={{ opacity: 0.5, marginLeft: 4 }}>{"\u25BC"}</span>}
+              </span>
+            )}
           </div>
           {expanded && event.detail && (
             <div style={{
@@ -340,9 +372,14 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                     .ec-md ul, .ec-md ol { padding-left: 16px; font-size: 13px; color: var(--text-primary); margin: 0; }
                     .ec-md h1,.ec-md h2,.ec-md h3 { font-size: 14px; font-weight: 700; color: var(--text-primary); margin: 6px 0 2px; }
                     .ec-md a { color: var(--accent-primary); text-decoration: none; }
+                    .ec-md table { border-collapse: collapse; font-size: 12px; width: 100%; margin: 6px 0; }
+                    .ec-md th, .ec-md td { border: 1px solid var(--glass-border); padding: 4px 8px; text-align: left; }
+                    .ec-md th { background: rgba(0,0,0,0.03); font-weight: 600; }
+                    html.dark .ec-md th { background: rgba(255,255,255,0.05); }
+                    .ec-md hr { border: none; border-top: 1px solid var(--glass-border); margin: 8px 0; }
                   `}</style>
                   <div className="ec-md">
-                    <ReactMarkdown>{cleanDetail}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
                   </div>
                   </>
                 )}
