@@ -2203,7 +2203,7 @@ export function ProjectOverview({
                   </svg>
                 </div>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{t("overview.killAll") || "Terminate"}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{t("overview.killThis") || "Terminate"}</div>
                   <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1 }}>{t("sessions.killDesc") || "Stop this session"}</div>
                 </div>
               </button>

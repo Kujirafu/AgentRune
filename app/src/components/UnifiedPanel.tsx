@@ -9,6 +9,7 @@ import { AutomationSheet } from "./AutomationSheet"
 import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS } from "../data/builtin-templates"
 import type { AutomationTemplate } from "../data/automation-types"
 import { useLocale } from "../lib/i18n"
+import { PrdPage } from "./PrdPage"
 
 const AGENTLORE_DEVICES_URL = "https://agentlore.vercel.app/api/agentrune/devices"
 
@@ -36,6 +37,7 @@ interface UnifiedPanelProps {
   onKillSession?: (sessionId: string) => void
   onSessionInput?: (sessionId: string, data: string) => void
   onCloudConnect?: (url: string, cloudSessionToken?: string) => void
+  send?: (msg: Record<string, unknown>) => boolean
   theme: "light" | "dark"
   toggleTheme: () => void
   wsConnected?: boolean
@@ -117,6 +119,7 @@ export function UnifiedPanel({
   onKillSession,
   onSessionInput,
   onCloudConnect,
+  send,
   theme,
   toggleTheme,
   wsConnected,
@@ -158,6 +161,9 @@ export function UnifiedPanel({
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null)
+  const [projectRenameValue, setProjectRenameValue] = useState("")
+  const [prdProjectId, setPrdProjectId] = useState<string | null>(null)
   const [multiSelectMode, setMultiSelectMode] = useState(false)
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set())
   const [pinnedTemplateIds, setPinnedTemplateIds] = useState<string[]>(() => {
@@ -526,22 +532,6 @@ export function UnifiedPanel({
     setVoicePhase(null)
   }
 
-  // --- Voice from project info card ---
-  const startVoiceForProject = (projectId: string) => {
-    const sessions = sessionsByProject.get(projectId) || []
-    if (sessions.length === 0) return
-    // Pick most recently active session
-    let best = sessions[0]
-    let bestTs = 0
-    for (const s of sessions) {
-      const events = sessionEvents.get(s.id) || []
-      if (events.length > 0) {
-        const ts = events[events.length - 1].timestamp
-        if (ts > bestTs) { best = s; bestTs = ts }
-      }
-    }
-    startVoice(best.id)
-  }
 
   // --- Android back button ---
   useEffect(() => {
@@ -903,153 +893,42 @@ export function UnifiedPanel({
               const isLoadingSummary = summaryLoading.has(project.id)
 
               return (
-                <div key={project.id} style={{ marginBottom: 20 }}>
-                  {/* --- Project header row --- */}
-                  <div style={{
-                    display: "flex", alignItems: "center", gap: 8,
-                    marginBottom: 8, padding: "0 4px",
-                  }}>
+                <div key={project.id} style={{
+                  marginBottom: 20,
+                  borderRadius: 16,
+                  background: theme === "dark"
+                    ? "rgba(52,119,146,0.08)"   // #347792 tinted glass — dark
+                    : "rgba(189,209,198,0.15)",  // #BDD1C6 tinted glass — light
+                  backdropFilter: "blur(24px) saturate(1.4)", WebkitBackdropFilter: "blur(24px) saturate(1.4)",
+                  border: theme === "dark"
+                    ? "1px solid rgba(55,172,192,0.12)"   // #37ACC0 tint border
+                    : "1px solid rgba(52,119,146,0.1)",
+                  boxShadow: theme === "dark"
+                    ? "0 4px 24px -4px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(55,172,192,0.06)"
+                    : "0 4px 24px -4px rgba(52,119,146,0.08), 0 0 0 0.5px rgba(52,119,146,0.04)",
+                  overflow: "hidden",
+                  paddingBottom: 12,
+                }}>
+                    {/* Project header row */}
                     <div style={{
-                      width: 8, height: 8, borderRadius: "50%",
-                      background: dotStyle.color, boxShadow: dotStyle.shadow,
-                      flexShrink: 0,
-                    }} />
-                    <div style={{
-                      flex: 1, fontWeight: 700, fontSize: 16,
-                      color: "var(--text-primary)",
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "14px 14px 0",
                     }}>
-                      {project.name}
-                    </div>
-                    {/* [...] button */}
-                    <button
-                      onClick={() => setContextProjectId(project.id)}
-                      style={{
-                        width: 32, height: 32, borderRadius: 8,
-                        background: "var(--glass-bg)",
-                        backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
-                        border: "1px solid var(--glass-border)",
-                        color: "var(--text-secondary)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        cursor: "pointer", flexShrink: 0,
-                      }}
-                    >
-                      <MoreIcon size={16} />
-                    </button>
-                    {/* Schedule button */}
-                    <button
-                      onClick={() => {
-                        setAutomationProjectId(project.id)
-                        setShowAutomation(true)
-                      }}
-                      style={{
-                        width: 32, height: 32, borderRadius: 8,
-                        background: "var(--glass-bg)",
-                        backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
-                        border: "1px solid var(--glass-border)",
-                        color: "var(--text-secondary)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        cursor: "pointer", flexShrink: 0,
-                      }}
-                    >
-                      <ClockIcon size={16} />
-                    </button>
-                    {/* + button */}
-                    <button
-                      onClick={() => {
-                        setSheetProjectId(project.id)
-                        setShowNewSheet(true)
-                      }}
-                      style={{
-                        width: 32, height: 32, borderRadius: 8,
-                        background: "var(--glass-bg)",
-                        backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
-                        border: "1px solid var(--glass-border)",
-                        color: "var(--text-secondary)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        cursor: "pointer", flexShrink: 0,
-                      }}
-                    >
-                      <PlusIcon size={16} />
-                    </button>
-                  </div>
-
-                  {/* --- Project info card --- */}
-                  <div style={{
-                    padding: 14,
-                    borderRadius: 16,
-                    background: "var(--glass-bg)",
-                    backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-                    border: "1px solid var(--glass-border)",
-                    boxShadow: `inset 4px 0 14px -4px ${dotStyle.glow}, var(--glass-shadow)`,
-                    marginBottom: 8,
-                    position: "relative",
-                  }}>
-                    {/* Summary */}
-                    <div style={{
-                      fontSize: 13, color: "var(--text-secondary)",
-                      lineHeight: 1.5, marginBottom: 6, minHeight: 20,
-                    }}>
-                      {isLoadingSummary ? (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                          <span style={{
-                            width: 12, height: 12, border: "2px solid var(--glass-border)",
-                            borderTopColor: "#37ACC0", borderRadius: "50%",
-                            display: "inline-block", animation: "spin 1s linear infinite",
-                          }} />
-                          Loading summary...
-                        </span>
-                      ) : cached?.text ? (
-                        cached.text.length > 200 ? cached.text.slice(0, 200) + "..." : cached.text
-                      ) : (
-                        <span style={{ opacity: 0.5 }}>
-                          {sessionCount > 0 ? getProjectSummary(sessions) || t("mc.sessionStarted") : t("overview.tapToStart")}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Next Steps from all sessions */}
-                    {sessions.length > 0 && (() => {
-                      const steps: { agentName: string; step: string }[] = []
-                      for (const s of sessions) {
-                        const events = sessionEvents.get(s.id) || []
-                        const prog = getLatestProgress(events)
-                        const agentDef = AGENTS.find(a => a.id === s.agentId)
-                        const name = labels[s.id] || autoLabels[s.id] || agentDef?.name || s.agentId
-                        if (prog?.nextSteps) {
-                          for (const step of prog.nextSteps.slice(0, 2)) {
-                            steps.push({ agentName: name, step })
-                          }
-                        }
-                      }
-                      if (steps.length === 0) return null
-                      return (
-                        <div style={{ marginTop: 4 }}>
-                          {steps.slice(0, 4).map((s, i) => (
-                            <div key={i} style={{
-                              display: "flex", gap: 4, fontSize: 11,
-                              color: "var(--text-secondary)", lineHeight: 1.5, opacity: 0.8,
-                            }}>
-                              <span style={{ fontWeight: 600, flexShrink: 0, color: "var(--text-primary)", opacity: 0.6 }}>
-                                {s.agentName}:
-                              </span>
-                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {s.step}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )
-                    })()}
-
-                    {/* Bottom row: refresh + voice */}
-                    <div style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      marginTop: 8,
-                    }}>
+                      <div style={{
+                        width: 8, height: 8, borderRadius: "50%",
+                        background: dotStyle.color, boxShadow: dotStyle.shadow,
+                        flexShrink: 0,
+                      }} />
+                      <div style={{
+                        flex: 1, fontWeight: 700, fontSize: 16,
+                        color: "var(--text-primary)",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
+                        {project.name}
+                      </div>
+                      {/* Refresh summary button */}
                       <button
                         onClick={() => {
-                          // Force re-fetch by clearing cache
                           setSummaryCache(prev => {
                             const next = new Map(prev)
                             next.delete(project.id)
@@ -1058,40 +937,146 @@ export function UnifiedPanel({
                           fetchSummary(project.id)
                         }}
                         style={{
-                          width: 28, height: 28, borderRadius: 8,
-                          border: "1px solid var(--glass-border)",
+                          width: 30, height: 30, borderRadius: 8,
                           background: "transparent",
+                          border: "1px solid var(--glass-border)",
                           color: "var(--text-secondary)",
                           display: "flex", alignItems: "center", justifyContent: "center",
-                          cursor: "pointer", opacity: 0.6,
+                          cursor: "pointer", flexShrink: 0,
                         }}
                       >
                         <RefreshIcon size={14} />
                       </button>
-                      {sessionCount > 0 && (
-                        <button
-                          onClick={() => startVoiceForProject(project.id)}
-                          style={{
-                            width: 36, height: 36, borderRadius: "50%",
-                            background: "rgba(59,130,246,0.15)",
-                            border: "1px solid rgba(59,130,246,0.3)",
-                            color: "#3b82f6",
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <MicIcon size={16} />
-                        </button>
-                      )}
+                      {/* [...] button */}
+                      <button
+                        onClick={() => setContextProjectId(project.id)}
+                        style={{
+                          width: 30, height: 30, borderRadius: 8,
+                          background: "transparent",
+                          border: "1px solid var(--glass-border)",
+                          color: "var(--text-secondary)",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          cursor: "pointer", flexShrink: 0,
+                        }}
+                      >
+                        <MoreIcon size={14} />
+                      </button>
+                      {/* Schedule button */}
+                      <button
+                        onClick={() => {
+                          setAutomationProjectId(project.id)
+                          setShowAutomation(true)
+                        }}
+                        style={{
+                          width: 30, height: 30, borderRadius: 8,
+                          background: "transparent",
+                          border: "1px solid var(--glass-border)",
+                          color: "var(--text-secondary)",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          cursor: "pointer", flexShrink: 0,
+                        }}
+                      >
+                        <ClockIcon size={14} />
+                      </button>
+                      {/* + button */}
+                      <button
+                        onClick={() => {
+                          setSheetProjectId(project.id)
+                          setShowNewSheet(true)
+                        }}
+                        style={{
+                          width: 30, height: 30, borderRadius: 8,
+                          background: "transparent",
+                          border: "1px solid var(--glass-border)",
+                          color: "var(--text-secondary)",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          cursor: "pointer", flexShrink: 0,
+                        }}
+                      >
+                        <PlusIcon size={14} />
+                      </button>
                     </div>
+
+                    {/* Project summary + next steps (same card, below header) */}
+                    <div style={{ padding: "10px 14px 14px" }}>
+                      {/* Summary */}
+                      <div style={{
+                        fontSize: 13, color: "var(--text-secondary)",
+                        lineHeight: 1.5, minHeight: 18,
+                      }}>
+                        {isLoadingSummary ? (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <span style={{
+                              width: 12, height: 12, border: "2px solid var(--glass-border)",
+                              borderTopColor: dotStyle.color, borderRadius: "50%",
+                              display: "inline-block", animation: "spin 1s linear infinite",
+                            }} />
+                            {t("unified.generatingSummary")}
+                          </span>
+                        ) : cached?.text ? (
+                          cached.text.length > 200 ? cached.text.slice(0, 200) + "..." : cached.text
+                        ) : (
+                          <span style={{ opacity: 0.5 }}>
+                            {sessionCount > 0 ? getProjectSummary(sessions) || t("mc.sessionStarted") : t("overview.tapToStart")}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Next Steps from all sessions */}
+                      {sessions.length > 0 && (() => {
+                        const steps: { agentName: string; step: string }[] = []
+                        for (const s of sessions) {
+                          const events = sessionEvents.get(s.id) || []
+                          const prog = getLatestProgress(events)
+                          const agentDef = AGENTS.find(a => a.id === s.agentId)
+                          const name = labels[s.id] || autoLabels[s.id] || agentDef?.name || s.agentId
+                          if (prog?.nextSteps) {
+                            for (const step of prog.nextSteps.slice(0, 2)) {
+                              steps.push({ agentName: name, step })
+                            }
+                          }
+                        }
+                        if (steps.length === 0) return null
+                        return (
+                          <div style={{ marginTop: 6 }}>
+                            {steps.slice(0, 4).map((s, i) => (
+                              <div key={i} style={{
+                                display: "flex", gap: 4, fontSize: 11,
+                                color: "var(--text-secondary)", lineHeight: 1.5, opacity: 0.8,
+                              }}>
+                                <span style={{ fontWeight: 600, flexShrink: 0, color: "var(--text-primary)", opacity: 0.6 }}>
+                                  {s.agentName}:
+                                </span>
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {s.step}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })()}
+
                   </div>
 
-                  {/* --- Horizontal session card row --- */}
+                  {/* --- Recessed tray for session cards --- */}
                   {sessionCount > 0 && (
                     <div style={{
-                      display: "flex", gap: 10,
+                      margin: "4px 10px 0",
+                      borderRadius: 12,
+                      background: theme === "dark"
+                        ? "rgba(0,0,0,0.2)"
+                        : "rgba(52,119,146,0.04)",
+                      boxShadow: theme === "dark"
+                        ? "inset 0 2px 8px rgba(0,0,0,0.35), inset 0 0 2px rgba(0,0,0,0.15)"
+                        : "inset 0 2px 8px rgba(52,119,146,0.08), inset 0 0 2px rgba(0,0,0,0.03)",
+                      border: theme === "dark"
+                        ? "1px solid rgba(255,255,255,0.03)"
+                        : "1px solid rgba(52,119,146,0.06)",
+                      padding: "8px 8px",
+                    }}>
+                    <div style={{
+                      display: "flex", gap: 8,
                       overflowX: "auto",
-                      paddingBottom: 4,
                       scrollSnapType: "x mandatory",
                       WebkitOverflowScrolling: "touch",
                       scrollbarWidth: "none",
@@ -1110,7 +1095,8 @@ export function UnifiedPanel({
                           <div
                             key={session.id}
                             style={{
-                              minWidth: 160, maxWidth: 200,
+                              width: "calc(50vw - 28px)",
+                              minWidth: "calc(50vw - 28px)",
                               scrollSnapAlign: "start",
                               flexShrink: 0,
                             }}
@@ -1228,20 +1214,71 @@ export function UnifiedPanel({
                         )
                       })}
                     </div>
+                    </div>
                   )}
 
-                  {/* No sessions hint */}
+                  {/* No sessions — small dashed card in tray */}
                   {sessionCount === 0 && (
                     <div style={{
-                      padding: "16px", textAlign: "center",
-                      fontSize: 13, color: "var(--text-secondary)", opacity: 0.5,
+                      margin: "4px 10px 0",
+                      borderRadius: 12,
+                      background: theme === "dark"
+                        ? "rgba(0,0,0,0.2)"
+                        : "rgba(52,119,146,0.04)",
+                      boxShadow: theme === "dark"
+                        ? "inset 0 2px 8px rgba(0,0,0,0.35), inset 0 0 2px rgba(0,0,0,0.15)"
+                        : "inset 0 2px 8px rgba(52,119,146,0.08), inset 0 0 2px rgba(0,0,0,0.03)",
+                      border: theme === "dark"
+                        ? "1px solid rgba(255,255,255,0.03)"
+                        : "1px solid rgba(52,119,146,0.06)",
+                      padding: "8px 8px",
                     }}>
-                      {t("overview.tapToStart")}
+                      <button
+                        onClick={() => {
+                          setSheetProjectId(project.id)
+                          setShowNewSheet(true)
+                        }}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          gap: 6,
+                          width: "calc(50vw - 28px)",
+                          padding: "14px 12px",
+                          background: "transparent",
+                          border: "1.5px dashed var(--glass-border)",
+                          borderRadius: 14,
+                          color: "var(--text-secondary)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <PlusIcon size={16} />
+                        <span style={{ fontSize: 12 }}>{t("overview.newSession")}</span>
+                      </button>
                     </div>
                   )}
                 </div>
               )
             })}
+
+            {/* New session button — always visible at bottom of project list */}
+            {projects.length > 0 && (
+              <button
+                onClick={() => setShowNewSheet(true)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  width: "100%", padding: "12px 16px", marginTop: 4, borderRadius: 14,
+                  border: "1.5px dashed rgba(55,172,192,0.4)",
+                  background: "rgba(55,172,192,0.06)",
+                  backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                  color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", transition: "all 0.2s",
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                {t("overview.newProject") || "New Project"}
+              </button>
+            )}
           </div>
 
           {/* ========== Schedules Tab ========== */}
@@ -1252,6 +1289,25 @@ export function UnifiedPanel({
             padding: "8px 16px 40px",
           }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 4px" }}>
+              {/* Add schedule button */}
+              <button
+                onClick={() => setShowAutomation(true)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  padding: "12px 16px", borderRadius: 14,
+                  border: "1.5px dashed rgba(55,172,192,0.4)",
+                  background: "rgba(55,172,192,0.06)",
+                  backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                  color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", transition: "all 0.2s",
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                {t("schedules.add") || "New Schedule"}
+              </button>
+
               {automationsLoading && (
                 <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)", opacity: 0.5 }}>Loading...</div>
               )}
@@ -1369,6 +1425,25 @@ export function UnifiedPanel({
             padding: "8px 16px 40px",
           }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 4px" }}>
+              {/* New template button */}
+              <button
+                onClick={() => setShowAutomation(true)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  width: "100%", padding: "12px 16px", borderRadius: 14,
+                  border: "1.5px dashed rgba(55,172,192,0.4)",
+                  background: "rgba(55,172,192,0.06)",
+                  backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                  color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", transition: "all 0.2s",
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                {t("templates.create") || "New Template"}
+              </button>
+
               {/* Search */}
               <div style={{ position: "relative", marginBottom: 2 }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", opacity: 0.6 }}>
@@ -1598,13 +1673,13 @@ export function UnifiedPanel({
                 },
               })}
 
-              {sessions.length > 0 && actionRow({
-                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>,
+              {actionRow({
+                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>,
                 label: t("overview.viewPrd"),
-                desc: "View task board for this project",
+                desc: t("prd.viewDesc") || "View plan and task progress",
                 onClick: () => {
+                  setPrdProjectId(proj.id)
                   setContextProjectId(null)
-                  if (sessions.length > 0) onSelectSession(sessions[0].id)
                 },
               })}
 
@@ -1631,13 +1706,50 @@ export function UnifiedPanel({
                 },
               })}
 
+              {sessions.filter(s => s.worktreeBranch).length > 0 && actionRow({
+                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M6 21V9a9 9 0 009 9" /></svg>,
+                label: t("unified.mergeToMain"),
+                desc: t("unified.mergeAllDesc") || "Merge all session worktrees to main",
+                onClick: () => {
+                  sessions.filter(s => s.worktreeBranch).forEach(s => {
+                    send?.({ type: "merge_worktree", sessionId: s.id })
+                  })
+                  setContextProjectId(null)
+                },
+              })}
+
+              {actionRow({
+                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>,
+                label: t("unified.renameProject"),
+                desc: "",
+                onClick: () => {
+                  setProjectRenameValue(proj.name)
+                  setRenamingProjectId(proj.id)
+                  setContextProjectId(null)
+                },
+              })}
+
               {sessions.length > 0 && actionRow({
-                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>,
+                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>,
                 label: t("overview.killAll"),
-                desc: `Terminate all ${sessions.length} session${sessions.length !== 1 ? "s" : ""}`,
+                desc: `${sessions.length} ${sessions.length > 1 ? "sessions" : "session"}`,
                 color: "#ef4444",
                 onClick: () => {
                   sessions.forEach(s => onKillSession?.(s.id))
+                  setContextProjectId(null)
+                },
+              })}
+
+              <div style={{ height: 1, background: "var(--glass-border)", margin: "4px 20px" }} />
+
+              {actionRow({
+                icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>,
+                label: t("unified.closeProject"),
+                desc: t("unified.closeProjectDesc") || "Remove from panel",
+                color: "#f59e0b",
+                onClick: () => {
+                  sessions.forEach(s => onKillSession?.(s.id))
+                  onDeleteProject?.(contextProjectId)
                   setContextProjectId(null)
                 },
               })}
@@ -1657,6 +1769,95 @@ export function UnifiedPanel({
           </>
         )
       })()}
+
+      {/* Project rename dialog */}
+      {renamingProjectId && (
+        <>
+          <div
+            onClick={() => setRenamingProjectId(null)}
+            style={{
+              position: "fixed", inset: 0, zIndex: 400,
+              background: "rgba(0,0,0,0.5)",
+              backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
+            }}
+          />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+            zIndex: 401, width: "min(320px, 85vw)",
+            background: "var(--card-bg)",
+            backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+            border: "1px solid var(--glass-border)",
+            borderRadius: 16, padding: 20,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", marginBottom: 12 }}>
+              {t("unified.renameProject")}
+            </div>
+            <input
+              autoFocus
+              value={projectRenameValue}
+              onChange={(e) => setProjectRenameValue(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === "Enter" && projectRenameValue.trim()) {
+                  const serverUrl = localStorage.getItem("agentrune_server") || ""
+                  try {
+                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ name: projectRenameValue.trim() }),
+                    })
+                    // Update local projects array
+                    const proj = projects.find(p => p.id === renamingProjectId)
+                    if (proj) (proj as any).name = projectRenameValue.trim()
+                  } catch {}
+                  setRenamingProjectId(null)
+                }
+              }}
+              style={{
+                width: "100%", padding: "10px 12px", fontSize: 14,
+                borderRadius: 10, border: "1px solid var(--glass-border)",
+                background: theme === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                color: "var(--text-primary)", outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setRenamingProjectId(null)}
+                style={{
+                  padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                  borderRadius: 8, border: "1px solid var(--glass-border)",
+                  background: "transparent", color: "var(--text-secondary)", cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (!projectRenameValue.trim()) return
+                  const serverUrl = localStorage.getItem("agentrune_server") || ""
+                  try {
+                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ name: projectRenameValue.trim() }),
+                    })
+                    const proj = projects.find(p => p.id === renamingProjectId)
+                    if (proj) (proj as any).name = projectRenameValue.trim()
+                  } catch {}
+                  setRenamingProjectId(null)
+                }}
+                style={{
+                  padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                  borderRadius: 8, border: "none",
+                  background: "#37ACC0", color: "#fff", cursor: "pointer",
+                }}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Session context menu */}
       {contextSessionId && (() => {
@@ -1873,6 +2074,70 @@ export function UnifiedPanel({
                 </div>
               </button>
 
+              {/* Merge worktree */}
+              {session.worktreeBranch && (
+                <button
+                  onClick={() => {
+                    send?.({ type: "merge_worktree", sessionId: contextSessionId })
+                    setContextSessionId(null)
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 16,
+                    width: "100%", padding: "14px 20px",
+                    background: "transparent", border: "none",
+                    color: "#22c55e", cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 12,
+                    background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "#22c55e",
+                  }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{t("mc.mergeWorktree") || "Merge Worktree"}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1 }}>{t("mc.mergeWorktreeDesc") || "Merge this branch to main"}</div>
+                  </div>
+                </button>
+              )}
+
+              {/* Discard worktree */}
+              {session.worktreeBranch && (
+                <button
+                  onClick={() => {
+                    send?.({ type: "discard_worktree", sessionId: contextSessionId })
+                    setContextSessionId(null)
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 16,
+                    width: "100%", padding: "14px 20px",
+                    background: "transparent", border: "none",
+                    color: "#f59e0b", cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 12,
+                    background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "#f59e0b",
+                  }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{t("mc.discardWorktree") || "Discard Worktree"}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1 }}>{t("mc.discardWorktreeDesc") || "Delete worktree and discard changes"}</div>
+                  </div>
+                </button>
+              )}
+
+              <div style={{ height: 1, margin: "2px 20px", background: "var(--glass-border)" }} />
+
               {/* Kill */}
               <button
                 onClick={() => {
@@ -1897,7 +2162,7 @@ export function UnifiedPanel({
                   </svg>
                 </div>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{t("overview.killAll") || "Terminate"}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{t("overview.killThis") || "Terminate"}</div>
                   <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1 }}>{t("sessions.killDesc") || "Stop this session"}</div>
                 </div>
               </button>
@@ -2072,6 +2337,15 @@ export function UnifiedPanel({
         projectId={automationProjectId || ""}
         serverUrl={localStorage.getItem("agentrune_server") || ""}
         onClose={() => setShowAutomation(false)}
+      />
+
+      {/* Plan Page */}
+      <PrdPage
+        open={!!prdProjectId}
+        projectId={prdProjectId || ""}
+        projectName={projects.find(p => p.id === prdProjectId)?.name || ""}
+        onClose={() => setPrdProjectId(null)}
+        theme={theme}
       />
 
       {/* Voice Overlay */}

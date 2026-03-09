@@ -68,6 +68,12 @@ interface JsonlLine {
       id?: string
       input?: Record<string, any>
     }>
+    usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      cache_creation_input_tokens?: number
+      cache_read_input_tokens?: number
+    }
   }
   content?: string
   data?: Record<string, any>
@@ -130,6 +136,8 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
         })
       } else if (name === "Read") {
         const filePath = input.file_path || "unknown"
+        // Skip injection reads (rules.md, agentlore.md)
+        if (/\.agentrune[/\\](rules|agentlore)\.md$/.test(filePath)) continue
         events.push({
           id: makeId(),
           timestamp: ts,
@@ -162,6 +170,26 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
           status: "in_progress",
           title: `Subagent: ${(input.prompt || "").slice(0, 80)}`,
         })
+      } else if (name === "AskUserQuestion") {
+        // Convert AskUserQuestion tool call to decision_request events
+        const questions = input.questions || []
+        for (const q of questions) {
+          const options = (q.options || []).map((opt: { label: string; description?: string }) => ({
+            label: opt.label + (opt.description ? ` — ${opt.description}` : ""),
+            input: opt.label,
+            style: "default",
+          }))
+          if (options.length > 0) {
+            events.push({
+              id: makeId(),
+              timestamp: ts,
+              type: "decision_request",
+              status: "waiting",
+              title: q.question || "Question",
+              decision: { options },
+            })
+          }
+        }
       } else if (name === "WebFetch" || name === "WebSearch") {
         events.push({
           id: makeId(),
@@ -186,6 +214,8 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
     if (block.type === "text" && block.text) {
       const text = block.text.trim()
       if (text.length < 5) continue
+      // Filter injection prompt responses (agent reading rules.md/agentlore.md on startup)
+      if (/已讀完.*(?:rules\.md|agentlore\.md)|讀取.*(?:rules\.md|agentlore\.md)|Read.*\.agentrune\/(rules|agentlore)\.md/i.test(text.split("\n")[0])) continue
       // Short text: title only. Long text: first line as title, full text as detail
       const firstLine = text.split("\n")[0].slice(0, 200)
       const isLong = text.length > 200 || text.includes("\n")
@@ -199,6 +229,22 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
       })
 
     }
+  }
+
+  // Emit token usage event if present
+  const usage = line.message?.usage
+  if (usage && (usage.input_tokens || usage.output_tokens)) {
+    events.push({
+      id: makeId(),
+      timestamp: ts,
+      type: "token_usage",
+      status: "completed",
+      title: "Token usage",
+      detail: JSON.stringify({
+        input: (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0),
+        output: usage.output_tokens || 0,
+      }),
+    })
   }
 
   return events
@@ -283,6 +329,7 @@ export class JsonlWatcher {
   private offset = 0
   private watcher: ReturnType<typeof watch> | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
+  private scanTimer: ReturnType<typeof setInterval> | null = null
   private callback: JsonlEventCallback
   private lastCheck = 0
   private seenIds = new Set<string>()  // dedup tool_use IDs
@@ -290,13 +337,15 @@ export class JsonlWatcher {
   private existingFileMtimes: Map<string, number>  // files + their mtime at watcher start
   private startTime: number  // when this watcher was created
   private targetSessionId: string | undefined  // specific Claude Code session UUID to watch
+  private skipReplay: boolean  // skip initial replay (when server already has stored events)
 
-  constructor(projectCwd: string, callback: JsonlEventCallback, targetSessionId?: string) {
+  constructor(projectCwd: string, callback: JsonlEventCallback, targetSessionId?: string, skipReplay = false) {
     const claudeBase = join(homedir(), ".claude", "projects")
     this.projectDir = join(claudeBase, cwdToClaudeDir(projectCwd))
     this.callback = callback
     this.startTime = Date.now()
     this.targetSessionId = targetSessionId
+    this.skipReplay = skipReplay
 
     // If targeting a specific session, skip existingFileMtimes — go straight to that file
     if (targetSessionId) {
@@ -319,30 +368,28 @@ export class JsonlWatcher {
   }
 
   start(): void {
-    // Find initial file
+    // Find initial file — poll until found (Claude takes a moment to create JSONL)
     this.findAndWatch()
-
-    // Poll for new files every 5s (handles session changes, /resume)
-    this.pollTimer = setInterval(() => this.findAndWatch(), 5000)
+    if (!this.jsonlPath) {
+      this.scanTimer = setInterval(() => {
+        this.findAndWatch()
+        // Stop scanning once locked on
+        if (this.jsonlPath && this.scanTimer) {
+          clearInterval(this.scanTimer)
+          this.scanTimer = null
+        }
+      }, 2000)
+    }
   }
 
   stop(): void {
     if (this.jsonlPath) { claimedJsonlFiles.delete(this.jsonlPath) }
     if (this.watcher) { this.watcher.close(); this.watcher = null }
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+    if (this.scanTimer) { clearInterval(this.scanTimer); this.scanTimer = null }
   }
 
   private findAndWatch(): void {
-    // Once we've locked onto a file, STOP searching.
-    // This prevents cross-session contamination when multiple sessions run
-    // on the same project (each writing to different JSONL files).
-    // The poll only exists to find our file initially (before Claude creates it).
-    if (this.jsonlPath) {
-      // Already watching a file — stop polling, we're done searching
-      if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
-      return
-    }
-
     let active: string | null = null
 
     // If targeting a specific Claude session, look for that exact file
@@ -357,28 +404,44 @@ export class JsonlWatcher {
     }
 
     if (!active) {
+      // Only look at NEW files (exclude pre-existing ones from other sessions)
       active = findActiveJsonl(this.projectDir, {
         excludeClaimed: true,
         existingFileMtimes: this.existingFileMtimes,
-        currentPath: undefined,
+        currentPath: this.jsonlPath || undefined,
       })
     }
     if (!active) return
 
-    // Found our file — claim it and stop polling
+    // Same file — nothing to do
+    if (active === this.jsonlPath) return
+
+    // Different file detected (Claude resumed to another session, or initial lock-on)
+    const isSwitch = !!this.jsonlPath
+    if (isSwitch) {
+      console.log(`[JsonlWatcher] Switching: ${this.jsonlPath} → ${active}`)
+      // Clean up old watcher
+      claimedJsonlFiles.delete(this.jsonlPath!)
+      if (this.watcher) { this.watcher.close(); this.watcher = null }
+    }
+
     this.jsonlPath = active
     claimedJsonlFiles.add(active)
     this.seenIds.clear()
-    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
 
-    // Replay for resumed sessions, skip to end for new sessions with pre-existing files
-    const isPreExisting = !this.targetSessionId && this.existingFileMtimes.has(active)
-    if (isPreExisting) {
+    if (isSwitch) {
+      // On switch: skip to end (don't replay old history), watch for new writes only
       try { this.offset = statSync(active).size } catch { this.offset = 0 }
-      console.log(`[JsonlWatcher] Skipping replay for pre-existing file: ${active}`)
     } else {
-      this.offset = 0
-      this.replayRecent(active)
+      // Initial lock-on: replay recent events
+      const isPreExisting = !this.targetSessionId && this.existingFileMtimes.has(active)
+      if (isPreExisting || this.skipReplay) {
+        try { this.offset = statSync(active).size } catch { this.offset = 0 }
+        console.log(`[JsonlWatcher] Skipping replay: pre-existing=${isPreExisting} skipReplay=${this.skipReplay}`)
+      } else {
+        this.offset = 0
+        this.replayRecent(active)
+      }
     }
     this.watchFile()
     console.log(`[JsonlWatcher] Locked onto: ${active}`)
@@ -401,9 +464,17 @@ export class JsonlWatcher {
       const lines = text.split("\n").filter(Boolean)
       const allEvents: AgentEvent[] = []
 
+      // Detect the sessionId from the JSONL filename (e.g. "abc-def.jsonl" → "abc-def")
+      const fileSessionId = this.jsonlPath
+        ? this.jsonlPath.split(/[/\\]/).pop()?.replace(/\.jsonl$/, "") || null
+        : null
+
       for (const raw of lines) {
         let parsed: JsonlLine
         try { parsed = JSON.parse(raw) } catch { continue }
+
+        // Filter by sessionId — only process lines belonging to our target session
+        if (parsed.sessionId && fileSessionId && parsed.sessionId !== fileSessionId) continue
 
         if (parsed.type === "assistant") {
           const content = parsed.message?.content || []
@@ -441,14 +512,17 @@ export class JsonlWatcher {
   private watchFile(): void {
     if (!this.jsonlPath) return
     try {
-      this.watcher = watch(this.jsonlPath, () => {
+      this.watcher = watch(this.jsonlPath, (eventType) => {
+        console.log(`[JsonlWatcher] fs.watch fired: ${eventType} on ${this.jsonlPath}`)
         this.readNewLines()
       })
-    } catch {
-      // Fallback: poll every 2s
-      if (this.pollTimer) clearInterval(this.pollTimer)
-      this.pollTimer = setInterval(() => this.readNewLines(), 2000)
+      console.log(`[JsonlWatcher] fs.watch registered on ${this.jsonlPath}`)
+    } catch (err) {
+      console.log(`[JsonlWatcher] fs.watch FAILED: ${err}`)
     }
+    // Polling backup — fs.watch can miss events on some platforms
+    if (this.pollTimer) clearInterval(this.pollTimer)
+    this.pollTimer = setInterval(() => this.readNewLines(), 1000)
   }
 
   private readNewLines(): void {
@@ -478,9 +552,17 @@ export class JsonlWatcher {
     const lines = text.split("\n").filter(Boolean)
     const allEvents: AgentEvent[] = []
 
+    // Detect the sessionId from the JSONL filename
+    const fileSessionId2 = this.jsonlPath
+      ? this.jsonlPath.split(/[/\\]/).pop()?.replace(/\.jsonl$/, "") || null
+      : null
+
     for (const raw of lines) {
       let parsed: JsonlLine
       try { parsed = JSON.parse(raw) } catch { continue }
+
+      // Filter by sessionId — only process lines belonging to our target session
+      if (parsed.sessionId && fileSessionId2 && parsed.sessionId !== fileSessionId2) continue
 
       // When any new message arrives, complete all pending in_progress events
       // (the previous tools must have finished for a new message to appear)
@@ -528,6 +610,7 @@ export class JsonlWatcher {
     }
 
     if (allEvents.length > 0) {
+      console.log(`[JsonlWatcher] readNewLines: ${lines.length} lines → ${allEvents.length} events (types: ${allEvents.map(e => e.type).join(",")})`)
       this.callback(allEvents)
     }
   }
@@ -540,9 +623,9 @@ export class JsonlWatcher {
     if (this.watcher) { this.watcher.close(); this.watcher = null }
     this.jsonlPath = null
     this.seenIds.clear()
-    // Restart polling since we cleared the lock
-    if (!this.pollTimer) {
-      this.pollTimer = setInterval(() => this.findAndWatch(), 5000)
+    // Restart scan timer since we cleared the lock
+    if (!this.scanTimer) {
+      this.scanTimer = setInterval(() => this.findAndWatch(), 5000)
     }
     this.findAndWatch()
   }
@@ -603,7 +686,13 @@ export class JsonlWatcher {
               if (o.type === "user" && o.message?.content) {
                 const t = (o.message.content as any[]).find((c: any) => c.type === "text")
                 if (t?.text) {
-                  label = t.text.replace(/\n/g, " ").trim().slice(0, 60)
+                  const txt = t.text.trim()
+                  // Skip injection prompts — find the real first user message
+                  if (/請先讀取\s*\.agentrune\//.test(txt)) continue
+                  if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(txt)) continue
+                  if (/command -v .* >\/dev\/null 2>&1/.test(txt)) continue
+                  if (/^<[a-z][\w-]*>/.test(txt)) continue
+                  label = txt.replace(/\n/g, " ").slice(0, 60)
                   break
                 }
               }

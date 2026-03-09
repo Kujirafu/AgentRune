@@ -1,21 +1,30 @@
-import { defineConfig } from "vite"
+import { defineConfig, loadEnv } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
+import { fileURLToPath } from "node:url"
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  define: {
-    __APP_VERSION__: JSON.stringify("0.1.1"),
-    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
-  },
-  build: {
-    outDir: "dist",
-    emptyOutDir: true,
-  },
-  server: {
-    proxy: {
-      "/api": "http://localhost:3456",
-      "/ws": { target: "ws://localhost:3456", ws: true },
+const __dirname = fileURLToPath(new URL(".", import.meta.url))
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, __dirname, "VITE_")
+  const port = env.VITE_DEFAULT_PORT || "3456"
+
+  return {
+    plugins: [react(), tailwindcss()],
+    define: {
+      __APP_VERSION__: JSON.stringify("0.2.0"),
+      __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
-  },
+    build: {
+      outDir: "dist",
+      emptyOutDir: true,
+    },
+    server: {
+      host: true,
+      proxy: {
+        "/api": `http://localhost:${port}`,
+        "/ws": { target: `ws://localhost:${port}`, ws: true },
+      },
+    },
+  }
 })

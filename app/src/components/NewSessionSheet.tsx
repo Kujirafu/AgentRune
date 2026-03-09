@@ -130,6 +130,24 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
 
   const { sheetRef, handlers: swipeHandlers } = useSwipeToDismiss({ onDismiss: onClose })
 
+  // Android back button: close preview first, then close sheet
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: Event) => {
+      if (previewSession) {
+        setPreviewSession(null)
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      } else {
+        onClose()
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      }
+    }
+    document.addEventListener("app:back", handler)
+    return () => document.removeEventListener("app:back", handler)
+  }, [open, previewSession, onClose])
+
   if (!open) return null
 
   return (

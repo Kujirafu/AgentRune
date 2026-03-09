@@ -358,6 +358,8 @@ interface InputBarProps {
   draftKey?: string
   attachedFiles?: string[]
   onRemoveFile?: (path: string) => void
+  disabled?: boolean
+  disabledHint?: string
 }
 
 // Module-level draft storage — survives unmount/remount
@@ -386,7 +388,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile }: InputBarProps) {
+export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -425,6 +427,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   const [taskMode, setTaskMode] = useState(false)
   const [sentHistory, addSent] = useSentHistory()
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const highlightRef = useRef<HTMLDivElement>(null)
   const historyRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const slashPanelRef = useRef<HTMLDivElement>(null)
@@ -751,6 +754,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   }, [sentHistory.length])
 
   const handleSend = () => {
+    if (disabled) return
     const trimmed = input.trim()
     const hasFiles = attachedFiles && attachedFiles.length > 0
     if (!trimmed && pasteImages.length === 0 && !hasFiles) {
@@ -1357,10 +1361,10 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
             overflow: "hidden",
           }}
         >
-          <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-            {/* Syntax-highlighted overlay */}
+          <div style={{ flex: 1, position: "relative", overflowX: "auto", overflowY: "hidden" }}>
+            {/* Syntax-highlighted overlay — scrolls in sync with textarea */}
             {input && (
-              <div aria-hidden style={{
+              <div ref={highlightRef} aria-hidden style={{
                 position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
                 padding: "12px 16px",
                 fontSize: 15,
@@ -1368,7 +1372,9 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
                 lineHeight: 1.4,
                 whiteSpace: "nowrap",
                 pointerEvents: "none",
-                overflow: "hidden",
+                overflowX: "auto",
+                overflowY: "hidden",
+                scrollbarWidth: "none",
                 color: "transparent",
               }}>
                 {highlightInput(input)}
@@ -1383,12 +1389,18 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onScroll={(e) => {
+                if (highlightRef.current) highlightRef.current.scrollLeft = e.currentTarget.scrollLeft
+              }}
+              disabled={disabled}
               placeholder={
-                interruptMode
-                  ? (t("input.interruptPlaceholder") || "Interrupt: agent will prioritize this...")
-                  : taskMode
-                    ? (t("input.taskPlaceholder") || "Add task...")
-                    : t("input.placeholder")
+                disabled
+                  ? (disabledHint || "Initializing...")
+                  : interruptMode
+                    ? (t("input.interruptPlaceholder") || "Interrupt: agent will prioritize this...")
+                    : taskMode
+                      ? (t("input.taskPlaceholder") || "Add task...")
+                      : t("input.placeholder")
               }
               autoComplete="off"
               autoCapitalize="off"
@@ -1415,6 +1427,32 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
               }}
             />
           </div>
+          {/* Clear input button — only when there's text */}
+          {input.length > 0 && (
+            <button
+              type="button"
+              onClick={() => { setInput(""); inputRef.current?.focus() }}
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 12,
+                border: "none",
+                background: "rgba(127,127,127,0.15)",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                opacity: 0.6,
+                transition: "opacity 0.2s",
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          )}
           {/* Expand button — always visible for fullscreen editing */}
           <button
             type="button"

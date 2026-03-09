@@ -1808,6 +1808,7 @@ export function App() {
             handleResume(sessionId)
             setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
           }}
+          send={send}
           theme={theme}
           toggleTheme={toggleTheme}
           wsConnected={wsConnected}

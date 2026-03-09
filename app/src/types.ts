@@ -142,9 +142,30 @@ export interface Task {
   dependsOn: number[]
 }
 
+export interface PrdDecision {
+  question: string
+  answer: string
+}
+
+export interface PrdApproach {
+  name: string
+  pros: string[]
+  cons: string[]
+  adopted: boolean
+  techNote?: string
+}
+
+export interface Prd {
+  goal: string
+  decisions: PrdDecision[]
+  approaches: PrdApproach[]
+  scope: { included: string[]; excluded: string[] }
+}
+
 export interface TaskStore {
   projectId: string
   requirement: string
+  prd?: Prd
   tasks: Task[]
   createdAt: number
   updatedAt: number
@@ -191,10 +212,10 @@ const buildProtocol = (locale?: string) => {
   return {
     full: [
       "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-      `FIRST ACTION (mandatory, before anything else): Read .agentrune/rules.md (your behavior rules) and .agentrune/agentlore.md (your project memory — treat it like memory.md). Follow rules.md strictly. If agentlore.md does not exist, create it by scanning the project.${langHint}`,
+      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
       "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
     ].join(" "),
-    short: `AGENTRUNE: Read .agentrune/rules.md (behavior rules) and .agentrune/agentlore.md (project memory) before starting. agentlore.md IS your memory — read on start, write when you learn. If agentlore.md missing, create it (mkdir -p .agentrune). Do NOT use your own memory system — only .agentrune/agentlore.md.${langHint}`,
+    short: `AGENTRUNE: If .agentrune/rules.md exists, read and follow it. Read .agentrune/agentlore.md (project memory) — if missing, create it (mkdir -p .agentrune) by scanning the project. agentlore.md IS your memory — read on start, write when you learn. Do NOT use your own memory system — only .agentrune/agentlore.md.${langHint}`,
   }
 }
 
