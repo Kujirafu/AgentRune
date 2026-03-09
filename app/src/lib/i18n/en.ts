@@ -252,6 +252,7 @@ export const en: Record<string, string> = {
   "mc.worktreeMerged": "Worktree merged successfully",
   "mc.worktreeDiscarded": "Worktree discarded",
   "mc.worktreeFailed": "Worktree operation failed",
+  "mc.initializing": "Initializing, please wait...",
 
   // Detail Panel
   "detail.title": "Details",
@@ -426,6 +427,29 @@ export const en: Record<string, string> = {
   "sessions.batchSummary": "Summary",
   "sessions.batchNextStep": "Next Step",
   "sessions.batchMerge": "Merge",
+
+  // Unified Panel
+  "unified.summary": "Summary",
+  "unified.nextSteps": "Next Steps",
+  "unified.noSummary": "No activity yet",
+  "unified.refreshSummary": "Refresh summary",
+  "unified.generatingSummary": "Generating summary...",
+  "unified.projectActions": "More actions",
+  "unified.mergeToMain": "Merge to main",
+  "unified.healthReport": "Health report",
+  "unified.closeProject": "Close project",
+  "unified.viewPrd": "View PRD",
+  "unified.editProject": "Edit project",
+  "unified.deleteProject": "Delete project",
+  "unified.expandSession": "Show details",
+  "unified.collapseSession": "Hide details",
+  "unified.startTime": "Started",
+  "unified.messageCount": "Messages",
+  "unified.fileChanges": "File changes",
+  "unified.labels": "Labels",
+  "unified.tabProjects": "Projects",
+  "unified.tabSchedules": "Schedules",
+  "unified.tabTemplates": "Templates",
 
   // Settings — Worktree
   "settings.worktreeIsolation": "Worktree Isolation",

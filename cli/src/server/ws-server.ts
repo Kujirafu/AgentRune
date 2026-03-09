@@ -531,7 +531,7 @@ export function createServer(portOverride?: number) {
         .replaceAll(":", "-")
         .replace(/^-/, "")
 
-      // Helper: parse JSONL files for session summary (first 16KB only)
+      // Helper: parse JSONL files for session summary (first 64KB — injection prompts can be large)
       const parseJsonlSessions = (dir: string, perProject: boolean): { sessionId: string; slug: string; firstUserMessage: string; messageCount: number; lastModified: number; sizeBytes: number }[] => {
         if (!existsSync(dir)) return []
         const jsonlFiles = perProject
@@ -547,8 +547,8 @@ export function createServer(portOverride?: number) {
           let messageCount = 0
           try {
             const fd = openSync(filePath, "r")
-            const buf = Buffer.alloc(16384)
-            const bytesRead = readSync(fd, buf, 0, 16384, 0)
+            const buf = Buffer.alloc(65536)
+            const bytesRead = readSync(fd, buf, 0, 65536, 0)
             closeSync(fd)
             const chunk = buf.toString("utf-8", 0, bytesRead)
             for (const line of chunk.split("\n")) {
@@ -564,6 +564,11 @@ export function createServer(portOverride?: number) {
                     : Array.isArray(entry.message.content)
                       ? entry.message.content.find((b: { type: string; text?: string }) => b.type === "text")?.text || ""
                       : ""
+                  // Skip injection prompts — find the real first user message
+                  if (/請先讀取\s*\.agentrune\//.test(text)) continue
+                  if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(text)) continue
+                  if (/command -v .* >\/dev\/null 2>&1/.test(text)) continue
+                  if (/^<[a-z][\w-]*>/.test(text)) continue
                   firstUserMessage = text.slice(0, 200)
                 }
                 if (firstUserMessage && slug) break
@@ -825,6 +830,31 @@ export function createServer(portOverride?: number) {
     if (typeof text !== "string") return res.status(400).json({ error: "Missing text" })
     const ok = writeClipboard(text)
     res.json({ ok })
+  })
+
+  // --- Test: send decision_request to all connected APP clients ---
+  app.post("/api/test-decision", (req, res) => {
+    const { title, options } = req.body
+    if (!options) return res.status(400).json({ error: "Missing options" })
+    const event: AgentEvent = {
+      id: `test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: Date.now(),
+      type: "decision_request",
+      status: "waiting",
+      title: title || "Test options",
+      decision: { options },
+    }
+    // Store in all active sessions and broadcast to all connected clients
+    let sent = 0
+    for (const [client, sid] of clientSessions) {
+      if (client.readyState === WebSocket.OPEN) {
+        const list = sessionRecentEvents.get(sid)
+        if (list) { list.push(event); persistEvents(sid, list) }
+        client.send(JSON.stringify({ type: "event", event }))
+        sent++
+      }
+    }
+    res.json({ ok: true, eventId: event.id, sentTo: sent })
   })
 
   // --- Image upload ---
@@ -1523,6 +1553,58 @@ export function createServer(portOverride?: number) {
     res.json(events)
   })
 
+  // --- Project Summary (aggregate events across sessions) ---
+
+  app.post("/api/project-summary", express.json(), async (req, res) => {
+    const { projectId } = req.body || {}
+    if (!projectId) {
+      return res.status(400).json({ error: "Missing projectId" })
+    }
+
+    try {
+      // Collect events from all sessions belonging to this project
+      const projectSessions = eventStore.getSessionsByProject(projectId)
+      if (projectSessions.length === 0) {
+        return res.json({ summary: "No sessions found for this project." })
+      }
+
+      // Gather recent events from all sessions (newest first, cap at 200)
+      const allEvents: AgentEvent[] = []
+      for (const session of projectSessions) {
+        const events = eventStore.getSessionEvents(session.id)
+        allEvents.push(...events)
+      }
+      allEvents.sort((a, b) => b.timestamp - a.timestamp)
+      const recentEvents = allEvents.slice(0, 200)
+
+      // Build a concatenated text from event titles/details
+      const eventLines = recentEvents.map(e => {
+        const ts = new Date(e.timestamp).toISOString().slice(0, 16)
+        const detail = e.detail ? ` — ${e.detail.slice(0, 120)}` : ""
+        return `[${ts}] ${e.type}: ${e.title}${detail}`
+      })
+      const concatenated = eventLines.join("\n")
+
+      // Try LLM-based summary via cleanupVoiceText (reusing LLM infra)
+      try {
+        const summaryPrompt = `Summarize the following AI agent activity log for a developer. Be concise (3-5 bullet points). Focus on what was accomplished, key changes, and any errors:\n\n${concatenated}`
+        const { cleanupVoiceText } = await import("./voice-cleanup.js")
+        const result = await cleanupVoiceText(summaryPrompt, "claude")
+        if (result.cleaned && result.cleaned.trim()) {
+          return res.json({ summary: result.cleaned })
+        }
+      } catch (llmErr: any) {
+        log.warn(`Project summary LLM fallback: ${llmErr.message}`)
+      }
+
+      // Fallback: return concatenated event summaries
+      res.json({ summary: concatenated })
+    } catch (e: any) {
+      log.error(`Project summary error: ${e.message}`)
+      res.status(500).json({ error: e.message })
+    }
+  })
+
   // --- Progress Report (MCP Gate Keeper → APP broadcast) ---
 
   app.post("/api/progress", express.json(), (req, res) => {
@@ -1975,27 +2057,35 @@ export function createServer(portOverride?: number) {
           // --- Structured session watchers (replace ANSI parsing for supported agents) ---
           // Common callback: store events, send to clients, broadcast activity
           const makeWatcherCallback = (sid: string) => (events: AgentEvent[]) => {
+            // Filter out user_message events — APP client creates its own usr_* events
+            // (keeping them in storage would cause duplicates on replay)
+            const filtered = events.filter(e => e.type !== "user_message")
+            if (filtered.length === 0) return
+            log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
             const list = sessionRecentEvents.get(sid)
             if (list) {
-              list.push(...events)
+              list.push(...filtered)
               if (list.length > 200) list.splice(0, list.length - 200)
               persistEvents(sid, list)
             }
+            let sentCount = 0
             for (const [client, csid] of clientSessions) {
               if (csid === sid && client.readyState === WebSocket.OPEN) {
-                for (const event of events) {
+                sentCount++
+                for (const event of filtered) {
                   client.send(JSON.stringify({ type: "event", event }))
                 }
                 const eventSessionId = clientEventSessions.get(client)
                 if (eventSessionId) {
-                  for (const event of events) {
+                  for (const event of filtered) {
                     eventStore.addEvent(eventSessionId, event)
                   }
                 }
               }
             }
-            if (events.length > 0) {
-              const lastEvent = events[events.length - 1]
+            log.info(`[watcher-cb] sent to ${sentCount} clients (total clientSessions=${clientSessions.size})`)
+            if (filtered.length > 0) {
+              const lastEvent = filtered[filtered.length - 1]
               const activityMsg = JSON.stringify({
                 type: "session_activity",
                 sessionId: sid,
@@ -2010,10 +2100,24 @@ export function createServer(portOverride?: number) {
             }
 
             // Track activity for progress interception
-            const hasToolEvents = events.some(e =>
+            const hasToolEvents = filtered.some(e =>
               e.type === "file_edit" || e.type === "file_create" || e.type === "command_run"
             )
             progressInterceptor.onData(sid, hasToolEvents)
+          }
+
+          // Stop other watchers for the same project CWD (prevent competing for JSONL files)
+          // Only stops watchers, NOT PTYs — old sessions keep running, just no real-time events
+          for (const [oldSid, oldWatcher] of sessionJsonlWatchers) {
+            if (oldSid !== session.id) {
+              // Check if this watcher is for the same project directory
+              const oldSession = sessions.get(oldSid)
+              if (oldSession && oldSession.project.cwd === sessionProject.cwd) {
+                log.info(`[attach] Stopping competing watcher: ${oldSid}`)
+                oldWatcher.stop()
+                sessionJsonlWatchers.delete(oldSid)
+              }
+            }
           }
 
           log.info(`[attach] watcherExists=${sessionJsonlWatchers.has(session.id)} session.id=${session.id} agentId=${agentId}`)
@@ -2035,10 +2139,9 @@ export function createServer(portOverride?: number) {
 
             if (watcher) {
               (watcher as any).start()
-              // For resumed sessions with claudeSessionId, no need to rescan —
-              // the watcher already targets the specific file.
-              // For resumed sessions without claudeSessionId, clear filter.
-              if (requestedSessionId && !claudeSessionId && (watcher as any).rescan) {
+              // Only rescan for genuinely resumed sessions (PTY already existed),
+              // NOT for new sessions that happen to have a requestedSessionId.
+              if (alreadyExisted && !claudeSessionId && (watcher as any).rescan) {
                 log.info(`[attach] Calling rescan() for resumed session (no claudeSessionId)`)
                 ;(watcher as any).rescan()
               }
@@ -2156,12 +2259,66 @@ export function createServer(portOverride?: number) {
                 if (hasMemory) files.push(".agentrune/agentlore.md")
                 const instruction = `請先讀取 ${files.join(" 和 ")}，這是你的行為規範${hasMemory ? "和專案記憶" : ""}，讀完再開始工作。`
 
+                // Notify APP: initialization started (lock input)
+                const initEvent: AgentEvent = {
+                  id: `init_${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: "info",
+                  status: "in_progress",
+                  title: "初始化中…",
+                  detail: `正在載入 ${files.join(", ")}`,
+                }
+                for (const [client, csid] of clientSessions) {
+                  if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: "event", event: initEvent }))
+                    client.send(JSON.stringify({ type: "init_status", phase: "injecting" }))
+                  }
+                }
+                const list = sessionRecentEvents.get(session.id)
+                if (list) list.push(initEvent)
+
                 // Write text first, then send Enter separately (Claude Code TUI needs \r)
                 sessions.write(session.id, instruction)
                 setTimeout(() => {
                   sessions.write(session.id, "\r")
                 }, 150)
                 log.info(`Rules instruction injected for session ${session.id} (files: ${files.join(", ")})`)
+
+                // Poll for agent to finish processing injection (prompt reappears)
+                let doneAttempts = 0
+                const pollDone = setInterval(() => {
+                  doneAttempts++
+                  const sb2 = sessions.getScrollback(session.id) || ""
+                  // Check if agent returned to prompt after injection
+                  const lines = sb2.split("\n").filter(l => l.trim())
+                  const lastLine = lines[lines.length - 1] || ""
+                  const backToPrompt = /[\u276f\u203a>$%#]\s*$/.test(lastLine)
+                  if (!backToPrompt && doneAttempts < 300) return // poll every 500ms, max 2.5min
+                  clearInterval(pollDone)
+
+                  // Send init_done event
+                  const doneEvent: AgentEvent = {
+                    id: `init_done_${Date.now()}`,
+                    timestamp: Date.now(),
+                    type: "info",
+                    status: "completed",
+                    title: "初始化完成",
+                  }
+                  for (const [client, csid] of clientSessions) {
+                    if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                      client.send(JSON.stringify({ type: "event", event: doneEvent }))
+                      client.send(JSON.stringify({ type: "init_status", phase: "done" }))
+                    }
+                  }
+                  const list2 = sessionRecentEvents.get(session.id)
+                  if (list2) {
+                    // Update the in_progress init event to completed
+                    const idx = list2.findIndex(e => e.id === initEvent.id)
+                    if (idx !== -1) list2[idx] = { ...list2[idx], status: "completed", title: "初始化完成" }
+                    list2.push(doneEvent)
+                  }
+                  log.info(`Init done for session ${session.id} (after ${doneAttempts * 500}ms)`)
+                }, 500)
               }, 200)
             }
           }
@@ -2267,6 +2424,22 @@ export function createServer(portOverride?: number) {
             log.error(`Failed to spawn watch: ${err.message}`)
             watchedSessions.delete(targetSid)
             ws.send(JSON.stringify({ type: "error", message: `Failed to open watch terminal: ${err.message}` }))
+          }
+          break
+        }
+
+        case "store_event": {
+          // Client-side events (e.g. user messages) persisted to server for replay
+          const storeSid = msg.sessionId as string
+          const storeEvt = msg.event as AgentEvent | undefined
+          if (storeSid && storeEvt) {
+            const list = sessionRecentEvents.get(storeSid)
+            if (list) {
+              list.push(storeEvt)
+              if (list.length > 200) list.splice(0, list.length - 200)
+            } else {
+              sessionRecentEvents.set(storeSid, [storeEvt])
+            }
           }
           break
         }
@@ -2631,7 +2804,12 @@ export function createServer(portOverride?: number) {
         // Resume Session decisions are never emitted by parse engine anymore (signal-only),
         // but filter as safety net in case of stale adapter code
         if (e.type === "decision_request" && /Resume Session/i.test(e.title || "")) return false
-        if (e.type === "decision_request") return true
+        if (e.type === "decision_request") {
+          // Dedup: don't re-emit if same title already exists in recent events
+          const recent = sessionRecentEvents.get(sessionId) || []
+          const hasSame = recent.some(r => r.type === "decision_request" && r.title === e.title)
+          return !hasSame
+        }
         if (e.type === "test_result") return true
         // Skip tool call events (JSONL watcher handles these better with diff data)
         if (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") return false

@@ -256,6 +256,7 @@ export const zhTW: Record<string, string> = {
   "mc.worktreeMerged": "工作樹已成功合併",
   "mc.worktreeDiscarded": "工作樹已捨棄",
   "mc.worktreeFailed": "工作樹操作失敗",
+  "mc.initializing": "初始化中，請稍候…",
 
   // 詳細面板 (Panel 2)
   "detail.title": "詳細資訊",
@@ -430,6 +431,29 @@ export const zhTW: Record<string, string> = {
   "sessions.batchSummary": "摘要",
   "sessions.batchNextStep": "下一步",
   "sessions.batchMerge": "合併",
+
+  // Unified Panel
+  "unified.summary": "摘要",
+  "unified.nextSteps": "下一步",
+  "unified.noSummary": "尚無活動",
+  "unified.refreshSummary": "重新整理摘要",
+  "unified.generatingSummary": "正在產生摘要...",
+  "unified.projectActions": "更多操作",
+  "unified.mergeToMain": "合併到 main",
+  "unified.healthReport": "健康報告",
+  "unified.closeProject": "關閉專案",
+  "unified.viewPrd": "查看 PRD",
+  "unified.editProject": "編輯專案",
+  "unified.deleteProject": "刪除專案",
+  "unified.expandSession": "顯示詳細",
+  "unified.collapseSession": "收起詳細",
+  "unified.startTime": "開始時間",
+  "unified.messageCount": "訊息數",
+  "unified.fileChanges": "檔案變更",
+  "unified.labels": "標籤",
+  "unified.tabProjects": "專案",
+  "unified.tabSchedules": "排程",
+  "unified.tabTemplates": "範本",
 
   // Settings — Worktree
   "settings.worktreeIsolation": "Worktree 隔離",
