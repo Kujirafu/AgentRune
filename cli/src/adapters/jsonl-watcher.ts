@@ -43,18 +43,11 @@ function findActiveJsonl(projectDir: string, opts?: { excludeClaimed?: boolean; 
     for (const f of files) {
       // Skip files claimed by another watcher (but allow re-selecting our own current file)
       if (opts?.excludeClaimed && claimedJsonlFiles.has(f.path) && f.path !== opts.currentPath) continue
-      // Skip existing files EXCEPT the most recently modified one.
-      // The newest file is likely the active session (even if it existed before watcher start).
-      // Older existing files are from other sessions — skip them to prevent cross-contamination.
-      // Files are sorted by mtime desc, so the FIRST existing file we encounter is the most recent.
+      // For new sessions: NEVER select a file that existed before this watcher started.
+      // Other sessions may still be writing to their JSONL files (bumping mtime),
+      // but those are NOT this session's file. Only select truly NEW files.
       if (opts?.existingFileMtimes && opts.existingFileMtimes.has(f.path) && f.path !== opts.currentPath) {
-        // Check if this file has been modified AFTER watcher started — if so, it's active
-        const originalMtime = opts.existingFileMtimes.get(f.path)!
-        if (f.mtime > originalMtime + 1000) {
-          // File was modified after watcher start — this is the active session, allow it
-        } else {
-          continue  // Skip stale existing files
-        }
+        continue
       }
       return f.path
     }
@@ -263,10 +256,13 @@ function userToEvents(line: JsonlLine): AgentEvent[] {
 
   if (text.length < 2) return []
 
-  // Filter out AgentRune injected prompts (rules instruction, install checks, etc.)
+  // Filter out non-user content:
+  // 1. AgentRune injected prompts (rules instruction, install checks)
   if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md)/.test(text)) return []
   if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(text)) return []
   if (/command -v .* >\/dev\/null 2>&1 \|\|/.test(text)) return []
+  // 2. Claude Code system/internal XML tags (system-reminder, command-name, local-command-*, etc.)
+  if (/^<[a-z][\w-]*>/.test(text)) return []
 
   return [{
     id: `usr_jw_${ts}`, timestamp: ts,
@@ -363,9 +359,18 @@ export class JsonlWatcher {
     claimedJsonlFiles.add(active)
     this.seenIds.clear()
 
-    // Replay full history then watch for new lines
-    this.offset = 0
-    this.replayRecent(active)
+    // For resumed sessions (targetSessionId), replay full history so user sees past events.
+    // For new sessions, check if this file existed before watcher start — if so, it's an old
+    // session's file that got its mtime bumped (race condition). Skip to end, only watch new lines.
+    const isPreExisting = !this.targetSessionId && this.existingFileMtimes.has(active)
+    if (isPreExisting) {
+      // Old file selected during race — skip to end, don't replay stale events
+      try { this.offset = statSync(active).size } catch { this.offset = 0 }
+      console.log(`[JsonlWatcher] Skipping replay for pre-existing file (race): ${active}`)
+    } else {
+      this.offset = 0
+      this.replayRecent(active)
+    }
     this.watchFile()
     console.log(`[JsonlWatcher] Now watching: ${active}`)
   }

@@ -1052,7 +1052,12 @@ export function MissionControl({
             if (pTitle === evtTitle) return prev
           }
         }
-        return [...prev, event].slice(-100)
+        // Insert in timestamp order (late-arriving events go to correct position)
+        const merged = [...prev, event]
+        if (event.timestamp < (prev[prev.length - 1]?.timestamp || 0)) {
+          merged.sort((a, b) => a.timestamp - b.timestamp)
+        }
+        return merged.slice(-100)
       })
       if (event.type === "decision_request" && event.status === "waiting") {
         setAgentStatus("waiting")
@@ -1069,12 +1074,12 @@ export function MissionControl({
       const replayed = (msg.events as AgentEvent[]) || []
       const filtered = replayed
       if (filtered.length > 0) {
-        // Merge server events with any client-side events (dedupe by id)
+        // Merge server events with any client-side events (dedupe by id, sort by timestamp)
         setEvents(prev => {
           const existingIds = new Set(prev.map(e => e.id))
           const newEvents = filtered.filter(e => !existingIds.has(e.id))
           if (newEvents.length === 0) return prev
-          return [...prev, ...newEvents]
+          return [...prev, ...newEvents].sort((a, b) => a.timestamp - b.timestamp)
         })
         const latest = filtered[filtered.length - 1]
         if (latest?.type === "decision_request" && latest.status === "waiting") {
@@ -1613,6 +1618,8 @@ return (
                     onQuote={handleQuote}
                     onSaveObsidian={(text) => handleSaveObsidian(text, event)}
                     onViewDiff={onEventDiff}
+                    apiBase={getApiBase()}
+                    projectId={project.id}
                   />
                 )
               ))}
