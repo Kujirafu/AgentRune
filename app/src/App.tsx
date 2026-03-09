@@ -7,6 +7,7 @@ import { LaunchPad } from "./components/LaunchPad"
 import { TerminalView } from "./components/TerminalView"
 import { MissionControl } from "./components/MissionControl"
 import { ProjectOverview } from "./components/ProjectOverview"
+import { UnifiedPanel } from "./components/UnifiedPanel"
 import { DiffPanel } from "./components/DiffPanel"
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
@@ -1784,12 +1785,12 @@ export function App() {
     }
   }
 
-  // ProjectOverview screen — shows all projects with session summaries
+  // UnifiedPanel screen — shows all projects with session summaries
   // Also fallback here when session screen can't find its project
   if (screen === "overview" || screen === "session") {
     return (
       <ErrorBoundary>
-        <ProjectOverview
+        <UnifiedPanel
           activeSessions={activeSessions}
           sessionEvents={sessionEventsMap}
           projects={projects}
