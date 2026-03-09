@@ -679,12 +679,23 @@ export function MissionControl({
           setTimeout(() => send({ type: "input", data: "\r" }), 50)
         }
       }
-      // Bypass mode — CLI flag only, cannot toggle mid-session
-      if (newSettings.bypass !== prev.bypass) {
-        showToast(t("mc.bypassNeedsRestart") || "Bypass mode change requires restarting the session", 4000)
+      // Bypass mode — CLI flag, restart session with new command
+      if (newSettings.bypass !== prev.bypass && sessionId) {
+        showToast(
+          newSettings.bypass
+            ? (t("mc.bypassEnabled") || "Bypass enabled — restarting...")
+            : (t("mc.bypassDisabled") || "Bypass disabled — restarting..."),
+          3000,
+        )
+        // Kill current session and launch a new one with updated settings
+        onKillSession(sessionId)
+        setEvents([])
+        setTimeout(() => {
+          onLaunchSession?.(project.id, agentId)
+        }, 500)
       }
     }
-  }, [project.id, settings, agentId, send, showToast, t])
+  }, [project.id, settings, agentId, sessionId, send, showToast, t, onKillSession, onLaunchSession])
 
   const normalizeAssistantChunk = useCallback((raw: string): string => {
     const isCodex = agentId === "codex"

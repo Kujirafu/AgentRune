@@ -57,6 +57,8 @@ interface AdapterState {
     startTime: number
     eventId: string
   } | null
+  lastGenericMenuTime: number  // Debounce generic TUI menu detection
+  lastGenericMenuHash: string  // Dedup same menu
 }
 
 function getState(ctx: ParseContext): AdapterState {
@@ -81,6 +83,8 @@ function getState(ctx: ParseContext): AdapterState {
       seenToolsExpire: Date.now() + 30000,
       pendingEdit: null,
       lastCompactTime: 0,
+      lastGenericMenuTime: 0,
+      lastGenericMenuHash: "",
     }
   }
   return (ctx as any)._as
@@ -136,6 +140,12 @@ export const claudeCodeAdapter: AgentAdapter = {
     // If a chunk has heavy cursor positioning, it's TUI/status bar content.
     const cursorPosCount = (chunk.match(/\x1b\[\d+;\d+H/g) || []).length
     const isTuiChunk = cursorPosCount >= 5  // 5+ cursor positions = TUI rendering
+
+    // DEBUG: Log TUI chunks that look like menus (reverse video = \x1b[7m)
+    if (isTuiChunk && /\x1b\[7m/.test(chunk)) {
+      dbg(`[TUI-MENU-RAW] ${JSON.stringify(chunk).slice(0, 2000)}`)
+      dbg(`[TUI-MENU-CLEAN] ${stripAnsi(chunk).replace(/\n/g, "\\n").slice(0, 1000)}`)
+    }
 
     // Expire seen tools every 30s to prevent unbounded growth
     if (now > state.seenToolsExpire) {
@@ -323,6 +333,88 @@ export const claudeCodeAdapter: AgentAdapter = {
             ],
           },
         })
+      }
+    }
+
+    // --- Generic TUI menu detection ---
+    // Ink-based TUI menus use reverse video (\x1b[7m) for the selected item.
+    // Extract all menu items from the raw chunk by looking for lines with/without highlight.
+    if (isTuiChunk && now - state.lastGenericMenuTime > 2000) {
+      // Skip if it's a permission prompt (already handled above) or resume menu
+      const hasPermission = /Allow\s+once|Always\s+allow|Deny|Reject/i.test(text)
+      const hasResume = /Resume\s+Session/i.test(text)
+      if (!hasPermission && !hasResume) {
+        // Extract items from raw chunk: look for reverse video markers
+        // \x1b[7m = reverse on, \x1b[27m or \x1b[0m = reverse off
+        const reverseMatches = chunk.match(/\x1b\[7m([^\x1b]+)(?:\x1b\[(?:27|0)m)/g)
+        if (reverseMatches && reverseMatches.length >= 1) {
+          // Parse the full scrollback to extract all menu items
+          // TUI menus render each item on its own "line" (cursor-positioned)
+          const cleanBuf = stripAnsi(ctx.buffer.slice(-3000))
+          const lines = cleanBuf.split("\n").map(l => l.trim()).filter(l => l.length > 1)
+
+          // Find contiguous block of similar-looking menu items
+          // Menu items: lines without prompt markers ($, >, ❯ only at start), status bars, or garbled text
+          const menuCandidates: string[] = []
+          let selectedIdx = -1
+          const selectedText = reverseMatches[0]
+            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim()
+
+          // Walk backwards from the end of the buffer to find the menu block
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i]
+            // Stop at prompt, banner, status bar
+            if (/^[$%>\u276f]\s*$/.test(line)) break
+            if (/Claude Code v\d|Opus \d|Sonnet \d|bypass|shift\+tab|Context\s+left/i.test(line)) break
+            if (/[\u2726\u2731\u2217\u2234]/.test(line)) break
+            if (/^\d+\s*tokens/i.test(line)) break
+            // Skip very short or empty lines
+            if (line.length < 3) continue
+            menuCandidates.unshift(line)
+            if (line.includes(selectedText) || line === selectedText) {
+              selectedIdx = 0  // Will be adjusted after
+            }
+          }
+
+          // Need at least 2 items for a menu
+          if (menuCandidates.length >= 2 && menuCandidates.length <= 30) {
+            // Find which one is selected
+            selectedIdx = menuCandidates.findIndex(l => l.includes(selectedText))
+
+            // Dedup: don't re-emit the same menu
+            const menuHash = menuCandidates.join("|").slice(0, 200)
+            if (menuHash !== state.lastGenericMenuHash) {
+              state.lastGenericMenuTime = now
+              state.lastGenericMenuHash = menuHash
+
+              const options = menuCandidates.map((label, idx) => {
+                // Calculate arrow key input: relative to current selection (selectedIdx)
+                // Arrow down = \x1b[B, Arrow up = \x1b[A
+                const delta = idx - (selectedIdx >= 0 ? selectedIdx : 0)
+                let input = ""
+                if (delta > 0) input = "\x1b[B".repeat(delta)
+                else if (delta < 0) input = "\x1b[A".repeat(-delta)
+                input += "\r"  // Enter to select
+                return {
+                  label: label.replace(/^[❯>\s]+/, "").trim(),
+                  input,
+                  style: "primary" as const,
+                }
+              })
+
+              events.push({
+                id: makeEventId(),
+                timestamp: now,
+                type: "decision_request",
+                status: "waiting",
+                title: "Select an option",
+                raw: chunk,
+                decision: { options },
+              })
+              dbg(`[TUI-MENU] Detected ${options.length} items, selected=${selectedIdx}`)
+            }
+          }
+        }
       }
     }
 

@@ -197,6 +197,7 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
         title: isLong ? (firstLine.length < text.split("\n")[0].length ? firstLine + "..." : firstLine) : text,
         detail: isLong ? text : undefined,
       })
+
     }
   }
 
@@ -264,11 +265,13 @@ function userToEvents(line: JsonlLine): AgentEvent[] {
   // 2. Claude Code system/internal XML tags (system-reminder, command-name, local-command-*, etc.)
   if (/^<[a-z][\w-]*>/.test(text)) return []
 
+  // For image upload paths, always keep full path in title (regex needs filename + extension)
+  const isImagePath = /\.agentrune[/\\]uploads[/\\].+\.(?:png|jpg|jpeg|gif|webp)/i.test(text)
   return [{
     id: `usr_jw_${ts}`, timestamp: ts,
     type: "user_message" as const, status: "completed" as const,
-    title: text.length > 100 ? text.slice(0, 100) + "..." : text,
-    detail: text.length > 100 ? text : undefined,
+    title: isImagePath ? text : (text.length > 100 ? text.slice(0, 100) + "..." : text),
+    detail: (text.length > 100 || isImagePath) ? text : undefined,
   }]
 }
 

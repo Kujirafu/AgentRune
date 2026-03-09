@@ -2556,6 +2556,45 @@ export function createServer(portOverride?: number) {
           break
         }
 
+        // Restart current session with new settings (e.g. bypass toggle)
+        // Kills old PTY, creates new one with updated command flags
+        case "restart_session": {
+          const currentSid = clientSessions.get(ws)
+          if (!currentSid) break
+          const currentSession = sessions.get(currentSid)
+          if (!currentSession) break
+          const restartProject = currentSession.project
+          const restartAgentId = currentSession.agentId
+          // Kill old session
+          sessions.kill(currentSid)
+          // Clean up watchers
+          const oldWatcher = sessionJsonlWatchers.get(currentSid)
+          if (oldWatcher) { oldWatcher.dispose(); sessionJsonlWatchers.delete(currentSid) }
+          sessionEngines.delete(currentSid)
+          sessionRecentEvents.delete(currentSid)
+          // Create new session (command will be regenerated from current APP settings)
+          const restartCfg = loadConfig()
+          const restartVaultKeys = loadVaultKeys({
+            autoSaveKeysPath: (msg.autoSaveKeysPath as string) || undefined,
+            vaultPath: restartCfg.vaultPath || undefined,
+            keyVaultPath: restartCfg.keyVaultPath || undefined,
+          })
+          const newSid = `${restartProject.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+          const newSession = sessions.create(restartProject, restartAgentId, newSid, restartVaultKeys)
+          clientSessions.set(ws, newSession.id)
+          progressInterceptor.trackSession(newSession.id)
+          const newEngine = new ParseEngine(restartAgentId, restartProject.id, restartProject.cwd)
+          sessionEngines.set(newSession.id, newEngine)
+          sessionRecentEvents.set(newSession.id, [])
+          clientEngines.set(ws, newEngine)
+          ws.send(JSON.stringify({
+            type: "session_restarted",
+            sessionId: newSession.id,
+            agentId: restartAgentId,
+          }))
+          log.info(`Session restarted: ${currentSid} → ${newSession.id} (${restartAgentId})`)
+          break
+        }
         case "detach": {
           clientSessions.delete(ws)
           break
