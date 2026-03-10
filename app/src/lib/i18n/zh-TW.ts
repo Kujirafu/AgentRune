@@ -691,6 +691,8 @@ export const zhTW: Record<string, string> = {
   "automation.done": "完成",
   "automation.editPrompt": "編輯 Prompt",
   "automation.nextRun": "下次執行",
+  "automation.completed": "排程完成",
+  "automation.failed": "排程失敗",
 
   // 範本分類
   "tplGroup.git": "Git & 審查",
@@ -821,6 +823,7 @@ export const zhTW: Record<string, string> = {
   "chain.steps": "{count} 步驟",
   "chain.estTokens": "~{count} tokens",
   "chain.highComplexity": "Token 消耗較高 — 建議拆分到多個 session，或將非關鍵步驟改用標準深度。",
+  "chain.suggested": "推薦技能鏈",
   "chain.start": "開始",
   "chain.depth.lite": "精簡",
   "chain.depth.standard": "標準",
@@ -830,6 +833,10 @@ export const zhTW: Record<string, string> = {
   "chain.phase.verify": "驗證",
   "chain.phase.ship": "交付",
   "chain.optional": "可選",
+  "chain.parallel.all": "全部",
+  "chain.parallel.any": "任一",
+  "chain.parallel.label": "平行",
+  "chain.forkedFrom": "分支自 /{slug}",
 
   // 步驟標籤
   "chain.step.brainstorm": "腦力激盪",
@@ -848,12 +855,28 @@ export const zhTW: Record<string, string> = {
   "chain.step.onboard": "上手專案",
   "chain.step.explain": "解說架構",
   "chain.step.remember": "記住經驗",
+  "chain.step.parallelVerify": "平行驗證",
   "chain.step.testBaseline": "測試基線",
   "chain.step.testVerify": "驗證測試",
   "chain.step.investigate": "事件調查",
   "chain.step.contain": "緊急止血",
   "chain.step.securityVerify": "安全驗證",
   "chain.step.postmortem": "事後檢討",
+  "chain.step.deviceTest": "裝置測試",
+  "chain.step.versionBump": "版本號更新",
+  "chain.step.buildApk": "建置 APK",
+  "chain.step.publishRelease": "發佈 Release",
+  "chain.step.migrate": "執行遷移",
+  "chain.step.depScan": "依賴掃描",
+  "chain.step.depUpdate": "更新依賴",
+  "chain.step.reconnaissance": "偵察",
+  "chain.step.vulnScan": "弱點掃描",
+  "chain.step.securityReport": "安全報告",
+  "chain.step.implement": "實作",
+  "chain.step.promptDesign": "Prompt 設計",
+  "chain.step.audit": "稽核",
+  "chain.step.benchmark": "效能基準",
+  "chain.step.benchmarkVerify": "效能驗證",
 
   // Chain 名稱與描述
   "chain.feature.name": "新功能",
@@ -872,4 +895,58 @@ export const zhTW: Record<string, string> = {
   "chain.incident.desc": "安全事件緊急回應流程",
   "chain.onboard.name": "新人上手",
   "chain.onboard.desc": "快速了解專案",
+
+  // App 開發
+  "chain.mobile-feature.name": "手機功能",
+  "chain.mobile-feature.desc": "手機 App 功能開發含裝置測試",
+  "chain.app-release.name": "App 發版",
+  "chain.app-release.desc": "建置、測試、發佈 App",
+
+  // API 開發
+  "chain.api-endpoint.name": "API 端點",
+  "chain.api-endpoint.desc": "安全的 API 端點開發",
+  "chain.api-migration.name": "DB 遷移",
+  "chain.api-migration.desc": "安全的資料庫 schema 遷移",
+  "chain.api-integration.name": "API 整合",
+  "chain.api-integration.desc": "第三方 API 整合",
+
+  // 資安
+  "chain.pentest.name": "滲透測試",
+  "chain.pentest.desc": "滲透測試與漏洞修補",
+  "chain.dep-audit.name": "依賴審計",
+  "chain.dep-audit.desc": "依賴套件弱點審計",
+
+  // 自動化
+  "chain.bot-build.name": "機器人開發",
+  "chain.bot-build.desc": "自動化機器人開發",
+  "chain.ci-cd.name": "CI/CD",
+  "chain.ci-cd.desc": "CI/CD 流水線建置",
+  "chain.scraper.name": "爬蟲",
+  "chain.scraper.desc": "網頁爬蟲開發",
+
+  // AI/ML
+  "chain.ai-feature.name": "AI 功能",
+  "chain.ai-feature.desc": "AI 功能開發",
+  "chain.prompt-pipeline.name": "Prompt 工程",
+  "chain.prompt-pipeline.desc": "Prompt 設計流水線",
+  "chain.rag-setup.name": "RAG 建置",
+  "chain.rag-setup.desc": "RAG 系統架構與建置",
+
+  // DevOps
+  "chain.docker-deploy.name": "Docker 部署",
+  "chain.docker-deploy.desc": "Docker 容器化與部署",
+  "chain.monitoring.name": "監控",
+  "chain.monitoring.desc": "監控與告警系統建置",
+  "chain.infra.name": "基礎設施",
+  "chain.infra.desc": "基礎設施即代碼",
+
+  // 內容 / Web
+  "chain.landing-page.name": "Landing Page",
+  "chain.landing-page.desc": "Landing Page 設計與開發",
+  "chain.seo-audit.name": "SEO 審計",
+  "chain.seo-audit.desc": "SEO 審計與優化",
+  "chain.i18n.name": "國際化",
+  "chain.i18n.desc": "國際化 i18n 建置",
+  "chain.perf.name": "效能優化",
+  "chain.perf.desc": "效能分析與優化",
 }
