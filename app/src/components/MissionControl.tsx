@@ -780,6 +780,7 @@ export function MissionControl({
 
   const uploadingCountRef = useRef(0)
   const [isUploadingImage, setIsUploadingImage] = useState(false)
+  const checkUploading = useCallback(() => uploadingCountRef.current > 0, [])
 
   const handleImagePaste = useCallback(async (base64: string, filename: string) => {
     uploadingCountRef.current++
@@ -1367,8 +1368,8 @@ export function MissionControl({
       if (showInsight) { setShowInsight(false); e.preventDefault(); return }
       if (showBrowser) { setShowBrowser(false); e.preventDefault(); return }
       if (showSettings) { setShowSettings(false); e.preventDefault(); return }
-      // Diff panel → go back to Events; Events panel → go back to ProjectOverview
-      if (panel === 1) { goToPanel(0); e.preventDefault(); return }
+      // Terminal/Diff panel → go back to Events; Events panel → go back to ProjectOverview
+      if (panel !== 0) { goToPanel(0); e.preventDefault(); return }
       onBack(); e.preventDefault()
     }
     document.addEventListener("app:back", handler)
@@ -1737,6 +1738,7 @@ return (
               disabled={initializing}
               disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
               isUploadingImage={isUploadingImage}
+              checkUploading={checkUploading}
             />
           </div>
 

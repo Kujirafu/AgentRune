@@ -684,6 +684,9 @@ export const en: Record<string, string> = {
   "automation.hideTemplates": "Hide templates",
   "automation.searchTemplates": "Search templates...",
   "automation.allCategories": "All",
+  "automation.done": "Done",
+  "automation.editPrompt": "Edit Prompt",
+  "automation.nextRun": "Next run",
 
   // Template groups
   "tplGroup.git": "Git & Review",
@@ -813,6 +816,7 @@ export const en: Record<string, string> = {
   "chain.sectionTitle": "Skill Chains",
   "chain.steps": "{count} steps",
   "chain.estTokens": "~{count} tokens",
+  "chain.highComplexity": "High token cost — consider splitting across sessions or switching to Standard depth for non-critical steps.",
   "chain.start": "Start",
   "chain.depth.lite": "Lite",
   "chain.depth.standard": "Standard",

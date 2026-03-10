@@ -192,8 +192,9 @@ export function UnifiedPanel({
   const [showDevices, setShowDevices] = useState(false)
   const [showAutomation, setShowAutomation] = useState(false)
   const [automationProjectId, setAutomationProjectId] = useState<string | null>(null)
+  const [editingAutomation, setEditingAutomation] = useState<typeof projectAutomations[0] | null>(null)
   const [automationCounts, setAutomationCounts] = useState<Map<string, number>>(new Map())
-  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
+  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; projectId: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; agentId?: string; runMode?: string; skill?: string; nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
@@ -283,7 +284,7 @@ export function UnifiedPanel({
       const all: typeof projectAutomations = []
       for (const r of results) {
         if (Array.isArray(r.items)) {
-          for (const item of r.items) all.push(item)
+          for (const item of r.items) all.push({ ...item, projectId: r.projectId })
         }
       }
       setProjectAutomations(all)
@@ -1364,6 +1365,7 @@ export function UnifiedPanel({
               <button
                 onClick={() => {
                   if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+                  setEditingAutomation(null)
                   setShowAutomation(true)
                 }}
                 style={{
@@ -1403,7 +1405,22 @@ export function UnifiedPanel({
               {!automationsLoading && projectAutomations.map((auto) => {
                 const scheduleLabel = auto.schedule.type === "daily"
                   ? `${auto.schedule.timeOfDay || "09:00"} ${(auto.schedule.weekdays || []).map((d: number) => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(" ")}`
-                  : `Every ${auto.schedule.intervalMinutes || 30}min`
+                  : `${t("automation.every")} ${auto.schedule.intervalMinutes || 30} ${t("automation.minutes")}`
+                // Countdown to next trigger
+                let countdown = ""
+                if (auto.enabled && auto.nextRunAt) {
+                  const diff = auto.nextRunAt - now
+                  if (diff > 0) {
+                    const mins = Math.floor(diff / 60000)
+                    if (mins >= 60) {
+                      const h = Math.floor(mins / 60)
+                      const m = mins % 60
+                      countdown = m > 0 ? `${h}h ${m}m` : `${h}h`
+                    } else {
+                      countdown = `${mins}m`
+                    }
+                  }
+                }
                 return (
                   <div key={auto.id} style={{
                     padding: "12px 14px", borderRadius: 14,
@@ -1418,7 +1435,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.id}`, {
+                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, {
                               method: "PATCH", headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ enabled: !auto.enabled }),
                             })
@@ -1440,12 +1457,20 @@ export function UnifiedPanel({
                           transition: "transform 0.2s",
                         }} />
                       </button>
-                      <div style={{ flex: 1, minWidth: 0 }}>
+                      <div
+                        onClick={() => {
+                          setAutomationProjectId(auto.projectId)
+                          setEditingAutomation(auto)
+                          setShowAutomation(true)
+                        }}
+                        style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                      >
                         <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {auto.name}
                         </div>
-                        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
-                          {scheduleLabel}
+                        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, display: "flex", gap: 6, alignItems: "center" }}>
+                          <span>{scheduleLabel}</span>
+                          {countdown && <span style={{ color: "#37ACC0", fontWeight: 600, fontSize: 10 }}>({countdown})</span>}
                         </div>
                       </div>
                       {/* Delete */}
@@ -1453,7 +1478,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.id}`, { method: "DELETE" })
+                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, { method: "DELETE" })
                             setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                           } catch {}
                         }}
@@ -2414,7 +2439,8 @@ export function UnifiedPanel({
         open={showAutomation}
         projectId={automationProjectId || ""}
         serverUrl={localStorage.getItem("agentrune_server") || ""}
-        onClose={() => setShowAutomation(false)}
+        onClose={() => { setShowAutomation(false); setEditingAutomation(null) }}
+        initialEdit={editingAutomation}
       />
 
       {/* Plan Page */}

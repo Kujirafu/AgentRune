@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { SkillChainDef, ChainDepth, ChainPhase } from "../lib/skillChains"
-import { estimateTokens, formatChainInstructions } from "../lib/skillChains"
+import { estimateTokens, formatChainInstructions, HIGH_COMPLEXITY_THRESHOLD } from "../lib/skillChains"
 
 // Phase colors — distinct for dark/light via CSS vars, fallback to hardcoded
 const PHASE_COLORS: Record<ChainPhase, { dot: string; text: string }> = {
@@ -191,6 +191,30 @@ export function ChainCard({ chain, onSend, t }: ChainCardProps) {
           }}>
             {t("chain.estTokens").replace("{count}", String(tokens))}
           </div>
+
+          {/* High-complexity warning */}
+          {tokens >= HIGH_COMPLEXITY_THRESHOLD && (
+            <div style={{
+              display: "flex", alignItems: "flex-start", gap: 6,
+              padding: "6px 10px", marginBottom: 8,
+              borderRadius: 8,
+              border: "1px solid var(--warning-border, #f59e0b33)",
+              background: "var(--warning-bg, #f59e0b0a)",
+            }}>
+              {/* Lucide alert-triangle SVG */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--warning-text, #f59e0b)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+                <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+                <path d="M12 9v4" />
+                <path d="M12 17h.01" />
+              </svg>
+              <span style={{
+                fontSize: 10, color: "var(--warning-text, #f59e0b)",
+                lineHeight: 1.4,
+              }}>
+                {t("chain.highComplexity")}
+              </span>
+            </div>
+          )}
 
           {/* Start button */}
           <button

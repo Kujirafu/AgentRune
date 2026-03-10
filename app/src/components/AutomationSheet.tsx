@@ -61,6 +61,8 @@ interface AutomationSheetProps {
   projectId: string
   serverUrl: string
   onClose: () => void
+  /** When provided, open directly into edit mode for this automation */
+  initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string } | null
 }
 
 // --- Weekday labels ---
@@ -260,7 +262,7 @@ function useTemplateI18n() {
 
 // --- Main Component ---
 
-export function AutomationSheet({ open, projectId, serverUrl, onClose }: AutomationSheetProps) {
+export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit }: AutomationSheetProps) {
   const { t } = useLocale()
   const { tplName, tplDesc } = useTemplateI18n()
   const [automations, setAutomations] = useState<AutomationConfig[]>([])
@@ -301,6 +303,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose }: Automat
   const sheetRef = useRef<HTMLDivElement>(null)
   const { handlers: swipeHandlers } = useSwipeToDismiss({ onDismiss: onClose, sheetRef })
 
+  // Fullscreen prompt editor
+  const [promptExpanded, setPromptExpanded] = useState(false)
+
   // Toast
   const [toast, setToast] = useState<string | null>(null)
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2500) }
@@ -320,10 +325,25 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose }: Automat
 
   useEffect(() => {
     if (open) {
-      setPage("pick")
+      if (initialEdit) {
+        setEditId(initialEdit.id)
+        setFormName(initialEdit.name)
+        setFormPrompt(initialEdit.prompt || "")
+        setFormSkill(initialEdit.skill || "")
+        setFormTemplateId(initialEdit.templateId || null)
+        setFormScheduleType((initialEdit.schedule.type as "daily" | "interval") || "daily")
+        setFormTimeOfDay(initialEdit.schedule.timeOfDay || "09:00")
+        setFormWeekdays(initialEdit.schedule.weekdays || [1, 2, 3, 4, 5])
+        setFormInterval(String(initialEdit.schedule.intervalMinutes || 30))
+        setFormRunMode((initialEdit.runMode as "local" | "worktree") || "local")
+        setFormAgentId(initialEdit.agentId || "claude")
+        setPage("add")
+      } else {
+        setPage("pick")
+      }
       setExpandedId(null)
     }
-  }, [open])
+  }, [open, initialEdit])
 
   // Scroll to top when page changes
   useEffect(() => {
@@ -1157,19 +1177,43 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose }: Automat
                 {formPrompt || t("automation.promptPlaceholder")}
               </div>
             ) : (
-              <textarea
-                value={formPrompt} onChange={(e) => setFormPrompt(e.target.value)}
-                placeholder={t("automation.promptPlaceholder") || "Describe what the agent should do..."}
-                rows={3}
-                style={{
-                  width: "100%", padding: "10px 14px", borderRadius: 12,
-                  border: promptMatches.length > 0 ? "1.5px solid rgba(55,172,192,0.4)" : "1px solid rgba(0,0,0,0.12)",
-                  background: "rgba(255,255,255,0.6)",
-                  color: "#1e293b", fontSize: 13, outline: "none",
-                  boxSizing: "border-box", marginBottom: 0, resize: "vertical",
-                  fontFamily: "inherit", lineHeight: 1.5,
-                }}
-              />
+              <div style={{ position: "relative", width: "100%" }}>
+                <textarea
+                  value={formPrompt} onChange={(e) => setFormPrompt(e.target.value)}
+                  placeholder={t("automation.promptPlaceholder") || "Describe what the agent should do..."}
+                  rows={3}
+                  style={{
+                    width: "100%", padding: "10px 14px", paddingRight: 36, borderRadius: 12,
+                    border: promptMatches.length > 0 ? "1.5px solid rgba(55,172,192,0.4)" : "1px solid rgba(0,0,0,0.12)",
+                    background: "rgba(255,255,255,0.6)",
+                    color: "#1e293b", fontSize: 13, outline: "none",
+                    boxSizing: "border-box", marginBottom: 0, resize: "vertical",
+                    fontFamily: "inherit", lineHeight: 1.5,
+                  }}
+                />
+                {/* Expand button */}
+                <button
+                  type="button"
+                  onClick={() => setPromptExpanded(true)}
+                  style={{
+                    position: "absolute", top: 8, right: 8,
+                    width: 24, height: 24, borderRadius: 6,
+                    border: "none", background: "transparent",
+                    color: formPrompt.length > 50 ? "#37ACC0" : "rgba(0,0,0,0.25)",
+                    cursor: "pointer", display: "flex",
+                    alignItems: "center", justifyContent: "center",
+                    opacity: formPrompt.length > 50 ? 1 : 0.6,
+                    transition: "all 0.2s",
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="15 3 21 3 21 9" />
+                    <polyline points="9 21 3 21 3 15" />
+                    <line x1="21" y1="3" x2="14" y2="10" />
+                    <line x1="3" y1="21" x2="10" y2="14" />
+                  </svg>
+                </button>
+              </div>
             )}
 
             {/* 2b. Keyword-matched template suggestions — appears as user types */}
@@ -1410,6 +1454,63 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose }: Automat
           </>
         )}
       </div>
+
+      {/* Fullscreen prompt editor */}
+      {promptExpanded && (
+        <div
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "rgba(0,0,0,0.7)",
+            backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+            zIndex: 250,
+            display: "flex", flexDirection: "column",
+            padding: "calc(env(safe-area-inset-top, 16px) + 12px) 16px calc(env(safe-area-inset-bottom, 16px) + 12px)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+            <button onClick={() => setPromptExpanded(false)} style={{
+              width: 36, height: 36, borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background: "rgba(255,255,255,0.05)",
+              color: "rgba(255,255,255,0.7)",
+              fontSize: 16, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0,
+            }}>
+              {"←"}
+            </button>
+            <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
+              {t("automation.editPrompt") || "Edit Prompt"}
+            </div>
+          </div>
+          <textarea
+            autoFocus
+            value={formPrompt}
+            onChange={(e) => setFormPrompt(e.target.value)}
+            placeholder={t("automation.promptPlaceholder") || "Describe what the agent should do..."}
+            style={{
+              flex: 1, padding: 16, borderRadius: 14,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background: "rgba(255,255,255,0.05)",
+              color: "#fff", fontSize: 15,
+              fontFamily: "'JetBrains Mono', 'SF Mono', monospace",
+              outline: "none", resize: "none", lineHeight: 1.5,
+            }}
+          />
+          <button
+            onClick={() => setPromptExpanded(false)}
+            style={{
+              marginTop: 12, padding: "14px 0", borderRadius: 14,
+              border: "none",
+              background: formPrompt.trim() ? "#37ACC0" : "rgba(255,255,255,0.1)",
+              color: formPrompt.trim() ? "#fff" : "rgba(255,255,255,0.4)",
+              fontSize: 16, fontWeight: 600, cursor: "pointer",
+            }}
+          >
+            {t("automation.done") || "Done"}
+          </button>
+        </div>
+      )}
 
       {/* Toast */}
       {toast && (

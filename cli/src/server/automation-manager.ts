@@ -82,6 +82,7 @@ export function wrapPromptWithLocale(prompt: string): string {
 export class AutomationManager {
   private automations = new Map<string, AutomationConfig>()
   private timers = new Map<string, NodeJS.Timeout>()
+  private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
   private results = new Map<string, AutomationResult[]>()
   private storageDir: string
   private ptyManager: PtyManager
@@ -132,8 +133,11 @@ export class AutomationManager {
     return deleted
   }
 
-  list(projectId?: string): AutomationConfig[] {
-    const all = [...this.automations.values()]
+  list(projectId?: string): (AutomationConfig & { nextRunAt?: number })[] {
+    const all = [...this.automations.values()].map(a => ({
+      ...a,
+      nextRunAt: this.nextRunAtMap.get(a.id),
+    }))
     if (projectId) return all.filter((a) => a.projectId === projectId)
     return all
   }
@@ -165,6 +169,7 @@ export class AutomationManager {
     if (!auto) return null
 
     const wasEnabled = auto.enabled
+    const oldSchedule = JSON.stringify(auto.schedule)
 
     if (updates.name !== undefined) auto.name = updates.name
     if (updates.command !== undefined) auto.command = updates.command
@@ -176,11 +181,17 @@ export class AutomationManager {
     if (updates.agentId !== undefined) auto.agentId = updates.agentId
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
 
-    if (wasEnabled) this.stopSchedule(id)
-    if (auto.enabled) this.startSchedule(auto)
+    const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
+    const enabledChanged = wasEnabled !== auto.enabled
+
+    // Only restart timer if schedule or enabled state changed
+    if (scheduleChanged || enabledChanged) {
+      if (wasEnabled) this.stopSchedule(id)
+      if (auto.enabled) this.startSchedule(auto)
+    }
 
     this.saveToDisk()
-    return auto
+    return { ...auto, nextRunAt: this.nextRunAtMap.get(id) }
   }
 
   getResults(id: string): AutomationResult[] {
@@ -195,7 +206,9 @@ export class AutomationManager {
     if (auto.schedule.type === "interval") {
       const ms = (auto.schedule.intervalMinutes || 30) * 60 * 1000
       log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
+      this.nextRunAtMap.set(auto.id, Date.now() + ms)
       const timer = setInterval(() => {
+        this.nextRunAtMap.set(auto.id, Date.now() + ms)
         this.executeAutomation(auto.id)
       }, ms)
       this.timers.set(auto.id, timer)
@@ -226,6 +239,7 @@ export class AutomationManager {
 
       const ms = candidate.getTime() - now.getTime()
       log.info(`[Automation] Scheduling daily "${auto.name}" at ${timeOfDay} — next in ${Math.round(ms / 60000)}m`)
+      this.nextRunAtMap.set(auto.id, candidate.getTime())
 
       const timer = setTimeout(() => {
         this.executeAutomation(auto.id)
@@ -249,6 +263,7 @@ export class AutomationManager {
       clearInterval(timer)
       this.timers.delete(id)
     }
+    this.nextRunAtMap.delete(id)
   }
 
   /** Execute an automation: open a PTY, run command, collect output */

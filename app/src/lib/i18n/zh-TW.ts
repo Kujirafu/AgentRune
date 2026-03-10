@@ -688,6 +688,9 @@ export const zhTW: Record<string, string> = {
   "automation.hideTemplates": "收起範本",
   "automation.searchTemplates": "搜尋範本...",
   "automation.allCategories": "全部",
+  "automation.done": "完成",
+  "automation.editPrompt": "編輯 Prompt",
+  "automation.nextRun": "下次執行",
 
   // 範本分類
   "tplGroup.git": "Git & 審查",
@@ -817,6 +820,7 @@ export const zhTW: Record<string, string> = {
   "chain.sectionTitle": "技能鏈",
   "chain.steps": "{count} 步驟",
   "chain.estTokens": "~{count} tokens",
+  "chain.highComplexity": "Token 消耗較高 — 建議拆分到多個 session，或將非關鍵步驟改用標準深度。",
   "chain.start": "開始",
   "chain.depth.lite": "精簡",
   "chain.depth.standard": "標準",

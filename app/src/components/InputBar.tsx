@@ -363,6 +363,7 @@ interface InputBarProps {
   disabled?: boolean
   disabledHint?: string
   isUploadingImage?: boolean
+  checkUploading?: () => boolean
 }
 
 // Module-level draft storage — survives unmount/remount
@@ -391,7 +392,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage }: InputBarProps) {
+export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -766,6 +767,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   }, [sentHistory.length])
 
   const pendingSendRef = useRef(false)
+  const sendFiredRef = useRef(false) // prevent double-fire from touchend + click
   // eslint-disable-next-line @typescript-eslint/no-use-before-define
   const handleSendInnerRef = useRef<() => void>(() => {})
 
@@ -817,7 +819,9 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
 
   const handleSend = () => {
     if (disabled) return
-    if (isUploadingImage) {
+    // Use synchronous ref check (checkUploading) to avoid React state propagation delay
+    const uploading = checkUploading ? checkUploading() : isUploadingImage
+    if (uploading) {
       pendingSendRef.current = true
       setUploadPendingSend(true)
       return
@@ -1577,8 +1581,18 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
         {/* Send button */}
         {uploadPendingSend && <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>}
         <button
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={handleSend}
+          onPointerDown={(e) => {
+            e.preventDefault() // prevent input blur / keyboard dismiss
+            if (sendFiredRef.current) return
+            sendFiredRef.current = true
+            handleSend()
+            setTimeout(() => { sendFiredRef.current = false }, 300)
+          }}
+          onClick={(e) => {
+            // Fallback for cases where pointerdown doesn't fire (accessibility, etc.)
+            if (sendFiredRef.current) { e.preventDefault(); return }
+            handleSend()
+          }}
           style={{
             width: 44,
             height: 44,
@@ -1685,8 +1699,17 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
             }}
           />
           <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={handleSend}
+            onPointerDown={(e) => {
+              e.preventDefault()
+              if (sendFiredRef.current) return
+              sendFiredRef.current = true
+              handleSend()
+              setTimeout(() => { sendFiredRef.current = false }, 300)
+            }}
+            onClick={(e) => {
+              if (sendFiredRef.current) { e.preventDefault(); return }
+              handleSend()
+            }}
             style={{
               marginTop: 12,
               padding: "14px 0",
