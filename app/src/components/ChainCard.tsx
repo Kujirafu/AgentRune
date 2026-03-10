@@ -1,6 +1,6 @@
 import { useState } from "react"
-import type { SkillChainDef, ChainDepth, ChainPhase } from "../lib/skillChains"
-import { estimateTokens, formatChainInstructions, HIGH_COMPLEXITY_THRESHOLD } from "../lib/skillChains"
+import type { SkillChainDef, ChainDepth, ChainPhase, ChainNode } from "../lib/skillChains"
+import { estimateTokens, formatChainInstructions, HIGH_COMPLEXITY_THRESHOLD, isParallelGroup, getStepCount } from "../lib/skillChains"
 
 // Phase colors — distinct for dark/light via CSS vars, fallback to hardcoded
 const PHASE_COLORS: Record<ChainPhase, { dot: string; text: string }> = {
@@ -14,16 +14,17 @@ interface ChainCardProps {
   chain: SkillChainDef
   onSend: (instructions: string, display: string) => void
   t: (key: string) => string
+  collapsed?: boolean   // start collapsed when showing multiple suggestions
+  relevance?: number    // 0-1 match score, shown as badge
 }
 
-export function ChainCard({ chain, onSend, t }: ChainCardProps) {
+export function ChainCard({ chain, onSend, t, collapsed, relevance }: ChainCardProps) {
   const [depth, setDepth] = useState<ChainDepth>("lite")
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(!collapsed)
 
   const tokens = estimateTokens(chain, depth)
-  const name = t(chain.nameKey)
   const desc = t(chain.descKey)
-  const stepCount = chain.steps.length
+  const stepCount = getStepCount(chain)
 
   const handleStart = () => {
     const instructions = formatChainInstructions(chain, depth, t)
@@ -87,6 +88,18 @@ export function ChainCard({ chain, onSend, t }: ChainCardProps) {
         }}>
           {desc}
         </span>
+        {/* Relevance badge — only for keyword/prefix matches */}
+        {relevance != null && relevance < 1 && (
+          <span style={{
+            fontSize: 9, flexShrink: 0,
+            padding: "1px 5px", borderRadius: 4,
+            background: "var(--accent-primary-bg)",
+            color: "var(--accent-primary)",
+            fontWeight: 600,
+          }}>
+            {Math.round(relevance * 100)}%
+          </span>
+        )}
         <span style={{
           fontSize: 9, flexShrink: 0,
           color: "var(--text-secondary)", opacity: 0.7,
@@ -103,55 +116,115 @@ export function ChainCard({ chain, onSend, t }: ChainCardProps) {
         <div style={{ padding: "0 14px 12px" }}>
           {/* Pipeline visualization */}
           <div style={{ marginBottom: 10 }}>
-            {chain.steps.map((step, i) => {
+            {chain.steps.map((node, i) => {
+              const isLast = i === chain.steps.length - 1
+
+              if (isParallelGroup(node)) {
+                const colors = PHASE_COLORS[node.phase]
+                return (
+                  <div key={node.id}>
+                    {/* Fork connector — top line splits */}
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 0,
+                      paddingLeft: 10, paddingRight: 10, height: 20,
+                    }}>
+                      <div style={{ flex: 1, height: 1.5, background: "var(--glass-border)" }} />
+                      <span style={{
+                        fontSize: 9, fontWeight: 600,
+                        color: colors.text, opacity: 0.8,
+                        padding: "0 6px", textTransform: "uppercase",
+                      }}>
+                        {t("chain.parallel.label")} · {t(`chain.parallel.${node.joinStrategy}`)}
+                      </span>
+                      <div style={{ flex: 1, height: 1.5, background: "var(--glass-border)" }} />
+                    </div>
+
+                    {/* Parallel branches — horizontal layout */}
+                    <div style={{
+                      display: "flex", gap: 8, padding: "4px 6px",
+                      borderLeft: `1.5px solid ${colors.dot}`,
+                      borderRight: `1.5px solid ${colors.dot}`,
+                      marginLeft: 10, marginRight: 10, borderRadius: 4,
+                    }}>
+                      {node.branches.map((branch) => {
+                        const bColors = PHASE_COLORS[branch.phase]
+                        return (
+                          <div key={branch.id} style={{
+                            flex: 1, display: "flex", alignItems: "center", gap: 5,
+                            padding: "4px 6px", borderRadius: 6,
+                            background: "var(--glass-bg)",
+                            border: "1px solid var(--glass-border)",
+                          }}>
+                            <div style={{
+                              width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                              ...(branch.required
+                                ? { background: bColors.dot }
+                                : { border: `2px solid ${bColors.dot}`, background: "transparent" }
+                              ),
+                            }} />
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)" }}>
+                              {t(branch.labelKey)}
+                            </span>
+                            {!branch.required && (
+                              <span style={{
+                                fontSize: 8, color: "var(--text-secondary)",
+                                opacity: 0.5, fontStyle: "italic",
+                              }}>
+                                {t("chain.optional")}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* Merge connector */}
+                    {!isLast && (
+                      <div style={{ display: "flex", justifyContent: "center", height: 12 }}>
+                        <div style={{ width: 1.5, height: "100%", background: "var(--glass-border)" }} />
+                      </div>
+                    )}
+                  </div>
+                )
+              }
+
+              // Single step — standard rendering
+              const step = node
               const colors = PHASE_COLORS[step.phase]
               const label = t(step.labelKey)
               const phase = t(`chain.phase.${step.phase}`)
-              const isLast = i === chain.steps.length - 1
 
               return (
                 <div key={step.id} style={{ display: "flex", alignItems: "stretch", minHeight: 28 }}>
-                  {/* Left: dot + connector line */}
                   <div style={{
                     width: 20, display: "flex", flexDirection: "column", alignItems: "center",
                     flexShrink: 0,
                   }}>
-                    {/* Dot: filled = required, ring = optional */}
                     <div style={{
-                      width: 10, height: 10, borderRadius: "50%",
-                      marginTop: 5,
+                      width: 10, height: 10, borderRadius: "50%", marginTop: 5,
                       ...(step.required
                         ? { background: colors.dot }
                         : { border: `2px solid ${colors.dot}`, background: "transparent" }
                       ),
                       flexShrink: 0,
                     }} />
-                    {/* Connector line */}
                     {!isLast && (
                       <div style={{
-                        width: 1.5, flex: 1,
-                        background: "var(--glass-border)",
+                        width: 1.5, flex: 1, background: "var(--glass-border)",
                         marginTop: 2, marginBottom: 2,
                       }} />
                     )}
                   </div>
-
-                  {/* Right: label + phase + optional tag */}
                   <div style={{
                     flex: 1, display: "flex", alignItems: "center", gap: 6,
                     paddingLeft: 6, paddingBottom: isLast ? 0 : 4,
                   }}>
-                    <span style={{
-                      fontSize: 12, fontWeight: 600,
-                      color: "var(--text-primary)",
-                    }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
                       {label}
                     </span>
                     <span style={{
-                      fontSize: 9, fontWeight: 500,
-                      color: colors.text, opacity: 0.8,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
+                      fontSize: 9, fontWeight: 500, color: colors.text, opacity: 0.8,
+                      textTransform: "uppercase", letterSpacing: 0.5,
                     }}>
                       {phase}
                     </span>
