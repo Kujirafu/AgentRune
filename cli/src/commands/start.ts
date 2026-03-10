@@ -42,7 +42,8 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
   const port = parseInt(opts.port || "3456")
 
   if (opts.foreground) {
-    // Run server in foreground
+    // Run server in foreground with self-healing
+    setupSelfHealing()
     const { createServer } = await import("../server/ws-server.js")
     createServer(port)
     return
@@ -86,4 +87,18 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
   } else {
     log.error("Failed to start daemon")
   }
+}
+
+/** Self-healing: catch uncaught errors so the server process doesn't crash */
+function setupSelfHealing() {
+  process.on("uncaughtException", (err) => {
+    log.error(`[Self-heal] Uncaught exception: ${err.message}`)
+    if (err.stack) log.dim(err.stack)
+    // Don't exit — let the server keep running
+  })
+  process.on("unhandledRejection", (reason: any) => {
+    const msg = reason?.message || String(reason)
+    log.error(`[Self-heal] Unhandled rejection: ${msg}`)
+    // Don't exit — let the server keep running
+  })
 }

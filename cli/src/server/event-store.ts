@@ -46,6 +46,8 @@ export class EventStore {
       try {
         const data = JSON.parse(readFileSync(this.indexPath(), "utf-8"))
         for (const rec of data) {
+          // Index records don't have events (stripped by saveIndex), initialize as empty array
+          if (!rec.events) rec.events = []
           this.sessions.set(rec.id, rec)
         }
       } catch {}
@@ -110,6 +112,13 @@ export class EventStore {
     const session = this.sessions.get(sessionId)
     if (!session) return
     writeFileSync(this.sessionPath(sessionId), JSON.stringify(session, null, 2))
+  }
+
+  getSession(sessionId: string): Omit<SessionRecord, "events"> | undefined {
+    const session = this.sessions.get(sessionId)
+    if (!session) return undefined
+    const { events, ...rest } = session
+    return rest
   }
 
   getSessionsByProject(projectId: string): Omit<SessionRecord, "events">[] {

@@ -65,13 +65,6 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
     }
   }, [open])
 
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: Event) => { e.preventDefault(); onClose() }
-    document.addEventListener("app:back", handler)
-    return () => document.removeEventListener("app:back", handler)
-  }, [open, onClose])
-
   // Auto-select first project if none selected
   useEffect(() => {
     if (!projectId && projects.length > 0) {
@@ -130,22 +123,21 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
 
   const { sheetRef, handlers: swipeHandlers } = useSwipeToDismiss({ onDismiss: onClose })
 
-  // Android back button: close preview first, then close sheet
+  // Android back button: close preview first, then resume list, then close sheet
   useEffect(() => {
     if (!open) return
     const handler = (e: Event) => {
+      e.preventDefault()
+      e.stopImmediatePropagation()
       if (previewSession) {
         setPreviewSession(null)
-        e.preventDefault()
-        e.stopImmediatePropagation()
       } else {
         onClose()
-        e.preventDefault()
-        e.stopImmediatePropagation()
       }
     }
-    document.addEventListener("app:back", handler)
-    return () => document.removeEventListener("app:back", handler)
+    // Use capture phase so this fires BEFORE MissionControl's bubble-phase handler
+    document.addEventListener("app:back", handler, true)
+    return () => document.removeEventListener("app:back", handler, true)
   }, [open, previewSession, onClose])
 
   if (!open) return null
@@ -647,7 +639,11 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
               WebkitBackdropFilter: "blur(6px)",
             }}
           />
-          <div style={{
+          <div
+            onClick={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            style={{
             position: "fixed",
             top: "5dvh", left: 12, right: 12, bottom: "5dvh",
             zIndex: 301,
@@ -703,6 +699,8 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
             <div style={{
               flex: 1,
               overflowY: "auto",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehavior: "contain",
               padding: "12px 16px",
               display: "flex",
               flexDirection: "column",

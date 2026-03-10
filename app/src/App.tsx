@@ -1283,7 +1283,7 @@ export function App() {
     // Load active sessions
     fetch(`${base}/api/sessions`)
       .then((r) => r.json())
-      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null }[]) => {
+      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }[]) => {
         const sessions = data.map((s) => ({
           id: s.id,
           projectId: s.projectId,
@@ -1291,6 +1291,26 @@ export function App() {
           worktreeBranch: s.worktreeBranch || null,
         }))
         setActiveSessions(sessions)
+        // Seed sessionEventsMap with lastEventTitle from server so summaries show immediately
+        setSessionEventsMap(prev => {
+          const next = new Map(prev)
+          for (const s of data) {
+            if (s.lastEventTitle) {
+              const existing = next.get(s.id)
+              // Update if no existing events, or existing only has the init_ seed placeholder
+              if (!existing || (existing.length === 1 && existing[0].id.startsWith("init_"))) {
+                next.set(s.id, [{
+                  id: `init_${s.id}`,
+                  timestamp: Date.now(),
+                  type: "response",
+                  status: "in_progress",
+                  title: s.lastEventTitle,
+                }])
+              }
+            }
+          }
+          return next
+        })
       })
       .catch(() => { })
   }, [isAuthed, serverUrl, wsConnected])
@@ -1425,6 +1445,15 @@ export function App() {
       const title = msg.eventTitle as string
       const agentStatus = msg.agentStatus as string
       if (!sid) return
+      // Skip noise titles that shouldn't be used as session summaries
+      if (!title || /^\d[\d,]*\s*tokens?\s*(used|remaining|total)?$/i.test(title)
+        || /^(Thinking|Processing)\.{0,3}$/i.test(title)
+        || /^Permission requested/i.test(title)
+        || /^Agent is requesting/i.test(title)
+        || title === "Token usage"
+        || /^(初始化|工作階段已)/i.test(title)
+        || /^Session (started|ended|resumed)/i.test(title)
+      ) return
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
@@ -1530,6 +1559,7 @@ export function App() {
   useEffect(() => {
     const handler = (e: Event) => {
       if (!getVolumeKeysEnabled()) return // respect setting toggle
+      if (viewModeRef.current !== "terminal") return // only in terminal view
       const dir = (e as CustomEvent).detail
       const seq = dir === "up" ? "\x1b[A" : "\x1b[B"
       send({ type: "input", data: seq })

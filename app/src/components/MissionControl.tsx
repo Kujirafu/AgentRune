@@ -121,7 +121,7 @@ export function MissionControl({
   const pendingImagePathsRef = useRef<string[]>([])
 
   // Voice overlay state — Native Speech Recognition (Capacitor plugin)
-  const [voicePhase, setVoicePhase] = useState<"recording" | "cleaning" | "result" | null>(null)
+  const [voicePhase, setVoicePhase] = useState<"preparing" | "recording" | "cleaning" | "result" | null>(null)
   const [voiceText, setVoiceText] = useState("")
   const [voiceExpanded, setVoiceExpanded] = useState(false)
   const [voiceDuration, setVoiceDuration] = useState(0)
@@ -132,10 +132,13 @@ export function MissionControl({
   const srModuleRef = useRef<any>(null)
   const permGrantedRef = useRef(false)
   const isRecordingRef = useRef(false)
+  const userWantsRecordingRef = useRef(false) // true while user hasn't pressed stop
   const listenerAttachedRef = useRef(false)
-  const startPromiseResolveRef = useRef<{ matches?: string[] } | null>(null)
+  const lastSegmentTimeRef = useRef(0) // guard against rapid restart loops
+  const voiceSeqRef = useRef(0) // sequence counter to cancel stale starts
+  const voiceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // cancellable restart
 
-  // Eagerly load plugin + pre-check permissions on mount
+  // Eagerly load plugin + pre-check permissions + pre-attach listeners on mount
   useEffect(() => {
     import("@capacitor-community/speech-recognition").then(mod => {
       srModuleRef.current = mod.SpeechRecognition
@@ -144,6 +147,8 @@ export function MissionControl({
           .then((perms: any) => { if (perms?.speechRecognition === "granted") permGrantedRef.current = true })
           .catch(() => {})
       } catch {}
+      // Pre-attach listeners so first record press has zero listener setup delay
+      ensureListener()
     }).catch(() => {})
   }, [])
 
@@ -151,7 +156,7 @@ export function MissionControl({
     if (mcTimerRef.current) { clearInterval(mcTimerRef.current); mcTimerRef.current = null }
   }
 
-  // Attach partialResults listener for live display (best-effort, not required for final text)
+  // Attach listeners: partialResults for live display, listeningState for auto-restart
   const ensureListener = async () => {
     if (listenerAttachedRef.current) return
     const SR = srModuleRef.current
@@ -162,34 +167,75 @@ export function MissionControl({
           latestPartialRef.current = data.matches[0]
           const displayText = (accumulatedTextRef.current + " " + data.matches[0]).trim()
           setVoicePartialText(displayText)
+          // If we're getting results, engine is definitely running — ensure recording phase
+          setVoicePhase(prev => prev === "preparing" ? "recording" : prev)
+          if (!mcTimerRef.current && userWantsRecordingRef.current) {
+            const startTime = Date.now()
+            mcTimerRef.current = setInterval(() => {
+              setVoiceDuration(Math.floor((Date.now() - startTime) / 1000))
+            }, 1000)
+          }
+        }
+      })
+      // listeningState: "started" = engine ready, "stopped" = silence timeout
+      await SR.addListener("listeningState", (data: { status: string }) => {
+        if (data.status === "started" && userWantsRecordingRef.current) {
+          // Engine is ready — switch from "preparing" to "recording"
+          setVoicePhase(prev => prev === "preparing" ? "recording" : prev)
+          if (!mcTimerRef.current) {
+            const startTime = Date.now()
+            mcTimerRef.current = setInterval(() => {
+              setVoiceDuration(Math.floor((Date.now() - startTime) / 1000))
+            }, 1000)
+          }
+        }
+        if (data.status === "stopped" && userWantsRecordingRef.current) {
+          // Accumulate whatever we got from this segment
+          const segment = latestPartialRef.current
+          if (segment) {
+            accumulatedTextRef.current = (accumulatedTextRef.current + " " + segment).trim()
+            latestPartialRef.current = ""
+            setVoicePartialText(accumulatedTextRef.current)
+          }
+          isRecordingRef.current = false
+          // Minimal guard: prevent rapid loop if stopped fires immediately after start
+          const now = Date.now()
+          if (now - lastSegmentTimeRef.current < 100) return
+          lastSegmentTimeRef.current = now
+          // Schedule restart with cancellable timeout — mcStopVoice can clearTimeout to prevent beep
+          if (voiceRestartTimerRef.current) clearTimeout(voiceRestartTimerRef.current)
+          voiceRestartTimerRef.current = setTimeout(() => {
+            voiceRestartTimerRef.current = null
+            if (!userWantsRecordingRef.current) return
+            const seq = voiceSeqRef.current
+            SR.start({ language: speechLang, partialResults: true, popup: false, maxResults: 5 })
+              .then(() => {
+                if (voiceSeqRef.current !== seq) { try { SR.stop() } catch {} return }
+                isRecordingRef.current = true
+              })
+              .catch(() => {})
+          }, 80)
         }
       })
       listenerAttachedRef.current = true
     } catch {}
   }
 
-  // Start recognition — partialResults for live display, start() Promise captures final text
+  // Start recognition (full init — called once per voice session)
   const doStartRecognition = async () => {
     const SR = srModuleRef.current
     if (!SR) return
     await ensureListener()
+    // If somehow already recording, stop first
     if (isRecordingRef.current) {
-      try { await Promise.race([SR.stop(), new Promise(r => setTimeout(r, 500))]) } catch {}
+      try { SR.stop() } catch {}
       isRecordingRef.current = false
-      await new Promise(r => setTimeout(r, 100))
     }
+    lastSegmentTimeRef.current = Date.now()
     isRecordingRef.current = true
-    startPromiseResolveRef.current = null
     try {
-      // partialResults: true gives live display via listener
-      // BUT start() resolves immediately with no matches
+      // Fire and forget — recognition starts ASAP
       SR.start({ language: speechLang, partialResults: true, popup: false, maxResults: 5 })
-        .then((result: any) => {
-          // Some Android implementations resolve with final matches even in partialResults mode
-          if (result?.matches?.[0]) {
-            startPromiseResolveRef.current = result
-          }
-        })
         .catch(() => {})
     } catch {}
   }
@@ -198,24 +244,38 @@ export function MissionControl({
     const SR = srModuleRef.current
     if (!SR) return
 
+    // 1. Cancel any previous voice session
     mcStopRecording()
+    voiceSeqRef.current++
+    if (voiceRestartTimerRef.current) { clearTimeout(voiceRestartTimerRef.current); voiceRestartTimerRef.current = null }
+    userWantsRecordingRef.current = true
     if (isRecordingRef.current) {
-      try { await Promise.race([SR.stop(), new Promise(r => setTimeout(r, 500))]) } catch {}
+      try { SR.stop() } catch {}
       isRecordingRef.current = false
     }
+
+    // 2. Reset state
     setVoiceText("")
     setVoicePartialText("")
     latestPartialRef.current = ""
     accumulatedTextRef.current = ""
-    setVoicePhase("recording")
+
+    // 3. Show preparing phase — switch to "recording" when engine fires "started" or partialResults
+    setVoicePhase("preparing")
     if (navigator.vibrate) navigator.vibrate(30)
-
     setVoiceDuration(0)
-    const startTime = Date.now()
-    mcTimerRef.current = setInterval(() => {
-      setVoiceDuration(Math.floor((Date.now() - startTime) / 1000))
-    }, 1000)
+    // Fallback: if listeningState "started" never fires, force to recording after 1.5s
+    setTimeout(() => {
+      setVoicePhase(prev => prev === "preparing" ? "recording" : prev)
+      if (!mcTimerRef.current && userWantsRecordingRef.current) {
+        const startTime = Date.now()
+        mcTimerRef.current = setInterval(() => {
+          setVoiceDuration(Math.floor((Date.now() - startTime) / 1000))
+        }, 1000)
+      }
+    }, 1500)
 
+    // 4. Check permissions (only first time — fast path after that)
     if (!permGrantedRef.current) {
       try {
         const req = await SR.requestPermissions()
@@ -225,38 +285,41 @@ export function MissionControl({
       }
       if (!permGrantedRef.current) {
         mcStopRecording()
+        userWantsRecordingRef.current = false
         setVoicePhase("result")
         setVoiceText("[需要麥克風權限]")
         return
       }
     }
-    await doStartRecognition()
+
+    // 5. Start recognition — no awaits, fire ASAP
+    doStartRecognition()
   }
 
   const mcStopVoice = async () => {
     mcStopRecording()
+    userWantsRecordingRef.current = false
     isRecordingRef.current = false
+    voiceSeqRef.current++
+    // Cancel any pending restart timer — prevents SR.start() from firing after stop
+    if (voiceRestartTimerRef.current) { clearTimeout(voiceRestartTimerRef.current); voiceRestartTimerRef.current = null }
 
     const SR = srModuleRef.current
     // Capture whatever partial text we have BEFORE stopping
     const partialText = (accumulatedTextRef.current + " " + latestPartialRef.current).trim()
 
     if (SR) {
-      // Stop and wait — the plugin should fire final partialResults on stop
+      // seq counter prevents any pending doStartRecognitionQuiet from firing
       try {
         await Promise.race([SR.stop(), new Promise(r => setTimeout(r, 800))])
       } catch {}
-      // Give listener 300ms to receive the final callback
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, 200))
     }
 
     // Read again after the delay — listener may have updated refs
     const finalFromListener = (accumulatedTextRef.current + " " + latestPartialRef.current).trim()
-    // Also check if start() promise resolved with matches
-    const fromPromise = startPromiseResolveRef.current?.matches?.[0] || ""
-    startPromiseResolveRef.current = null
     // Use whichever source has the most text
-    const candidates = [partialText, finalFromListener, fromPromise].filter(Boolean)
+    const candidates = [partialText, finalFromListener].filter(Boolean)
     const finalText = candidates.sort((a, b) => b.length - a.length)[0] || ""
 
     accumulatedTextRef.current = ""
@@ -371,9 +434,11 @@ export function MissionControl({
 
   const mcCancelVoice = () => {
     mcStopRecording()
+    userWantsRecordingRef.current = false
+    voiceSeqRef.current++
+    if (voiceRestartTimerRef.current) { clearTimeout(voiceRestartTimerRef.current); voiceRestartTimerRef.current = null }
     const SR = srModuleRef.current
     if (SR) {
-      // Fire-and-forget with timeout — don't block UI
       Promise.race([SR.stop(), new Promise(r => setTimeout(r, 500))]).catch(() => {})
     }
     isRecordingRef.current = false
@@ -415,6 +480,7 @@ export function MissionControl({
   // Rolling buffer for TUI detection (accumulates stripped output, capped at 8KB)
   const tuiBufferRef = useRef("")
   const lastTuiMenuTime = useRef(0)
+  const freeTextPendingRef = useRef<string | null>(null)  // eventId when "Type custom response" was clicked
   // AnsiParser for structured output blocks (thinking/code/tools)
   const parserRef = useRef(new AnsiParser())
   const [parsedBlocks, setParsedBlocks] = useState<OutputBlock[]>([])
@@ -501,17 +567,25 @@ export function MissionControl({
   }, [])
 
   // Track viewport height (keyboard-aware via visualViewport)
+  // Uses CSS custom property for instant DOM update (no React render delay)
+  const mcContainerRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const update = () => {
       const newH = window.visualViewport?.height ?? window.innerHeight
+      // Sync update: set CSS property directly on the container (no React re-render needed)
+      if (mcContainerRef.current) {
+        mcContainerRef.current.style.height = `${newH}px`
+      }
       setViewH(newH)
       // Only update fullHeight when height increases (keyboard closing, not opening)
       if (newH > fullHeightRef.current) fullHeightRef.current = newH
     }
     window.visualViewport?.addEventListener("resize", update)
+    window.visualViewport?.addEventListener("scroll", update)
     window.addEventListener("resize", update)
     return () => {
       window.visualViewport?.removeEventListener("resize", update)
+      window.visualViewport?.removeEventListener("scroll", update)
       window.removeEventListener("resize", update)
     }
   }, [])
@@ -650,10 +724,14 @@ export function MissionControl({
 
     // Send settings changes to running Claude session
     if (agentId === "claude") {
-      // Model change ??/model <name>
+      // Model change — clear current input first, then /model <name>
       if (newSettings.model !== prev.model) {
-        send({ type: "input", data: `/model ${newSettings.model}` })
-        setTimeout(() => send({ type: "input", data: "\r" }), 50)
+        // Ctrl+U clears the current input line in Claude Code TUI
+        send({ type: "input", data: "\x15" })
+        setTimeout(() => {
+          send({ type: "input", data: `/model ${newSettings.model}` })
+          setTimeout(() => send({ type: "input", data: "\r" }), 50)
+        }, 100)
       }
       // Plan mode toggle ??shift+tab (\x1b[Z)
       if (newSettings.planMode !== prev.planMode) {
@@ -666,8 +744,11 @@ export function MissionControl({
         if (actual === newSettings.fastMode) {
           // Already in sync, just update settings without sending command
         } else {
-          send({ type: "input", data: "/fast" })
-          setTimeout(() => send({ type: "input", data: "\r" }), 50)
+          send({ type: "input", data: "\x15" }) // Ctrl+U clear line
+          setTimeout(() => {
+            send({ type: "input", data: "/fast" })
+            setTimeout(() => send({ type: "input", data: "\r" }), 50)
+          }, 100)
         }
       }
       // Bypass mode — CLI flag, restart session with new command
@@ -697,7 +778,12 @@ export function MissionControl({
     return send({ type: "input", data })
   }, [send])
 
+  const uploadingCountRef = useRef(0)
+  const [isUploadingImage, setIsUploadingImage] = useState(false)
+
   const handleImagePaste = useCallback(async (base64: string, filename: string) => {
+    uploadingCountRef.current++
+    setIsUploadingImage(true)
     try {
       const res = await fetch(`${getApiBase()}/api/upload`, {
         method: "POST",
@@ -732,6 +818,9 @@ export function MissionControl({
         title: t("mc.uploadFailed") || "Image upload failed",
         detail: err instanceof Error ? err.message : "Network error",
       }].slice(-200))
+    } finally {
+      uploadingCountRef.current--
+      if (uploadingCountRef.current === 0) setIsUploadingImage(false)
     }
   }, [project.id, sendInput, t, setEvents])
 
@@ -757,22 +846,42 @@ export function MissionControl({
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
     }
     // Attach any pending uploaded image paths to the message
+    // IMPORTANT: use space separator (not \n) — PTY sends \n as Enter to Claude Code,
+    // which would split the message and submit only the first line.
     const pendingImages = pendingImagePathsRef.current.splice(0)
     if (pendingImages.length > 0) {
-      const imagePaths = pendingImages.join("\n")
+      const imagePaths = pendingImages.join(" ")
       text = text.trim()
-        ? `${text}\n\n[Attached images — please read these files:]\n${imagePaths}`
-        : `[Attached images — please read these files:]\n${imagePaths}`
+        ? `${text} [Attached images — please read these files:] ${imagePaths}`
+        : `[Attached images — please read these files:] ${imagePaths}`
     }
 
     const trimmedInput = text.trim()
     if (!trimmedInput) return
 
+    // If user clicked "Type custom response", interrupt TUI menu first (Esc),
+    // then send the typed text after a short delay
+    const pendingFreeText = freeTextPendingRef.current
+    if (pendingFreeText) {
+      freeTextPendingRef.current = null
+      sendInput("\x1b")  // Esc to dismiss TUI menu
+      // Mark the decision event as completed
+      setEvents((prev) =>
+        prev.map((e) => e.id === pendingFreeText ? { ...e, status: "completed" as const, _selectedInput: "__FREE_TEXT__" } as any : e)
+      )
+      // Delay to let TUI process the Esc before sending text
+      setTimeout(() => {
+        sendInput(text)
+        setTimeout(() => sendInput("\r"), 30)
+      }, 300)
+      // Continue to add user event below (don't return)
+    }
+
     // Send text first, then Enter separately after a delay.
-    // TUI apps like Claude Code process input as a stream ??if text+\r arrives
+    // TUI apps like Claude Code process input as a stream — if text+\r arrives
     // as one chunk, \r gets treated as a newline in the input buffer instead of
     // triggering submission. Splitting them ensures \r is handled as Enter.
-    const sent = sendInput(text)
+    const sent = pendingFreeText ? true : sendInput(text)
     if (!sent) {
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`,
@@ -786,8 +895,11 @@ export function MissionControl({
     }
     // Claude Code slash commands (e.g. /resume) need time for autocomplete to render
     // before pressing Enter. Regular text needs only a short delay.
-    const enterDelay = text.startsWith("/") ? 300 : 30
-    setTimeout(() => sendInput("\r"), enterDelay)
+    // Skip if free text path already handled Enter via its own setTimeout
+    if (!pendingFreeText) {
+      const enterDelay = text.startsWith("/") ? 300 : 30
+      setTimeout(() => sendInput("\r"), enterDelay)
+    }
 
     // For TUI commands like /resume, re-attach ONCE after TUI renders to get scrollback.
     // Live ANSI parsing is unreliable due to cursor positioning.
@@ -845,6 +957,16 @@ export function MissionControl({
       setApiKeyModal({ agentId: targetAgentId, eventId })
       setApiKeyInput("")
       return
+    }
+    if (input === "__FREE_TEXT__") {
+      // Focus input bar — interrupt happens when user actually sends text
+      freeTextPendingRef.current = eventId
+      const textarea = document.querySelector("textarea") as HTMLTextAreaElement | null
+      if (textarea) {
+        textarea.focus()
+        textarea.scrollIntoView({ behavior: "smooth", block: "end" })
+      }
+      return  // Don't mark completed yet — wait for user to send
     }
 
     // For inputs with escape sequences (menu arrow navigation), send each key separately
@@ -966,10 +1088,13 @@ export function MissionControl({
           }
           return prev
         }
-        // For decision_request: dedup by ID only (same event re-sent)
-        // Don't dedup by title — multiple permission prompts share the same title
+        // For decision_request: dedup by ID, then by detail (same permission asked again)
         if (event.type === "decision_request") {
           if (prev.some(e => e.id === event.id)) return prev
+          // Dedup by detail text — same permission prompt re-sent with different ID
+          if (event.detail && prev.some(e =>
+            e.type === "decision_request" && e.status === "waiting" && e.detail === event.detail
+          )) return prev
         }
         // Content dedup: only for recent non-decision events (last 5)
         if (event.type !== "decision_request") {
@@ -1020,7 +1145,6 @@ export function MissionControl({
     // Replay stored events on re-attach (from server adapter)
     unsubs.push(on("events_replay", (msg) => {
       const replayed = (msg.events as AgentEvent[]) || []
-      // Past decision_requests are no longer actionable — drop them entirely on replay
       // Extract token usage from replay to restore Usage display
       const usageEvents = replayed.filter(e => e.type === "token_usage" && e.detail)
       if (usageEvents.length > 0) {
@@ -1037,7 +1161,12 @@ export function MissionControl({
           projectTotalTokens.current = { input: maxIn, output: maxOut }
         }
       }
-      const filtered = replayed.filter(e => e.type !== "decision_request" && e.type !== "token_usage")
+      // Keep waiting decision_requests (still pending) — server already filters stale ones
+      const filtered = replayed.filter(e => {
+        if (e.type === "token_usage") return false
+        if (e.type === "decision_request" && e.status !== "waiting") return false
+        return true
+      })
       if (filtered.length > 0) {
         // Merge server events with any client-side events (dedupe by id, sort by timestamp)
         setEvents(prev => {
@@ -1227,9 +1356,7 @@ export function MissionControl({
     const handler = (e: Event) => {
       // Voice overlay is topmost — close it first
       if (voicePhase) {
-        mcStopRecording()
-        setVoiceText("")
-        setVoicePhase(null)
+        mcCancelVoice()
         e.preventDefault(); return
       }
       if (previewFile) { setPreviewFile(null); e.preventDefault(); return }
@@ -1301,9 +1428,13 @@ return (
         }} />
       )}
       <div
+        ref={mcContainerRef}
         style={{
           position: "fixed",
-          inset: 0,
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: `${viewH}px`,
           overflow: "hidden",
           zIndex: 1,
         }}
@@ -1370,11 +1501,11 @@ return (
               >
                 {(() => {
                   const tokens = showProjectUsage ? projectTotalTokens.current : usageTokens
-                  const prefix = showProjectUsage ? "??" : ""
+                  const prefix = showProjectUsage ? "T " : ""
                   if (tokens.input > 0 || tokens.output > 0) {
                     const fmtIn = tokens.input >= 1000 ? `${(tokens.input / 1000).toFixed(1)}k` : `${tokens.input}`
                     const fmtOut = tokens.output >= 1000 ? `${(tokens.output / 1000).toFixed(1)}k` : `${tokens.output}`
-                    return `${prefix}??${fmtIn}  ??${fmtOut}`
+                    return <>{prefix}{fmtIn}↑ {fmtOut}↓</>
                   }
                   return "Usage"
                 })()}
@@ -1605,6 +1736,7 @@ return (
               onRemoveFile={(path) => setAttachedFiles((prev) => prev.filter((f) => f !== path))}
               disabled={initializing}
               disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
+              isUploadingImage={isUploadingImage}
             />
           </div>
 
@@ -2120,6 +2252,30 @@ return (
               {voiceContextLabel}
             </div>
           )}
+          {/* Preparing: engine initializing — show pulsing mic, user should wait */}
+          {voicePhase === "preparing" && (
+            <div onClick={(e) => e.stopPropagation()} style={{
+              position: "absolute", inset: 0,
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            }}>
+              <div className="voice-preparing-pulse" style={{
+                width: 100, height: 100, borderRadius: "50%",
+                background: "rgba(55,172,192,0.15)",
+                border: "2px solid rgba(55,172,192,0.4)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" x2="12" y1="19" y2="22"/>
+                </svg>
+              </div>
+              <div style={{ marginTop: 20, color: "rgba(255,255,255,0.7)", fontSize: 15, fontWeight: 500 }}>
+                {t("voice.preparing") || "Preparing..."}
+              </div>
+            </div>
+          )}
+          {/* Recording: engine is listening — show orbs + stop button */}
           {voicePhase === "recording" && (
             <>
               <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
@@ -2160,10 +2316,7 @@ return (
                   </svg>
                 </button>
                 <div style={{ marginTop: 16, color: "rgba(255,255,255,0.8)", fontSize: 14, fontWeight: 500 }}>
-                  {voiceDuration === 0 && !voicePartialText
-                    ? (t("voice.preparing") || "Preparing...")
-                    : (t("voice.tapToStop"))
-                  }
+                  {t("voice.tapToStop")}
                 </div>
                 <div style={{ marginTop: 8, color: "rgba(255,255,255,0.5)", fontSize: 24, fontWeight: 300, fontVariantNumeric: "tabular-nums" }}>
                   {Math.floor(voiceDuration / 60)}:{(voiceDuration % 60).toString().padStart(2, "0")}
@@ -2273,6 +2426,8 @@ return (
             @keyframes orbWander1 { 0% { top: 15%; left: 10%; } 20% { top: 60%; left: 65%; } 40% { top: 30%; left: 75%; } 60% { top: 70%; left: 20%; } 80% { top: 10%; left: 50%; } 100% { top: 15%; left: 10%; } }
             @keyframes orbWander2 { 0% { top: 70%; left: 75%; } 25% { top: 20%; left: 30%; } 50% { top: 50%; left: 5%; } 75% { top: 80%; left: 60%; } 100% { top: 70%; left: 75%; } }
             @keyframes orbWander3 { 0% { top: 40%; left: 45%; } 33% { top: 15%; left: 80%; } 66% { top: 75%; left: 15%; } 100% { top: 40%; left: 45%; } }
+            .voice-preparing-pulse { animation: preparePulse 1.5s ease-in-out infinite; }
+            @keyframes preparePulse { 0%, 100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.1); opacity: 1; } }
             .voice-stop-btn { animation: stopBtnGlow 2s ease-in-out infinite; }
             @keyframes stopBtnGlow { 0%, 100% { box-shadow: 0 0 40px rgba(55,172,192,0.3), 0 0 80px rgba(251,129,132,0.15); } 50% { box-shadow: 0 0 60px rgba(55,172,192,0.5), 0 0 100px rgba(251,129,132,0.25); } }
             @keyframes voiceSpin { to { transform: rotate(360deg); } }

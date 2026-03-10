@@ -45,6 +45,13 @@ function stripAnsiForDetection(str: string): string {
 export function TerminalView({ project, agentId, sessionId, resumeSessionId, send, on, onBack }: TerminalViewProps) {
   const { t, locale } = useLocale()
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
+
+  // Re-read settings from localStorage when session changes (bypass toggle triggers
+  // kill+relaunch from MissionControl, but TerminalView stays mounted with stale state)
+  useEffect(() => {
+    setSettings(getSettings(project.id))
+  }, [sessionId, project.id])
+
   const [showSettings, setShowSettings] = useState(false)
   const [showDetail, setShowDetail] = useState(false)
   const [showBrowser, setShowBrowser] = useState(false)
@@ -71,7 +78,10 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
   const launchAgentCommand = useCallback((force: boolean = false) => {
     if (!agent || !sessionId) return
     if (!force && commandSent.has(sessionId)) return
-    let cmd = agent.command({ ...settings, locale })
+    // Always read fresh settings from localStorage — React state may not have updated yet
+    // (e.g. bypass toggle triggers kill+relaunch, but useEffect hasn't fired)
+    const freshSettings = getSettings(project.id)
+    let cmd = agent.command({ ...freshSettings, locale })
     if (!cmd) return
     // Inject --resume <id> for agents that support it
     if (resumeSessionId) {
@@ -95,7 +105,7 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
       }
     }
     setTimeout(() => tryToSend(0), 500)
-  }, [agent, agentId, sessionId, resumeSessionId, settings, send])
+  }, [agent, agentId, sessionId, resumeSessionId, project.id, locale, send])
 
   const shouldRecoverCodexSession = useCallback((): boolean => {
     if (agentId !== "codex") return false
@@ -504,7 +514,7 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
     parserRef.current.clear()
     lastScreenTextRef.current = ""
 
-    const attach = () => send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath(), isAgentResume: !!resumeSessionId, claudeSessionId: resumeSessionId || undefined })
+    const attach = () => send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath(), isAgentResume: !!resumeSessionId, claudeSessionId: resumeSessionId || undefined, settings: { model: settings.model, bypass: settings.bypass, planMode: settings.planMode, autoEdit: settings.autoEdit, fastMode: settings.fastMode, locale } })
     attach()
 
     const unsub = on("__ws_open__", () => {

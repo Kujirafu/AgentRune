@@ -14,6 +14,7 @@ export interface AgentEvent {
     | "decision_request"
     | "error"
     | "info"
+    | "token_usage"
     | "response"
     | "user_message"
     | "session_summary"

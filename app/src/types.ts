@@ -98,6 +98,7 @@ export interface AgentEvent {
     | "decision_request"
     | "error"
     | "info"
+    | "token_usage"
     | "response"
     | "session_summary"
     | "progress_report"

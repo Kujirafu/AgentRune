@@ -59,12 +59,27 @@ function getLatestProgress(events: AgentEvent[]): ProgressReport | null {
   return null
 }
 
+function isLabelNoise(title: string): boolean {
+  if (/^\d[\d,]*\s*tokens?\s*(used|remaining|total)?$/i.test(title)) return true
+  if (title === "Token usage") return true
+  if (/^Thinking\.{0,3}$/i.test(title)) return true
+  if (/^Processing\.{0,3}$/i.test(title)) return true
+  if (/^初始化/i.test(title)) return true
+  if (/^工作階段已(開始|結束)$/i.test(title)) return true
+  if (/^Session (started|ended|resumed)/i.test(title)) return true
+  if (/^Permission requested/i.test(title)) return true
+  if (/^Agent is requesting/i.test(title)) return true
+  return false
+}
+
 function getEventSummary(events: AgentEvent[]): string {
   const prog = getLatestProgress(events)
-  if (prog?.summary) return prog.summary
+  if (prog?.summary && !isLabelNoise(prog.summary)) return prog.summary
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]
     if (e.id.startsWith("usr_")) continue
+    if (e.type === "token_usage") continue
+    if (e.title && isLabelNoise(e.title)) continue
     if (e.type === "response" && e.title) return e.title
     if (e.type === "file_edit" || e.type === "file_create") {
       const path = e.diff?.filePath || e.title?.replace(/^(Editing|Creating|Edited|Created)\s+/i, "") || ""
@@ -73,6 +88,24 @@ function getEventSummary(events: AgentEvent[]): string {
     if (e.type === "command_run" && e.title) return e.title
     if (e.type === "error" && e.title) return e.title
   }
+  return ""
+}
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#+\s*/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .trim()
+}
+
+function getSessionLabel(events: AgentEvent[]): string {
+  const summary = getEventSummary(events)
+  if (summary) return stripMarkdown(summary)
+  const firstUser = events.find(e => e.id.startsWith("usr_"))
+  if (firstUser?.title && !isLabelNoise(firstUser.title)) return stripMarkdown(firstUser.title)
   return ""
 }
 
@@ -100,7 +133,11 @@ function getAutoLabels(): Record<string, string> {
 }
 function setAutoLabelStorage(id: string, label: string) {
   const labels = getAutoLabels()
-  if (!labels[id] && label) { labels[id] = label; localStorage.setItem("agentrune_session_autolabels", JSON.stringify(labels)) }
+  const existing = labels[id]
+  if ((!existing && label) || (existing && isLabelNoise(existing) && label && !isLabelNoise(label))) {
+    labels[id] = label
+    localStorage.setItem("agentrune_session_autolabels", JSON.stringify(labels))
+  }
 }
 
 // --- Component ---
@@ -200,6 +237,10 @@ export function UnifiedPanel({
   const touchStartY = useRef(0)
   const touchDeltaX = useRef(0)
   const swipingPanel = useRef(false)
+  const insideScrollContainer = useRef(false)
+
+  // Persist session scroll positions per project
+  const sessionScrollPositions = useRef<Map<string, number>>(new Map())
 
   // --- Load speech plugin ---
   useEffect(() => {
@@ -270,9 +311,11 @@ export function UnifiedPanel({
   const autoLabels = getAutoLabels()
   useEffect(() => {
     for (const s of activeSessions) {
-      if (labels[s.id] || autoLabels[s.id]) continue
+      if (labels[s.id]) continue
+      const existing = autoLabels[s.id]
+      if (existing && !isLabelNoise(existing)) continue
       const events = sessionEvents.get(s.id) || []
-      const summary = getEventSummary(events)
+      const summary = getSessionLabel(events)
       if (summary && summary.length > 3) {
         const autoLabel = summary.length > 40 ? summary.slice(0, 40) + "..." : summary
         setAutoLabelStorage(s.id, autoLabel)
@@ -310,7 +353,7 @@ export function UnifiedPanel({
       const ts = events.length > 0 ? events[events.length - 1].timestamp : 0
       if (summary && ts > latestTs) { latestText = summary; latestTs = ts }
     }
-    return latestText
+    return stripMarkdown(latestText)
   }
 
   // --- Summary auto-fetch ---
@@ -361,12 +404,19 @@ export function UnifiedPanel({
     })
   }, [summaryCache, summaryLoading, sessionsByProject, sessionEvents])
 
+  // Use ref to always call latest fetchSummary without causing effect re-runs
+  const fetchSummaryRef = useRef(fetchSummary)
+  fetchSummaryRef.current = fetchSummary
+
+  // Fetch summaries when projects tab is active AND projects/sessions have loaded
+  const sessionCount = activeSessions.length
   useEffect(() => {
     if (activeTab !== "projects") return
+    if (projects.length === 0) return
     for (const p of projects) {
-      fetchSummary(p.id)
+      fetchSummaryRef.current(p.id)
     }
-  }, [activeTab])
+  }, [activeTab, projects.length, sessionCount])
 
   // --- Voice system ---
   const voiceCleanup = () => {
@@ -545,10 +595,11 @@ export function UnifiedPanel({
       if (showDevices) { setShowDevices(false); e.preventDefault(); return }
       if (showNewSheet) { setShowNewSheet(false); e.preventDefault(); return }
       if (showAutomation) { setShowAutomation(false); e.preventDefault(); return }
+      if (activeTab !== "projects") { setActiveTab("projects"); e.preventDefault(); return }
     }
     document.addEventListener("app:back", handler)
     return () => document.removeEventListener("app:back", handler)
-  }, [voiceSessionId, contextProjectId, contextSessionId, renamingSessionId, replySessionId, showDevices, multiSelectMode, showNewSheet, showAutomation])
+  }, [voiceSessionId, contextProjectId, contextSessionId, renamingSessionId, replySessionId, showDevices, multiSelectMode, showNewSheet, showAutomation, activeTab])
 
   // Voice trigger from MissionControl
   useEffect(() => {
@@ -566,6 +617,8 @@ export function UnifiedPanel({
 
   const handleTouchStart = (e: React.TouchEvent) => {
     if ((e.target as HTMLElement).closest("input, textarea")) return
+    // Check if touch started inside a horizontal scroll container (session cards)
+    insideScrollContainer.current = !!(e.target as HTMLElement).closest("[data-hscroll]")
     touchStartX.current = e.touches[0].clientX
     touchStartY.current = e.touches[0].clientY
     touchDeltaX.current = 0
@@ -573,6 +626,8 @@ export function UnifiedPanel({
   }
 
   const handleTouchMove = (e: React.TouchEvent) => {
+    // If inside a horizontal scroll container, never trigger tab swipe
+    if (insideScrollContainer.current) return
     const dx = e.touches[0].clientX - touchStartX.current
     const dy = e.touches[0].clientY - touchStartY.current
     if (!swipingPanel.current && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10) {
@@ -584,6 +639,7 @@ export function UnifiedPanel({
   }
 
   const handleTouchEnd = () => {
+    insideScrollContainer.current = false
     if (!swipingPanel.current) return
     const threshold = 50
     const currentIdx = TAB_ORDER.indexOf(activeTab)
@@ -1074,20 +1130,35 @@ export function UnifiedPanel({
                         : "1px solid rgba(52,119,146,0.06)",
                       padding: "8px 8px",
                     }}>
-                    <div style={{
-                      display: "flex", gap: 8,
-                      overflowX: "auto",
-                      scrollSnapType: "x mandatory",
-                      WebkitOverflowScrolling: "touch",
-                      scrollbarWidth: "none",
-                    }}>
+                    <div
+                      data-hscroll
+                      ref={(el) => {
+                        if (el) {
+                          const saved = sessionScrollPositions.current.get(project.id)
+                          if (saved !== undefined && Math.abs(el.scrollLeft - saved) > 2) {
+                            el.scrollLeft = saved
+                          }
+                        }
+                      }}
+                      onScroll={(e) => {
+                        sessionScrollPositions.current.set(project.id, (e.target as HTMLElement).scrollLeft)
+                      }}
+                      style={{
+                        display: "flex", gap: 8,
+                        overflowX: "auto",
+                        scrollSnapType: "x mandatory",
+                        WebkitOverflowScrolling: "touch",
+                        scrollbarWidth: "none",
+                      }}
+                    >
                       {sessions.map((session) => {
                         const events = sessionEvents.get(session.id) || []
                         const sessionStatus = getSessionStatus(events)
                         const sDot = STATUS_DOT[sessionStatus] || STATUS_DOT.idle
                         const agentDef = AGENTS.find(a => a.id === session.agentId)
-                        const label = labels[session.id] || autoLabels[session.id] || agentDef?.name || session.agentId
-                        const summaryText = getEventSummary(events)
+                        const rawAutoLabel = autoLabels[session.id]
+                        const label = labels[session.id] || (rawAutoLabel && !isLabelNoise(rawAutoLabel) ? rawAutoLabel : null) || agentDef?.name || session.agentId
+                        const summaryText = getSessionLabel(events)
                         const isExpanded = expandedSessions.has(session.id)
                         const prog = getLatestProgress(events)
 
@@ -1291,7 +1362,10 @@ export function UnifiedPanel({
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 4px" }}>
               {/* Add schedule button */}
               <button
-                onClick={() => setShowAutomation(true)}
+                onClick={() => {
+                  if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+                  setShowAutomation(true)
+                }}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                   padding: "12px 16px", borderRadius: 14,
@@ -1427,7 +1501,10 @@ export function UnifiedPanel({
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 4px" }}>
               {/* New template button */}
               <button
-                onClick={() => setShowAutomation(true)}
+                onClick={() => {
+                  if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+                  setShowAutomation(true)
+                }}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                   width: "100%", padding: "12px 16px", borderRadius: 14,
@@ -1559,6 +1636,7 @@ export function UnifiedPanel({
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             <button onClick={() => {
                               setExpandedTemplateId(null)
+                              if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
                               setShowAutomation(true)
                             }} style={{
                               padding: "6px 12px", borderRadius: 8,

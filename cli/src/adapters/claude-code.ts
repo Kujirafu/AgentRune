@@ -60,8 +60,10 @@ function detectOptions(text: string): { label: string; input: string; style: "pr
     const label = m[2].replace(/\*{1,2}/g, "").trim()
     if (label.length >= 2) numMatches.push({ key: m[1], label })
   }
-  // Only treat as options if there are 2-8 numbered items AND text looks like a question
-  if (numMatches.length >= 2 && numMatches.length <= 8 && /[?\uff1f]|choose|select|\u9078|\u54ea\u500b/i.test(text)) {
+  // Only treat as options if there are 2-8 numbered items AND text contains a real question
+  // (not just stray "?" in URLs, filenames, or Unicode substitution characters)
+  const hasRealQuestion = /(?:^|[\n.!])\s*[^\n]*[?\uff1f]\s*$/m.test(text) || /choose|select|which.*(?:option|would|do)|pick|\u9078|\u54ea\u500b/i.test(text)
+  if (numMatches.length >= 2 && numMatches.length <= 8 && hasRealQuestion) {
     return numMatches.map((o, i) => ({
       label: `${o.key}. ${o.label.slice(0, 100)}`,
       input: o.key,
@@ -70,6 +72,85 @@ function detectOptions(text: string): { label: string; input: string; style: "pr
   }
 
   return null
+}
+
+/**
+ * Flush responseAccum into an AgentEvent (decision_request or info).
+ * When TUI interactive menu detected ("Enter to select"), overrides input
+ * to use arrow-key navigation and adds footer options.
+ */
+function flushResponseAccum(state: AdapterState, ctx: ParseContext, chunk: string): AgentEvent | null {
+  dbg(`[FLUSH] accumLen=${state.responseAccum.length} accum="${state.responseAccum.slice(0,120).replace(/\n/g, "\\n")}"`)
+  const opts = detectOptions(state.responseAccum)
+  dbg(`[FLUSH] opts=${opts ? opts.length : "null"}`)
+  let event: AgentEvent
+
+  if (opts) {
+    // Check if this is a TUI interactive menu (arrow-key navigation)
+    // Only consider it a TUI menu if the marker appeared recently (< 5s) — old buffer content doesn't count
+    const bufCheck = stripAnsi(ctx.buffer.slice(-2000))
+    const hasTuiMarker = /Enter to select|to navigate.*Esc/i.test(bufCheck)
+    const isTuiMenu = hasTuiMarker && (Date.now() - state.lastMenuTime < 5000)
+
+    if (isTuiMenu) {
+      // Override input: TUI uses arrow down + Enter, not number keys
+      for (let i = 0; i < opts.length; i++) {
+        opts[i].input = "\x1b[B".repeat(i) + "\r"
+      }
+      // Add TUI footer options that appear below numbered items
+      const footerCandidates = [
+        "Type something",
+        "Chat about this",
+        "Skip interview and plan immediately",
+        "Skip and use defaults",
+      ]
+      let footerIdx = opts.length
+      for (const label of footerCandidates) {
+        // Check if buffer contains first 2+ words of the label
+        const words = label.split(" ").slice(0, 2).join(" ")
+        if (bufCheck.includes(words)) {
+          opts.push({ label, input: "\x1b[B".repeat(footerIdx) + "\r", style: "default" as const })
+          footerIdx++
+        }
+      }
+      // Only TUI menus become decision_request — conversational A/B/C options stay as info
+      event = {
+        id: makeEventId(),
+        timestamp: state.responseAccumTime,
+        type: "decision_request",
+        status: "waiting",
+        title: state.responseAccum.split("\n")[0].slice(0, 200),
+        detail: state.responseAccum.slice(0, 3000),
+        raw: chunk,
+        decision: { options: opts },
+      }
+    } else {
+      // Conversational options (agent asking a question) — show as info, not interactive menu
+      event = {
+        id: makeEventId(),
+        timestamp: state.responseAccumTime,
+        type: "info",
+        status: "completed",
+        title: state.responseAccum.split("\n")[0].slice(0, 200),
+        detail: state.responseAccum.slice(0, 3000),
+        raw: chunk,
+      }
+    }
+  } else {
+    event = {
+      id: makeEventId(),
+      timestamp: state.responseAccumTime,
+      type: "info",
+      status: "completed",
+      title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
+      detail: state.responseAccum.slice(0, 3000),
+      raw: chunk,
+    }
+  }
+
+  state.responseAccum = ""
+  state.responseAccumTime = 0
+  return event
 }
 
 /** Per-session adapter state (stored on context object) */
@@ -339,6 +420,8 @@ export const claudeCodeAdapter: AgentAdapter = {
       const hasPermission = /requires?\s+approval|Do you want to proceed|allow.*permission/i.test(bufTail)
       const hasLegacy = /\(y\/n\/a\)/i.test(text)
       const hasInteractiveMenu = /Enter to select|to navigate.*Esc/i.test(bufTail)
+      // Update lastMenuTime when TUI markers are actively present
+      if (hasInteractiveMenu) state.lastMenuTime = Date.now()
 
       // Count numbered items in buffer tail
       const numMatches = [...bufTail.matchAll(/(?:^|\n)\s*(?:\u276f\s*)?(\d+)\.\s/gm)]
@@ -351,11 +434,19 @@ export const claudeCodeAdapter: AgentAdapter = {
       if (isPermission) {
         const title = "Permission requested"
         const options: { label: string; input: string; style: "primary" | "danger" | "default" }[] = []
-        const detailMatch = bufTail.match(/(?:Bash\s+(?:command)?|Edit|Write|Read\s*(?:file)?|execute|create|delete|modify|Tool\s+call)[:\s][^\n]{3,150}/i)
+        // Try multiple patterns to extract what the agent wants to do
+        const detailMatch = bufTail.match(/(?:Bash|Edit|Write|Read|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit)\s*\([^\n]{1,150}/i)
+          || bufTail.match(/(?:Bash\s+(?:command)?|execute|create|delete|modify|Tool\s+call)[:\s][^\n]{3,150}/i)
           || bufTail.match(/(?:requires?\s+(?:manual\s+)?approval)[^\n]{0,150}/i)
-        const detail = detailMatch
-          ? detailMatch[0].replace(/\s+/g, " ").trim().slice(0, 200)
+        // Also try flat version (no cursor->newline conversion) for tool signatures
+        const flatBufTail = stripAnsiFlat(ctx.buffer.slice(-2000))
+        const flatMatch = !detailMatch && flatBufTail.match(/(?:Bash|Edit|Write|Read)\s*\([^\n)]{1,150}\)/i)
+        const rawDetail = detailMatch?.[0] || flatMatch?.[0]
+        const detail = rawDetail
+          ? rawDetail.replace(/\s+/g, " ").trim().slice(0, 200)
           : "Agent is requesting permission"
+        dbg(`[PERM-DETAIL] detail="${detail.slice(0,80)}" bufTail(last200)="${bufTail.slice(-200).replace(/\n/g, "\\n")}"`)
+
 
         if (maxNum >= 2 && !hasLegacy) {
           const labels = maxNum >= 3
@@ -574,29 +665,8 @@ export const claudeCodeAdapter: AgentAdapter = {
           // New response block -- flush old if exists
           if (state.responseAccum.length > 10 && now - state.lastResponseTime > 2000) {
             state.lastResponseTime = now
-            const opts = detectOptions(state.responseAccum)
-            if (opts) {
-              events.push({
-                id: makeEventId(),
-                timestamp: state.responseAccumTime,
-                type: "decision_request",
-                status: "waiting",
-                title: state.responseAccum.split("\n")[0].slice(0, 200),
-                detail: state.responseAccum.slice(0, 3000),
-                raw: chunk,
-                decision: { options: opts },
-              })
-            } else {
-              events.push({
-                id: makeEventId(),
-                timestamp: state.responseAccumTime,
-                type: "info",
-                status: "completed",
-                title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
-                detail: state.responseAccum.slice(0, 3000),
-                raw: chunk,
-              })
-            }
+            const flushEvent = flushResponseAccum(state, ctx, chunk)
+            if (flushEvent) events.push(flushEvent)
           }
           state.responseAccum = responseText
           state.responseAccumTime = now
@@ -638,31 +708,8 @@ export const claudeCodeAdapter: AgentAdapter = {
     // Flush accumulated response on tool call or idle (response ended)
     if (state.responseAccum.length > 10 && (hasToolCall || ctx.isIdle) && now - state.lastResponseTime > 2000) {
       state.lastResponseTime = now
-      const opts = detectOptions(state.responseAccum)
-      if (opts) {
-        events.push({
-          id: makeEventId(),
-          timestamp: state.responseAccumTime,
-          type: "decision_request",
-          status: "waiting",
-          title: state.responseAccum.split("\n")[0].slice(0, 200),
-          detail: state.responseAccum.slice(0, 3000),
-          raw: chunk,
-          decision: { options: opts },
-        })
-      } else {
-        events.push({
-          id: makeEventId(),
-          timestamp: state.responseAccumTime,
-          type: "info",
-          status: "completed",
-          title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
-          detail: state.responseAccum.slice(0, 3000),
-          raw: chunk,
-        })
-      }
-      state.responseAccum = ""
-      state.responseAccumTime = 0
+      const flushEvent = flushResponseAccum(state, ctx, chunk)
+      if (flushEvent) events.push(flushEvent)
     }
 
     // --- Safety: clear resumeInProgress after decision was emitted + timeout ---
@@ -713,7 +760,7 @@ export const claudeCodeAdapter: AgentAdapter = {
         events.push({
           id: makeEventId(),
           timestamp: now,
-          type: "info",
+          type: "token_usage",
           status: "completed",
           title: `${tokenMatch[1]} tokens used`,
           raw: chunk,

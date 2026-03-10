@@ -174,11 +174,20 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
         // Convert AskUserQuestion tool call to decision_request events
         const questions = input.questions || []
         for (const q of questions) {
-          const options = (q.options || []).map((opt: { label: string; description?: string }) => ({
-            label: opt.label + (opt.description ? ` — ${opt.description}` : ""),
-            input: opt.label,
+          const options = (q.options || []).map((opt: { label: string; description?: string }, i: number) => ({
+            label: opt.label + (opt.description ? ` \u2014 ${opt.description}` : ""),
+            input: "\x1b[B".repeat(i) + "\r",  // Arrow down × i + Enter (TUI navigation)
             style: "default",
           }))
+          // Always add a free-text input option — agent-agnostic,
+          // any interactive prompt should accept custom text response
+          if (options.length > 0) {
+            options.push({
+              label: "Type custom response...",
+              input: "__FREE_TEXT__",
+              style: "default",
+            })
+          }
           if (options.length > 0) {
             events.push({
               id: makeId(),
@@ -425,6 +434,29 @@ export class JsonlWatcher {
       if (this.watcher) { this.watcher.close(); this.watcher = null }
     }
 
+    // Content verification: for new sessions (no targetSessionId), read the first line
+    // and check if the session started around when this watcher was created.
+    // This prevents locking onto another session's file that was created after the snapshot.
+    if (!this.targetSessionId && !isSwitch) {
+      try {
+        const fd = openSync(active, "r")
+        const headBuf = Buffer.alloc(512)
+        const bytesRead = readSync(fd, headBuf, 0, 512, 0)
+        closeSync(fd)
+        const firstLine = headBuf.toString("utf-8", 0, bytesRead).split("\n")[0]
+        const parsed = JSON.parse(firstLine)
+        const fileTs = parsed.timestamp ? new Date(parsed.timestamp).getTime() : 0
+        // If the file's first entry is from BEFORE this watcher started (with 30s grace),
+        // it belongs to another session — skip it
+        if (fileTs > 0 && fileTs < this.startTime - 30000) {
+          console.log(`[JsonlWatcher] Skipping ${active}: first entry timestamp ${fileTs} is before watcher start ${this.startTime}`)
+          return
+        }
+      } catch {
+        // Can't read/parse first line — proceed anyway (file may still be empty)
+      }
+    }
+
     this.jsonlPath = active
     claimedJsonlFiles.add(active)
     this.seenIds.clear()
@@ -489,9 +521,11 @@ export class JsonlWatcher {
         }
       }
 
-      // Mark all in_progress events as completed (replay = already finished)
+      // Mark all replay events as completed (replay = already finished)
+      // This includes in_progress tool calls AND waiting decision_request events
+      // (historical AskUserQuestion / permission prompts are already answered)
       for (const ev of allEvents) {
-        if (ev.status === "in_progress") {
+        if (ev.status === "in_progress" || ev.status === "waiting") {
           ev.status = "completed"
         }
       }

@@ -37,6 +37,7 @@ const TYPE_LABEL_KEYS: Record<string, string> = {
   response: "event.response",
   user_message: "event.userMessage",
   session_summary: "event.sessionSummary",
+  progress_report: "event.progressReport",
 }
 
 /** Strip ANSI escape codes from text for clean display */
@@ -342,8 +343,66 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
           </span>
         </div>
 
+        {/* Progress report fields (fallback when rendered via EventCard instead of ProgressCard) */}
+        {event.progress && (
+          <div style={{ marginTop: 4 }}>
+            {event.progress.summary && (
+              <div style={{
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                lineHeight: 1.5,
+                marginBottom: event.progress.nextSteps?.length ? 8 : 0,
+              }}>
+                {event.progress.summary}
+              </div>
+            )}
+            {event.progress.nextSteps && event.progress.nextSteps.length > 0 && (
+              <div style={{ marginBottom: event.progress.details ? 8 : 0 }}>
+                <div style={{
+                  fontSize: 10,
+                  color: "var(--text-secondary)",
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: 1.5,
+                  marginBottom: 6,
+                }}>
+                  Next steps
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {event.progress.nextSteps.map((step, i) => (
+                    <div key={i} style={{
+                      fontSize: 13,
+                      color: "var(--accent-primary)",
+                      padding: "6px 10px",
+                      background: "var(--accent-primary-bg, rgba(59,130,246,0.08))",
+                      borderRadius: 8,
+                      border: "1px solid rgba(96,165,250,0.15)",
+                    }}>
+                      {i + 1}. {step}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {event.progress.details && (
+              <div style={{
+                fontSize: 12,
+                color: "var(--text-secondary)",
+                whiteSpace: "pre-wrap",
+                lineHeight: 1.5,
+                padding: "8px 10px",
+                background: "var(--icon-bg, rgba(0,0,0,0.03))",
+                borderRadius: 10,
+                border: "1px solid var(--glass-border)",
+              }}>
+                {event.progress.details}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Detail \u2014 collapsible when content is long */}
-        {cleanDetail && (
+        {cleanDetail && !event.progress && (
           <div>
             <div
               ref={detailRef}

@@ -4,6 +4,8 @@ import { Clipboard } from "@capacitor/clipboard"
 import { App as CapApp } from "@capacitor/app"
 import type { SlashCommand } from "../types"
 import { useLocale } from "../lib/i18n/index.js"
+import { findChainBySlug, CHAIN_SLUGS } from "../lib/skillChains"
+import { ChainCard } from "./ChainCard"
 
 const AGENTLORE_MCP_URL = "https://agentlore.vercel.app/api/mcp"
 
@@ -360,6 +362,7 @@ interface InputBarProps {
   onRemoveFile?: (path: string) => void
   disabled?: boolean
   disabledHint?: string
+  isUploadingImage?: boolean
 }
 
 // Module-level draft storage — survives unmount/remount
@@ -388,7 +391,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint }: InputBarProps) {
+export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -411,6 +414,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
       return next
     })
   }, [draftKey])
+  const [uploadPendingSend, setUploadPendingSend] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<{ type: "image" | "file"; index?: number; path?: string } | null>(null)
   const [previewImage, setPreviewImageRaw] = useState<string | null>(null)
   const setPreviewImage = useCallback((img: string | null) => { setPreviewImageRaw(img) }, [])
@@ -540,6 +544,14 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
       return keywords.some(kw => kw.toLowerCase().includes(q) || q.includes(kw.toLowerCase()))
     })
   }, [input, BUILTIN_MCP_SKILLS, SKILL_KEYWORDS])
+
+  // Match chain by exact slug (e.g. /feature, /bugfix)
+  const matchedChain = useMemo(() => {
+    if (!input.startsWith("/") || input.startsWith("//")) return null
+    const cmd = input.slice(1).trim().toLowerCase()
+    if (!cmd) return null
+    return findChainBySlug(cmd) ?? null
+  }, [input])
 
   // Trigger MCP search when input starts with / (but not //)
   useEffect(() => {
@@ -753,8 +765,11 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
     }
   }, [sentHistory.length])
 
-  const handleSend = () => {
-    if (disabled) return
+  const pendingSendRef = useRef(false)
+  // eslint-disable-next-line @typescript-eslint/no-use-before-define
+  const handleSendInnerRef = useRef<() => void>(() => {})
+
+  const handleSendInner = () => {
     const trimmed = input.trim()
     const hasFiles = attachedFiles && attachedFiles.length > 0
     if (!trimmed && pasteImages.length === 0 && !hasFiles) {
@@ -782,13 +797,36 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
     setExpandedEditor(false)
     setInterruptMode(false)
     setTaskMode(false)
+    setUploadPendingSend(false)
     // Clear attached files via callback
     if (hasFiles && onRemoveFile) attachedFiles!.forEach(f => onRemoveFile(f))
     inputRef.current?.focus()
   }
 
+  // Keep ref in sync so useEffect always calls the latest version
+  handleSendInnerRef.current = handleSendInner
+
+  // When upload finishes, auto-send if user already pressed Enter
+  useEffect(() => {
+    if (!isUploadingImage && pendingSendRef.current) {
+      pendingSendRef.current = false
+      setUploadPendingSend(false)
+      setTimeout(() => handleSendInnerRef.current(), 0)
+    }
+  }, [isUploadingImage])
+
+  const handleSend = () => {
+    if (disabled) return
+    if (isUploadingImage) {
+      pendingSendRef.current = true
+      setUploadPendingSend(true)
+      return
+    }
+    handleSendInner()
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
     }
@@ -809,6 +847,8 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
     for (const item of items) {
       if (item.type.startsWith("image/")) {
         e.preventDefault()
+        // Stop propagation so document-level paste listener doesn't double-handle
+        e.stopPropagation()
         const file = item.getAsFile()
         if (!file) return
 
@@ -892,7 +932,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   return (
     <div style={{ flexShrink: 0, position: "relative" }}>
       {/* / = Skill cards panel, // = Native commands panel */}
-      {isSlashMode && (filteredBuiltins.length > 0 || mcpSkills.length > 0 || mcpLoading || filteredSlash.length > 0) && (() => {
+      {isSlashMode && (matchedChain || filteredBuiltins.length > 0 || mcpSkills.length > 0 || mcpLoading || filteredSlash.length > 0) && (() => {
         const apiNames = new Set(mcpSkills.map(s => s.skill))
         const mergedSkills = [
           ...filteredBuiltins.filter(b => !apiNames.has(b.skill)),
@@ -915,8 +955,32 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
           zIndex: 10,
           WebkitOverflowScrolling: "touch" as never,
         }}>
-          {/* AgentLore Skills section */}
-          {(mergedSkills.length > 0 || mcpLoading) && (
+          {/* Chain card — when exact chain slug matches */}
+          {matchedChain && (
+            <div>
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: "var(--accent-primary)",
+                textTransform: "uppercase", letterSpacing: 1.2,
+                padding: "4px 8px",
+              }}>
+                {t("chain.sectionTitle")}
+              </div>
+              <ChainCard
+                chain={matchedChain}
+                t={t}
+                onSend={(instructions, display) => {
+                  addSent({ text: display, time: Date.now() })
+                  onSend(instructions)
+                  setInput("")
+                  setExpandedSkill(null)
+                  inputRef.current?.focus()
+                }}
+              />
+            </div>
+          )}
+
+          {/* AgentLore Skills section — hidden when chain is matched */}
+          {!matchedChain && (mergedSkills.length > 0 || mcpLoading) && (
             <>
               <div style={{
                 fontSize: 10, fontWeight: 700, color: "var(--accent-primary)",
@@ -1511,28 +1575,34 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
         )}
 
         {/* Send button */}
+        {uploadPendingSend && <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>}
         <button
+          onMouseDown={(e) => e.preventDefault()}
           onClick={handleSend}
           style={{
             width: 44,
             height: 44,
             borderRadius: 14,
-            background: interruptMode
-              ? "#ef4444"
-              : hasInput
-                ? "var(--accent-primary)"
-                : "var(--glass-bg)",
-            border: interruptMode
-              ? "1px solid #ef4444"
-              : hasInput
-                ? "1px solid var(--accent-primary)"
-                : "1px solid var(--glass-border)",
+            background: uploadPendingSend
+              ? "var(--accent-primary)"
+              : interruptMode
+                ? "#ef4444"
+                : hasInput
+                  ? "var(--accent-primary)"
+                  : "var(--glass-bg)",
+            border: uploadPendingSend
+              ? "1px solid var(--accent-primary)"
+              : interruptMode
+                ? "1px solid #ef4444"
+                : hasInput
+                  ? "1px solid var(--accent-primary)"
+                  : "1px solid var(--glass-border)",
             backdropFilter: "blur(16px)",
             WebkitBackdropFilter: "blur(16px)",
             boxShadow: interruptMode
               ? "0 4px 16px rgba(239,68,68,0.3)"
-              : hasInput ? "0 4px 16px rgba(59,130,246,0.3)" : "var(--glass-shadow)",
-            color: (hasInput || interruptMode) ? "#fff" : "var(--text-secondary)",
+              : (hasInput || uploadPendingSend) ? "0 4px 16px rgba(59,130,246,0.3)" : "var(--glass-shadow)",
+            color: (hasInput || interruptMode || uploadPendingSend) ? "#fff" : "var(--text-secondary)",
             cursor: "pointer",
             transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
             flexShrink: 0,
@@ -1541,7 +1611,11 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
             justifyContent: "center",
           }}
         >
-          {interruptMode ? (
+          {uploadPendingSend ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite" }}>
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          ) : interruptMode ? (
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2" />
               <line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
@@ -1611,6 +1685,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
             }}
           />
           <button
+            onMouseDown={(e) => e.preventDefault()}
             onClick={handleSend}
             style={{
               marginTop: 12,
@@ -1625,7 +1700,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
               transition: "all 0.2s",
             }}
           >
-            {t("input.send") || "Send"}
+            {uploadPendingSend ? (t("input.uploading") || "Uploading...") : (t("input.send") || "Send")}
           </button>
         </div>,
         document.body

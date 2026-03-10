@@ -145,6 +145,42 @@ function getLocalIp(): string {
   return nets[0]?.address ?? "127.0.0.1"
 }
 
+// --- Agent command builder ---
+
+function buildAgentProtocol(locale?: string): string {
+  const langHint = locale ? ` Respond in the user's language (${locale}).` : ""
+  return [
+    "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
+    `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+    "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+  ].join(" ")
+}
+
+function buildAgentCommand(agentId: string, settings?: Record<string, unknown>): string | null {
+  const s = settings || {}
+  switch (agentId) {
+    case "claude": {
+      let cmd = "claude"
+      if (s.model && s.model !== "sonnet") cmd += ` --model ${s.model}`
+      if (s.bypass) cmd += " --dangerously-skip-permissions"
+      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
+      return cmd
+    }
+    case "codex":
+      return "codex"
+    case "aider":
+      return "aider"
+    case "gemini":
+      return "gemini"
+    case "cursor":
+      return "agent"
+    case "cline":
+      return "cline"
+    default:
+      return null
+  }
+}
+
 // --- Projects ---
 
 function getProjectsPath(): string {
@@ -355,12 +391,38 @@ export function createServer(portOverride?: number) {
       }
       return
     }
-    throw err
+    log.error(`[Server error] ${err.code}: ${err.message}`)
+    // Don't throw — let the process keep running
+  })
+
+  // Self-heal: if the server closes unexpectedly, try to re-listen
+  server.on("close", () => {
+    if (!server.listening) {
+      log.warn("[Self-heal] Server closed unexpectedly — attempting re-listen in 3s...")
+      listenRetries = 0
+      setTimeout(() => {
+        try { server.listen(PORT, "0.0.0.0") } catch (e: any) {
+          log.error(`[Self-heal] Re-listen failed: ${e.message}`)
+        }
+      }, 3000)
+    }
   })
 
   const sessions = new PtyManager()
   const eventStore = new EventStore()
   const progressInterceptor = new ProgressInterceptor()
+  const sessionLastTitle = new Map<string, string>()  // Track last meaningful event title per session
+  const authDedup = new Map<string, string>()  // sessionId -> last auth URL/dedup key (URL-based dedup)
+  // Filter: only store titles that are useful as session summaries (not technical noise)
+  function isMeaningfulTitle(title: string): boolean {
+    if (!title || title.length < 3) return false
+    // Skip tool-centric noise
+    if (/^(Editing|Creating|Reading|Searching|Running command|Subagent:)/i.test(title)) return false
+    if (/^\d[\d,]*\s*tokens?\s*(used|remaining|total)?$/i.test(title)) return false
+    if (/^(Thinking|Processing|Token usage|Permission requested|Agent is requesting)/i.test(title)) return false
+    if (/^Session (started|ended|resumed)/i.test(title)) return false
+    return true
+  }
   const worktreeManagers = new Map<string, WorktreeManager>()
   const projects = loadProjects()
   const automationManager = new AutomationManager(sessions, projects)
@@ -523,7 +585,7 @@ export function createServer(portOverride?: number) {
       // Attach worktree branch info if available
       const wtm = worktreeManagers.get(s.projectId)
       const wt = wtm?.get(s.id)
-      return { ...s, worktreeBranch: wt?.branch || null }
+      return { ...s, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
     })
     res.json(allSessions)
   })
@@ -751,21 +813,23 @@ export function createServer(portOverride?: number) {
         return res.status(404).json({ error: "Session not found" })
       }
 
-      // Parse messages — read up to 512KB for preview
-      const fd = openSync(filePath, "r")
-      const buf = Buffer.alloc(524288)
-      const bytesRead = readSync(fd, buf, 0, 524288, 0)
-      closeSync(fd)
-      const chunk = buf.toString("utf-8", 0, bytesRead)
+      // Parse full JSONL file
+      const chunk = readFileSync(filePath, "utf-8")
 
-      const messages: { role: string; text: string; timestamp?: string }[] = []
-      const seenMsgIds = new Set<string>()
+      // Claude JSONL: each assistant line has ONE content block (thinking/tool_use/text).
+      // Same message.id appears multiple times with different blocks.
+      // We must collect all text blocks per message.id, in order.
+      type MsgEntry = { role: string; texts: string[]; timestamp?: string; order: number }
+      const msgMap = new Map<string, MsgEntry>() // keyed by message.id
+      const ordered: MsgEntry[] = [] // for messages without id
+      let orderCounter = 0
 
       for (const line of chunk.split("\n")) {
         if (!line.trim()) continue
         try {
           const entry = JSON.parse(line)
 
+          // User messages
           if (entry.type === "user" && entry.message?.content) {
             const text = typeof entry.message.content === "string"
               ? entry.message.content
@@ -773,22 +837,25 @@ export function createServer(portOverride?: number) {
                 ? entry.message.content.filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("\n")
                 : ""
             if (text.trim()) {
-              messages.push({ role: "user", text: text.slice(0, 500), timestamp: entry.timestamp })
+              ordered.push({ role: "user", texts: [text], timestamp: entry.timestamp, order: orderCounter++ })
             }
           }
 
+          // Assistant messages — accumulate text blocks by message.id
           if (entry.type === "assistant" && entry.message?.content) {
-            // Deduplicate: assistant messages stream as multiple JSONL lines with same message.id
-            const msgId = entry.message.id
-            if (msgId && seenMsgIds.has(msgId)) continue
-            if (msgId) seenMsgIds.add(msgId)
-
             const textBlocks = Array.isArray(entry.message.content)
               ? entry.message.content.filter((b: { type: string }) => b.type === "text")
               : []
-            const text = textBlocks.map((b: { text: string }) => b.text).join("\n")
-            if (text.trim()) {
-              messages.push({ role: "assistant", text: text.slice(0, 500), timestamp: entry.timestamp })
+            const msgId = entry.message.id
+            if (textBlocks.length > 0 && msgId) {
+              const existing = msgMap.get(msgId)
+              if (existing) {
+                for (const b of textBlocks) if (b.text) existing.texts.push(b.text)
+              } else {
+                const e: MsgEntry = { role: "assistant", texts: textBlocks.map((b: { text: string }) => b.text).filter(Boolean), timestamp: entry.timestamp, order: orderCounter++ }
+                msgMap.set(msgId, e)
+                ordered.push(e)
+              }
             }
           }
 
@@ -797,18 +864,28 @@ export function createServer(portOverride?: number) {
             const content = entry.payload.content
             if (Array.isArray(content)) {
               const text = content.filter((c: { type: string }) => c.type === "input_text").map((c: { text: string }) => c.text).join("\n")
-              if (text.trim()) messages.push({ role: "user", text: text.slice(0, 500), timestamp: entry.timestamp })
+              if (text.trim()) ordered.push({ role: "user", texts: [text], timestamp: entry.timestamp, order: orderCounter++ })
             }
           }
           if (entry.type === "response_item" && entry.payload?.role === "assistant") {
             const content = entry.payload.content
             if (Array.isArray(content)) {
               const text = content.filter((c: { type: string }) => c.type === "output_text").map((c: { text: string }) => c.text).join("\n")
-              if (text.trim()) messages.push({ role: "assistant", text: text.slice(0, 500), timestamp: entry.timestamp })
+              if (text.trim()) ordered.push({ role: "assistant", texts: [text], timestamp: entry.timestamp, order: orderCounter++ })
             }
           }
         } catch { /* skip */ }
       }
+
+      // Build final message list, sorted by order
+      const messages = ordered
+        .sort((a, b) => a.order - b.order)
+        .filter(e => e.texts.length > 0)
+        .map(e => ({
+          role: e.role,
+          text: e.texts.join("\n").slice(0, 2000),
+          timestamp: e.timestamp,
+        }))
 
       res.json(messages)
     } catch (err) {
@@ -1597,13 +1674,12 @@ export function createServer(portOverride?: number) {
       })
       const concatenated = eventLines.join("\n")
 
-      // Try LLM-based summary via cleanupVoiceText (reusing LLM infra)
+      // Try LLM-based summary with dedicated summarization prompt
       try {
-        const summaryPrompt = `Summarize the following AI agent activity log for a developer. Be concise (3-5 bullet points). Focus on what was accomplished, key changes, and any errors:\n\n${concatenated}`
-        const { cleanupVoiceText } = await import("./voice-cleanup.js")
-        const result = await cleanupVoiceText(summaryPrompt, "claude")
-        if (result.cleaned && result.cleaned.trim()) {
-          return res.json({ summary: result.cleaned })
+        const { callLlmForSummary } = await import("./llm-summary.js")
+        const summary = await callLlmForSummary(concatenated)
+        if (summary) {
+          return res.json({ summary })
         }
       } catch (llmErr: any) {
         log.warn(`Project summary LLM fallback: ${llmErr.message}`)
@@ -2073,6 +2149,7 @@ export function createServer(portOverride?: number) {
             // (keeping them in storage would cause duplicates on replay)
             const filtered = events.filter(e => e.type !== "user_message")
             if (filtered.length === 0) return
+
             log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
             const list = sessionRecentEvents.get(sid)
             if (list) {
@@ -2098,6 +2175,13 @@ export function createServer(portOverride?: number) {
             log.info(`[watcher-cb] sent to ${sentCount} clients (total clientSessions=${clientSessions.size})`)
             if (filtered.length > 0) {
               const lastEvent = filtered[filtered.length - 1]
+              // Scan entire batch for last meaningful title (not just final event)
+              for (let i = filtered.length - 1; i >= 0; i--) {
+                if (filtered[i].title && isMeaningfulTitle(filtered[i].title)) {
+                  sessionLastTitle.set(sid, filtered[i].title)
+                  break
+                }
+              }
               const activityMsg = JSON.stringify({
                 type: "session_activity",
                 sessionId: sid,
@@ -2118,19 +2202,8 @@ export function createServer(portOverride?: number) {
             progressInterceptor.onData(sid, hasToolEvents)
           }
 
-          // Stop other watchers for the same project CWD (prevent competing for JSONL files)
-          // Only stops watchers, NOT PTYs — old sessions keep running, just no real-time events
-          for (const [oldSid, oldWatcher] of sessionJsonlWatchers) {
-            if (oldSid !== session.id) {
-              // Check if this watcher is for the same project directory
-              const oldSession = sessions.get(oldSid)
-              if (oldSession && oldSession.project.cwd === sessionProject.cwd) {
-                log.info(`[attach] Stopping competing watcher: ${oldSid}`)
-                oldWatcher.stop()
-                sessionJsonlWatchers.delete(oldSid)
-              }
-            }
-          }
+          // Each session gets its own watcher. claimedJsonlFiles prevents two watchers
+          // from watching the same file. No need to kill other sessions' watchers.
 
           log.info(`[attach] watcherExists=${sessionJsonlWatchers.has(session.id)} session.id=${session.id} agentId=${agentId}`)
           if (!sessionJsonlWatchers.has(session.id)) {
@@ -2141,10 +2214,9 @@ export function createServer(portOverride?: number) {
             // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
             const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              // Skip JSONL replay when resuming — server already has stored events (events_replay)
-              const skipReplay = !!requestedSessionId
-              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, skipReplay)
-              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
+              // Always replay JSONL history — it's the authoritative source for conversation events
+              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, false)
+              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=false`)
             } else if (agentId === "codex") {
               watcher = new CodexWatcher(cb)
             } else if (agentId === "gemini") {
@@ -2166,8 +2238,17 @@ export function createServer(portOverride?: number) {
             }
           }
 
-          // Reuse event store session or create new one
-          if (!clientEventSessions.has(ws)) {
+          // Create new EventStore session when project changes (or first attach)
+          // Without this, switching projects on the same WS reuses the old EventStore
+          // session, causing events from project B to be stored under project A.
+          const prevEventSessionId = clientEventSessions.get(ws)
+          const needNewEventSession = !prevEventSessionId
+            || (() => {
+              const prev = eventStore.getSession(prevEventSessionId)
+              return prev && prev.projectId !== projectId
+            })()
+          if (needNewEventSession) {
+            if (prevEventSessionId) eventStore.endSession(prevEventSessionId)
             const eventSessionId = eventStore.startSession(projectId, agentId)
             clientEventSessions.set(ws, eventSessionId)
           }
@@ -2192,10 +2273,16 @@ export function createServer(portOverride?: number) {
               }
             }
             if (storedEvents.length > 0) {
-              // Filter out stale "waiting" decision_requests on replay (they'll be re-emitted if still relevant)
-              const replayEvents = storedEvents.filter(e =>
-                !(e.type === "decision_request" && e.status === "waiting")
-              )
+              // Replay all events including waiting decision_requests.
+              // Only filter out stale decisions that have a later tool call (meaning user already responded).
+              const lastToolIdx = storedEvents.reduce((max, e, i) =>
+                (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") ? i : max, -1)
+              const replayEvents = storedEvents.filter((e, i) => {
+                // Keep non-decision events
+                if (e.type !== "decision_request" || e.status !== "waiting") return true
+                // Keep waiting decisions that are AFTER the last tool call (still pending)
+                return i > lastToolIdx
+              })
               if (replayEvents.length > 0) {
                 ws.send(JSON.stringify({ type: "events_replay", events: replayEvents }))
               }
@@ -2239,6 +2326,16 @@ export function createServer(portOverride?: number) {
               }
               sessions.write(session.id, `${checkAndInstall}\r`)
               log.info(`Auto-install check injected for ${agentId} (bin: ${installInfo.bin})`)
+            }
+
+            // --- Auto-start agent with settings from frontend ---
+            const appSettings = msg.settings as Record<string, unknown> | undefined
+            const agentCmd = buildAgentCommand(agentId, appSettings)
+            if (agentCmd) {
+              setTimeout(() => {
+                sessions.write(session.id, `${agentCmd}\r`)
+                log.info(`[attach] Agent auto-start: ${agentCmd}`)
+              }, 1500)
             }
 
             // --- Ensure rules.md exists, then inject short rules instruction ---
@@ -2833,12 +2930,13 @@ export function createServer(portOverride?: number) {
         // but filter as safety net in case of stale adapter code
         if (e.type === "decision_request" && /Resume Session/i.test(e.title || "")) return false
         if (e.type === "decision_request") {
-          // When JSONL watcher is active, it handles response-based menus (numbered options).
-          // PTY should only provide permission prompts, login, API key, and plan confirmation.
-          // Generic "Agent is asking" menus from PTY are redundant — JSONL has better labels.
-          const isPermissionLike = /permission|login|api\s*key|execute\s*plan/i.test(e.title || "")
-          if (!isPermissionLike) return false
-
+          // Distinguish real TUI prompts from detectOptions false positives:
+          // Real TUI menus use arrow-key navigation (\x1b[B = down arrow),
+          // while detectOptions on response text uses plain number keys ("1", "2", etc.)
+          // When JSONL watcher is active, block plain-number decisions (false positives).
+          const opts = e.decision?.options || []
+          const hasArrowKeys = opts.some((o: any) => /\x1b\[/.test(o.input || ""))
+          if (!hasArrowKeys && opts.length > 0) return false  // plain number = false positive
           // Dedup: don't re-emit if same title exists within last 5 seconds
           const recent = sessionRecentEvents.get(sessionId) || []
           const hasSame = recent.some(r =>
@@ -2867,20 +2965,33 @@ export function createServer(portOverride?: number) {
       const currentAgentId = currentSession?.agentId || "unknown"
 
       // Match auth/login URLs — typically contain "login", "auth", "oauth", "callback", "device", "activate"
-      const authUrlMatch = stripped.match(/https?:\/\/[^\s)>"']+(?:login|auth|oauth|callback|device|activate|verify|consent|accounts|signin)[^\s)>"']*/i)
+      let authUrlMatch = stripped.match(/https?:\/\/[^\s)>"']+(?:login|auth|oauth|callback|device|activate|verify|consent|accounts|signin)[^\s)>"']*/i)
         // Also catch generic "open this URL" / "visit this URL" patterns
         || (/(open|visit|go to|navigate|copy|paste)\s+(this\s+)?(url|link)/i.test(stripped) && stripped.match(/https?:\/\/[^\s)>"']+/))
+      // Filter out daemon's own auth endpoints (localhost/LAN /api/auth/*)
+      if (authUrlMatch && /\/api\/auth\/(check|pair|device|cloud|new-code|totp)/i.test(authUrlMatch[0])) {
+        authUrlMatch = null
+      }
       // Also detect API key prompts (e.g. "Enter your API key", "ANTHROPIC_API_KEY not set")
-      const isApiKeyPrompt = !authUrlMatch && /(?:api.?key|ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|CURSOR_API_KEY|OPENROUTER_API_KEY).*(?:not set|not found|missing|required|enter|provide|set the)/i.test(stripped)
+      // Skip when JSONL watcher is active — agent already authenticated, any mention
+      // of "API key" in output is the agent's response text, not a real CLI prompt.
+      const jsonlActive = sessionJsonlWatchers.has(sessionId)
+      const isApiKeyPrompt = !authUrlMatch && !jsonlActive && /(?:api.?key|ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|CURSOR_API_KEY|OPENROUTER_API_KEY).*(?:not set|not found|missing|required|enter|provide|set the)/i.test(stripped)
+
+      // For auth URLs, also skip if JSONL watcher is active UNLESS the URL looks like
+      // a genuine third-party login (not the agent's own auth)
+      if (authUrlMatch && jsonlActive) {
+        authUrlMatch = null  // agent already running = not a startup auth prompt
+      }
 
       if (authUrlMatch || isApiKeyPrompt) {
         const authUrl = authUrlMatch ? authUrlMatch[0].replace(/[.,;:!?]+$/, "") : ""
         const authEventId = `auth_${sessionId}_${Date.now()}`
-        // Dedup: don't emit same event within 30s
-        const lastAuth = (sessionRecentEvents.get(sessionId) || [])
-          .filter(e => e.type === "decision_request" && (e.title === "Login required" || e.title === "API Key required"))
-          .pop()
-        if (!lastAuth || Date.now() - lastAuth.timestamp > 30000) {
+        // Dedup: URL-based — same URL only emits once per session (cleared on tool call interaction)
+        const dedupKey = authUrl || "api_key_prompt"
+        const lastKey = authDedup.get(sessionId)
+        if (dedupKey !== lastKey) {
+          authDedup.set(sessionId, dedupKey)
           const options: { label: string; input: string; style: string }[] = []
           if (authUrl) {
             options.push({ label: "Open in browser", input: `__open_url__${authUrl}`, style: "primary" })
@@ -2897,6 +3008,9 @@ export function createServer(portOverride?: number) {
             detail: authUrl || `${currentAgentId} requires an API key to start`,
             decision: { options },
           }
+          // Remove any parse-engine TUI menu events from this batch — auth URL
+          // detection takes priority so login prompts aren't shown as generic menus
+          events = events.filter(e => e.type !== "decision_request" || /^(Login|API Key) required$/.test(e.title || ""))
           events.push(authEvent)
         }
       }
@@ -3058,6 +3172,13 @@ export function createServer(portOverride?: number) {
     // Broadcast session_activity to ALL clients
     if (events.length > 0) {
       const lastEvent = events[events.length - 1]
+      // Scan entire batch for last meaningful title (not just final event)
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].title && isMeaningfulTitle(events[i].title)) {
+          sessionLastTitle.set(sessionId, events[i].title)
+          break
+        }
+      }
       const activityMsg = JSON.stringify({
         type: "session_activity",
         sessionId,
@@ -3084,6 +3205,7 @@ export function createServer(portOverride?: number) {
     resumeTimers.delete(sessionId + "_scrolled")
     resumeCursorOffset.delete(sessionId)
     resumeDecisionDone.delete(sessionId)
+    authDedup.delete(sessionId)
 
     for (const [client, sid] of clientSessions) {
       if (sid === sessionId && client.readyState === WebSocket.OPEN) {
