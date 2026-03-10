@@ -32,11 +32,27 @@ export interface ChainStepDef {
   autoRemember?: boolean
 }
 
+export interface ParallelGroup {
+  type: "parallel"
+  id: string
+  phase: ChainPhase
+  labelKey: string
+  branches: ChainStepDef[]
+  joinStrategy: "all" | "any"
+}
+
+export type ChainNode = ChainStepDef | ParallelGroup
+
+// Type guard
+export function isParallelGroup(node: ChainNode): node is ParallelGroup {
+  return "type" in node && (node as ParallelGroup).type === "parallel"
+}
+
 export interface SkillChainDef {
   slug: string
   nameKey: string // i18n key
   descKey: string // i18n key
-  steps: ChainStepDef[]
+  steps: ChainNode[]
   tokenBudget: { lite: number; deep: number }
   forcedDepthTags?: string[] // domain tags that force deep on security/review steps
 }
@@ -51,7 +67,7 @@ export const FORCED_DEPTH_TAGS = [
 // High-complexity threshold (tokens) — show warning in UI
 export const HIGH_COMPLEXITY_THRESHOLD = 10000
 
-// ── 8 Built-in Chains ──────────────────────────────────
+// ── 28 Built-in Chains ─────────────────────────────────
 
 export const BUILTIN_CHAINS: SkillChainDef[] = [
   // 1. /feature — 新功能開發
@@ -81,18 +97,25 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: false, defaultDepth: "lite",
-        skipWhen: { type: "read_only", hint: "Skip if this is a read-only feature with no user input, auth, or external data" },
-        contextFrom: ["s3"],
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: false, defaultDepth: "lite",
+            skipWhen: { type: "read_only", hint: "Skip if this is a read-only feature with no user input, auth, or external data" },
+            contextFrom: ["s3"],
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.test",
@@ -384,7 +407,906 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
       },
     ],
   },
+
+  // ── App Development ─────────────────────────────────────
+
+  // 9. /mobile-feature — 手機 App 功能開發
+  {
+    slug: "mobile-feature",
+    nameKey: "chain.mobile-feature.name",
+    descKey: "chain.mobile-feature.desc",
+    tokenBudget: { lite: 850, deep: 12000 },
+    forcedDepthTags: ["app-store", "user-data"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.deviceTest",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 10. /app-release — App 發版
+  {
+    slug: "app-release",
+    nameKey: "chain.app-release.name",
+    descKey: "chain.app-release.desc",
+    tokenBudget: { lite: 700, deep: 9000 },
+    forcedDepthTags: ["app-store"],
+    steps: [
+      {
+        id: "s1", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "abort" },
+      },
+      {
+        id: "s2", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s3", phase: "ship", labelKey: "chain.step.versionBump",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.buildApk",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.publishRelease",
+        skillSelection: { lite: "pr", standard: "pr", deep: "pr" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+    ],
+  },
+
+  // ── API Development ─────────────────────────────────────
+
+  // 11. /api-endpoint — API 端點開發
+  {
+    slug: "api-endpoint",
+    nameKey: "chain.api-endpoint.name",
+    descKey: "chain.api-endpoint.desc",
+    tokenBudget: { lite: 650, deep: 8000 },
+    forcedDepthTags: ["public-api", "auth", "user-data"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        skipWhen: { type: "simple_crud", hint: "Skip if this is a standard CRUD endpoint following existing patterns" },
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: false, defaultDepth: "lite",
+        skipWhen: { type: "low_complexity", hint: "Skip if endpoint is internal-only and self-explanatory" },
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 12. /api-migration — DB Migration
+  {
+    slug: "api-migration",
+    nameKey: "chain.api-migration.name",
+    descKey: "chain.api-migration.desc",
+    tokenBudget: { lite: 600, deep: 7500 },
+    forcedDepthTags: ["migration", "backup"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "verify", labelKey: "chain.step.testBaseline",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.migrate",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.testVerify",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 13. /api-integration — 第三方 API 整合
+  {
+    slug: "api-integration",
+    nameKey: "chain.api-integration.name",
+    descKey: "chain.api-integration.desc",
+    tokenBudget: { lite: 700, deep: 9000 },
+    forcedDepthTags: ["encryption", "auth"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s7", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // ── Security ────────────────────────────────────────────
+
+  // 14. /pentest — 滲透測試
+  {
+    slug: "pentest",
+    nameKey: "chain.pentest.name",
+    descKey: "chain.pentest.desc",
+    tokenBudget: { lite: 700, deep: 11000 },
+    forcedDepthTags: ["auth", "encryption", "user-data", "public-api"],
+    steps: [
+      {
+        id: "s1", phase: "verify", labelKey: "chain.step.reconnaissance",
+        skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
+        required: true, defaultDepth: "deep",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "verify", labelKey: "chain.step.vulnScan",
+        skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
+        required: true, defaultDepth: "deep",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.fix",
+        skillSelection: { lite: "fix", standard: "fix", deep: "backend-security-coder" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.testVerify",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.securityReport",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1", "s2", "s3"],
+        autoRemember: true,
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 15. /dep-audit — 依賴審計
+  {
+    slug: "dep-audit",
+    nameKey: "chain.dep-audit.name",
+    descKey: "chain.dep-audit.desc",
+    tokenBudget: { lite: 400, deep: 5000 },
+    forcedDepthTags: ["supply-chain"],
+    steps: [
+      {
+        id: "s1", phase: "verify", labelKey: "chain.step.depScan",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.depUpdate",
+        skillSelection: { lite: "fix", standard: "fix", deep: "fix" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // ── Automation ──────────────────────────────────────────
+
+  // 16. /bot-build — 自動化機器人開發
+  {
+    slug: "bot-build",
+    nameKey: "chain.bot-build.name",
+    descKey: "chain.bot-build.desc",
+    tokenBudget: { lite: 800, deep: 10000 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s7", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: false, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 17. /ci-cd — CI/CD Pipeline
+  {
+    slug: "ci-cd",
+    nameKey: "chain.ci-cd.name",
+    descKey: "chain.ci-cd.desc",
+    tokenBudget: { lite: 550, deep: 7000 },
+    forcedDepthTags: ["container"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "retry", maxRetries: 2 },
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: false, defaultDepth: "lite",
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: false, defaultDepth: "lite",
+        skipWhen: { type: "low_complexity", hint: "Skip if pipeline config is self-explanatory" },
+      },
+    ],
+  },
+
+  // 18. /scraper — 網頁爬蟲開發
+  {
+    slug: "scraper",
+    nameKey: "chain.scraper.name",
+    descKey: "chain.scraper.desc",
+    tokenBudget: { lite: 600, deep: 7500 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // ── AI/ML ───────────────────────────────────────────────
+
+  // 19. /ai-feature — AI 功能開發
+  {
+    slug: "ai-feature",
+    nameKey: "chain.ai-feature.name",
+    descKey: "chain.ai-feature.desc",
+    tokenBudget: { lite: 850, deep: 12000 },
+    forcedDepthTags: ["ai-agent", "user-data"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.promptDesign",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s4"],
+        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+      },
+      {
+        id: "s6", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: false, defaultDepth: "lite",
+        skipWhen: { type: "read_only", hint: "Skip if AI feature has no user input or external data exposure" },
+      },
+      {
+        id: "s7", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 20. /prompt-pipeline — Prompt 工程流水線
+  {
+    slug: "prompt-pipeline",
+    nameKey: "chain.prompt-pipeline.name",
+    descKey: "chain.prompt-pipeline.desc",
+    tokenBudget: { lite: 500, deep: 6000 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.promptDesign",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "retry", maxRetries: 2 },
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 21. /rag-setup — RAG 系統建置
+  {
+    slug: "rag-setup",
+    nameKey: "chain.rag-setup.name",
+    descKey: "chain.rag-setup.desc",
+    tokenBudget: { lite: 750, deep: 10000 },
+    forcedDepthTags: ["ai-agent"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.tdd",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // ── DevOps ──────────────────────────────────────────────
+
+  // 22. /docker-deploy — Docker 部署
+  {
+    slug: "docker-deploy",
+    nameKey: "chain.docker-deploy.name",
+    descKey: "chain.docker-deploy.desc",
+    tokenBudget: { lite: 550, deep: 7000 },
+    forcedDepthTags: ["container"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "retry", maxRetries: 1 },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: false, defaultDepth: "lite",
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 23. /monitoring — 監控系統建置
+  {
+    slug: "monitoring",
+    nameKey: "chain.monitoring.name",
+    descKey: "chain.monitoring.desc",
+    tokenBudget: { lite: 550, deep: 6500 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 24. /infra — 基礎設施即代碼
+  {
+    slug: "infra",
+    nameKey: "chain.infra.name",
+    descKey: "chain.infra.desc",
+    tokenBudget: { lite: 650, deep: 8500 },
+    forcedDepthTags: ["container", "backup"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.security",
+        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "retry", maxRetries: 1 },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.doc",
+        skillSelection: { lite: "doc", standard: "doc", deep: "documentation-templates" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // ── Content / Web ───────────────────────────────────────
+
+  // 25. /landing-page — Landing Page 開發
+  {
+    slug: "landing-page",
+    nameKey: "chain.landing-page.name",
+    descKey: "chain.landing-page.desc",
+    tokenBudget: { lite: 700, deep: 8500 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.brainstorm",
+        skillSelection: { lite: "brainstorm", standard: "concise-planning", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.pr",
+        skillSelection: { lite: "pr", standard: "pr", deep: "pr" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+    ],
+  },
+
+  // 26. /seo-audit — SEO 審計
+  {
+    slug: "seo-audit",
+    nameKey: "chain.seo-audit.name",
+    descKey: "chain.seo-audit.desc",
+    tokenBudget: { lite: 400, deep: 5000 },
+    steps: [
+      {
+        id: "s1", phase: "verify", labelKey: "chain.step.audit",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.fix",
+        skillSelection: { lite: "fix", standard: "fix", deep: "fix" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s4", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 27. /i18n — 國際化
+  {
+    slug: "i18n",
+    nameKey: "chain.i18n.name",
+    descKey: "chain.i18n.desc",
+    tokenBudget: { lite: 550, deep: 6500 },
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+      },
+      {
+        id: "s2", phase: "implement", labelKey: "chain.step.implement",
+        skillSelection: { lite: null, standard: null, deep: null },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.test",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s5", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
+
+  // 28. /perf — 效能優化
+  {
+    slug: "perf",
+    nameKey: "chain.perf.name",
+    descKey: "chain.perf.desc",
+    tokenBudget: { lite: 600, deep: 7500 },
+    steps: [
+      {
+        id: "s1", phase: "verify", labelKey: "chain.step.benchmark",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.plan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.refactor",
+        skillSelection: { lite: "refactor", standard: "refactor", deep: "kaizen" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+      },
+      {
+        id: "s4", phase: "verify", labelKey: "chain.step.benchmarkVerify",
+        skillSelection: { lite: "test", standard: "test", deep: "test" },
+        required: true, defaultDepth: "lite",
+        onFailure: { action: "fallback", fallbackSkill: "debug" },
+      },
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.review",
+        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+      },
+      {
+        id: "s6", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
 ]
+
+// ── Chain keyword map for natural language matching ─────
+
+// Each chain maps to keywords in both EN and zh-TW for NL detection
+const CHAIN_KEYWORDS: Record<string, string[]> = {
+  "feature":         ["feature", "new feature", "add", "build", "implement", "功能", "新功能", "加", "開發", "實作"],
+  "bugfix":          ["bug", "fix", "broken", "error", "crash", "修", "壞", "錯誤", "當機", "修復"],
+  "hotfix":          ["hotfix", "urgent", "emergency", "prod down", "緊急", "急修", "線上壞"],
+  "refactor":        ["refactor", "cleanup", "restructure", "rewrite", "重構", "整理", "重寫"],
+  "secure":          ["security", "audit", "harden", "vulnerability", "安全", "稽核", "加固", "漏洞"],
+  "release":         ["release", "deploy", "ship", "publish", "version", "發版", "部署", "交付", "上線"],
+  "incident":        ["incident", "breach", "hack", "compromise", "事件", "入侵", "被駭"],
+  "onboard":         ["onboard", "new project", "getting started", "understand", "上手", "新專案", "了解"],
+  "mobile-feature":  ["mobile", "app feature", "capacitor", "react native", "flutter", "手機", "行動", "app"],
+  "app-release":     ["app release", "apk", "app store", "google play", "ipa", "app 發版", "app 上架"],
+  "api-endpoint":    ["api", "endpoint", "route", "rest", "graphql", "api 端點", "接口"],
+  "api-migration":   ["migration", "schema", "database change", "alter table", "遷移", "schema 改", "資料庫"],
+  "api-integration": ["integrate", "third party", "sdk", "webhook", "oauth", "整合", "第三方", "串接"],
+  "pentest":         ["pentest", "penetration", "attack", "exploit", "owasp", "滲透", "攻擊", "弱點"],
+  "dep-audit":       ["dependency", "audit", "npm audit", "outdated", "cve", "依賴", "套件", "過期"],
+  "bot-build":       ["bot", "automation", "cron", "scheduled", "scrape", "機器人", "自動化", "排程"],
+  "ci-cd":           ["ci", "cd", "pipeline", "github actions", "workflow", "cicd", "流水線", "自動部署"],
+  "scraper":         ["scraper", "crawl", "spider", "extract", "爬蟲", "爬取", "抓取"],
+  "ai-feature":      ["ai", "llm", "gpt", "claude", "openai", "gemini", "ai 功能", "大模型"],
+  "prompt-pipeline": ["prompt", "prompt engineering", "chain of thought", "few shot", "prompt 工程", "提示詞"],
+  "rag-setup":       ["rag", "retrieval", "embedding", "vector", "knowledge base", "向量", "檢索", "知識庫"],
+  "docker-deploy":   ["docker", "container", "dockerfile", "compose", "容器", "docker 部署"],
+  "monitoring":      ["monitor", "alert", "logging", "observability", "grafana", "監控", "告警", "日誌"],
+  "infra":           ["infra", "terraform", "iac", "infrastructure", "cloud", "基礎設施", "雲端"],
+  "landing-page":    ["landing", "homepage", "marketing page", "hero", "landing page", "首頁", "行銷頁"],
+  "seo-audit":       ["seo", "meta tag", "sitemap", "lighthouse", "page speed", "搜尋優化"],
+  "i18n":            ["i18n", "internationalization", "translate", "locale", "multilingual", "國際化", "翻譯", "多語"],
+  "perf":            ["performance", "optimize", "slow", "speed", "benchmark", "效能", "優化", "太慢", "加速"],
+}
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -394,10 +1316,87 @@ export function findChainBySlug(slug: string): SkillChainDef | undefined {
   return BUILTIN_CHAINS.find(c => c.slug === slug)
 }
 
+/** Find chains by prefix (e.g. "api" matches api-endpoint, api-migration, api-integration) */
+export function findChainsByPrefix(prefix: string): SkillChainDef[] {
+  const p = prefix.toLowerCase()
+  return BUILTIN_CHAINS.filter(c => c.slug.startsWith(p) || c.slug.includes(p))
+}
+
+export interface ChainMatch {
+  chain: SkillChainDef
+  score: number // 0-1 relevance
+  matchType: "exact" | "prefix" | "keyword"
+}
+
+/** Smart chain search: exact slug > prefix > natural language keywords */
+export function searchChains(input: string, t: (key: string) => string): ChainMatch[] {
+  const trimmed = input.trim().toLowerCase()
+  if (!trimmed) return []
+
+  // 1. Exact slug match (highest priority)
+  const exact = findChainBySlug(trimmed)
+  if (exact) return [{ chain: exact, score: 1, matchType: "exact" }]
+
+  // 2. Prefix / partial slug match
+  const prefixMatches = findChainsByPrefix(trimmed)
+  if (prefixMatches.length > 0) {
+    return prefixMatches.map(c => ({
+      chain: c,
+      score: trimmed.length / c.slug.length, // longer prefix = higher score
+      matchType: "prefix" as const,
+    })).sort((a, b) => b.score - a.score)
+  }
+
+  // 3. Natural language keyword matching
+  const words = trimmed.split(/[\s,;.!?]+/).filter(w => w.length > 1)
+  if (words.length === 0) return []
+
+  const results: ChainMatch[] = []
+
+  for (const chain of BUILTIN_CHAINS) {
+    const keywords = CHAIN_KEYWORDS[chain.slug] ?? []
+    // Also match against translated name/desc
+    const name = t(chain.nameKey).toLowerCase()
+    const desc = t(chain.descKey).toLowerCase()
+    const allSearchable = [...keywords, name, desc]
+
+    let hits = 0
+    for (const word of words) {
+      if (allSearchable.some(kw => kw.includes(word) || word.includes(kw))) {
+        hits++
+      }
+    }
+
+    if (hits > 0) {
+      results.push({
+        chain,
+        score: hits / words.length,
+        matchType: "keyword",
+      })
+    }
+  }
+
+  return results
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5) // max 5 suggestions
+}
+
 export function estimateTokens(chain: SkillChainDef, depth: ChainDepth): number {
   if (depth === "lite") return chain.tokenBudget.lite
   if (depth === "deep") return chain.tokenBudget.deep
   return Math.round((chain.tokenBudget.lite + chain.tokenBudget.deep) / 2)
+}
+
+export function getStepCount(chain: SkillChainDef): number {
+  let count = 0
+  for (const node of chain.steps) {
+    if (isParallelGroup(node)) {
+      count += node.branches.length
+    } else {
+      count++
+    }
+  }
+  return count
 }
 
 export function getSkillForDepth(step: ChainStepDef, depth: ChainDepth): string | null {
@@ -421,7 +1420,7 @@ export function formatChainInstructions(
   // ── Header
   sections.push(
     `[AgentLore Skill Chain: ${chain.slug} — ${name}]`,
-    `Depth: ${depthLabel} | Steps: ${chain.steps.length} | Est. ~${tokens} tokens`,
+    `Depth: ${depthLabel} | Steps: ${getStepCount(chain)} | Est. ~${tokens} tokens`,
   )
 
   // ── Depth behavior
@@ -464,48 +1463,74 @@ export function formatChainInstructions(
   sections.push("=== PIPELINE ===")
   sections.push("")
 
-  chain.steps.forEach((step, i) => {
-    const skill = getSkillForDepth(step, depth)
-    const label = t(step.labelKey)
-    const phase = t(`chain.phase.${step.phase}`)
-    const num = i + 1
+  // Helper: find step label by ID across all nodes
+  const findStepLabel = (id: string): string => {
+    for (const n of chain.steps) {
+      if (isParallelGroup(n)) {
+        const found = n.branches.find(x => x.id === id)
+        if (found) return t(found.labelKey)
+      } else if (n.id === id) return t(n.labelKey)
+    }
+    return id
+  }
 
-    // Step header
-    let line = `${num}. [${phase}] /${skill} — ${label}`
-    if (!step.required) line += " (OPTIONAL)"
-    sections.push(line)
-
-    // Skip condition
+  // Helper: render a single step's metadata lines
+  const renderStepMeta = (step: ChainStepDef, indent: string) => {
     if (step.skipWhen) {
-      sections.push(`   SKIP IF: ${step.skipWhen.hint}`)
+      sections.push(`${indent}SKIP IF: ${step.skipWhen.hint}`)
     }
-
-    // Context inheritance
     if (step.contextFrom && step.contextFrom.length > 0) {
-      const fromLabels = step.contextFrom.map(id => {
-        const s = chain.steps.find(x => x.id === id)
-        return s ? t(s.labelKey) : id
-      })
-      sections.push(`   CONTEXT FROM: ${fromLabels.join(", ")}`)
+      sections.push(`${indent}CONTEXT FROM: ${step.contextFrom.map(findStepLabel).join(", ")}`)
     }
-
-    // Failure handling
     if (step.onFailure) {
       const f = step.onFailure
       if (f.action === "retry") {
-        sections.push(`   ON FAIL: Retry (max ${f.maxRetries ?? 1}x), then abort`)
+        sections.push(`${indent}ON FAIL: Retry (max ${f.maxRetries ?? 1}x), then abort`)
       } else if (f.action === "fallback") {
-        sections.push(`   ON FAIL: Run /${f.fallbackSkill} to fix, then re-run this step (max ${f.maxRetries ?? 1}x)`)
+        sections.push(`${indent}ON FAIL: Run /${f.fallbackSkill} to fix, then re-run (max ${f.maxRetries ?? 1}x)`)
       } else {
-        sections.push(`   ON FAIL: ABORT the chain — do not continue`)
+        sections.push(`${indent}ON FAIL: ABORT the chain`)
       }
     }
-
-    // Auto-remember
     if (step.autoRemember) {
-      sections.push(`   AUTO-REMEMBER: Save key findings to agentlore.md after this step`)
+      sections.push(`${indent}AUTO-REMEMBER: Save key findings to agentlore.md after this step`)
     }
-  })
+  }
+
+  let stepNum = 0
+
+  for (const node of chain.steps) {
+    if (isParallelGroup(node)) {
+      stepNum++
+      const joinLabel = node.joinStrategy === "all" ? "ALL must complete" : "ANY completes"
+      sections.push(`${stepNum}. [PARALLEL — ${joinLabel}]:`)
+
+      for (let bi = 0; bi < node.branches.length; bi++) {
+        const branch = node.branches[bi]
+        const skill = getSkillForDepth(branch, depth)
+        const label = t(branch.labelKey)
+        const phase = t(`chain.phase.${branch.phase}`)
+        const letter = String.fromCharCode(97 + bi)
+
+        let line = `   ${stepNum}${letter}. [${phase}] /${skill} — ${label}`
+        if (!branch.required) line += " (OPTIONAL)"
+        sections.push(line)
+        renderStepMeta(branch, "      ")
+      }
+
+      sections.push(`   → Wait for ${node.joinStrategy === "all" ? "ALL" : "ANY"} branches before proceeding.`)
+    } else {
+      stepNum++
+      const skill = getSkillForDepth(node, depth)
+      const label = t(node.labelKey)
+      const phase = t(`chain.phase.${node.phase}`)
+
+      let line = `${stepNum}. [${phase}] /${skill} — ${label}`
+      if (!node.required) line += " (OPTIONAL)"
+      sections.push(line)
+      renderStepMeta(node, "   ")
+    }
+  }
 
   // ── Forced depth rules (for deep mode)
   if (depth === "deep") {
@@ -519,7 +1544,10 @@ export function formatChainInstructions(
 
   // ── Dynamic bundle matching (deep mode security steps)
   if (depth === "deep") {
-    const securitySteps = chain.steps.filter(s =>
+    const allSteps: ChainStepDef[] = chain.steps.flatMap(n =>
+      isParallelGroup(n) ? n.branches : [n]
+    )
+    const securitySteps = allSteps.filter(s =>
       s.skillSelection.deep?.includes("security") || s.id === "s5" && s.phase === "verify"
     )
     if (securitySteps.length > 0) {

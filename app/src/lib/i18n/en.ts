@@ -687,6 +687,8 @@ export const en: Record<string, string> = {
   "automation.done": "Done",
   "automation.editPrompt": "Edit Prompt",
   "automation.nextRun": "Next run",
+  "automation.completed": "Schedule completed",
+  "automation.failed": "Schedule failed",
 
   // Template groups
   "tplGroup.git": "Git & Review",
@@ -817,6 +819,7 @@ export const en: Record<string, string> = {
   "chain.steps": "{count} steps",
   "chain.estTokens": "~{count} tokens",
   "chain.highComplexity": "High token cost — consider splitting across sessions or switching to Standard depth for non-critical steps.",
+  "chain.suggested": "Suggested Chains",
   "chain.start": "Start",
   "chain.depth.lite": "Lite",
   "chain.depth.standard": "Standard",
@@ -826,6 +829,10 @@ export const en: Record<string, string> = {
   "chain.phase.verify": "Verify",
   "chain.phase.ship": "Ship",
   "chain.optional": "optional",
+  "chain.parallel.all": "ALL",
+  "chain.parallel.any": "ANY",
+  "chain.parallel.label": "Parallel",
+  "chain.forkedFrom": "Forked from /{slug}",
 
   // Chain step labels (shared across chains)
   "chain.step.brainstorm": "Brainstorm",
@@ -844,12 +851,28 @@ export const en: Record<string, string> = {
   "chain.step.onboard": "Onboard",
   "chain.step.explain": "Explain",
   "chain.step.remember": "Remember",
+  "chain.step.parallelVerify": "Parallel Verify",
   "chain.step.testBaseline": "Test Baseline",
   "chain.step.testVerify": "Test Verify",
   "chain.step.investigate": "Investigate",
   "chain.step.contain": "Contain",
   "chain.step.securityVerify": "Security Verify",
   "chain.step.postmortem": "Postmortem",
+  "chain.step.deviceTest": "Device Test",
+  "chain.step.versionBump": "Version Bump",
+  "chain.step.buildApk": "Build APK",
+  "chain.step.publishRelease": "Publish Release",
+  "chain.step.migrate": "Migrate",
+  "chain.step.depScan": "Dependency Scan",
+  "chain.step.depUpdate": "Update Dependencies",
+  "chain.step.reconnaissance": "Recon",
+  "chain.step.vulnScan": "Vulnerability Scan",
+  "chain.step.securityReport": "Security Report",
+  "chain.step.implement": "Implement",
+  "chain.step.promptDesign": "Prompt Design",
+  "chain.step.audit": "Audit",
+  "chain.step.benchmark": "Benchmark",
+  "chain.step.benchmarkVerify": "Benchmark Verify",
 
   // Chain names and descriptions
   "chain.feature.name": "Feature",
@@ -868,4 +891,58 @@ export const en: Record<string, string> = {
   "chain.incident.desc": "Security incident response",
   "chain.onboard.name": "Onboard",
   "chain.onboard.desc": "Get up to speed on a project",
+
+  // App Development
+  "chain.mobile-feature.name": "Mobile Feature",
+  "chain.mobile-feature.desc": "Mobile app feature with device testing",
+  "chain.app-release.name": "App Release",
+  "chain.app-release.desc": "Build, test, and publish app release",
+
+  // API Development
+  "chain.api-endpoint.name": "API Endpoint",
+  "chain.api-endpoint.desc": "Secure API endpoint with validation",
+  "chain.api-migration.name": "DB Migration",
+  "chain.api-migration.desc": "Safe database schema migration",
+  "chain.api-integration.name": "API Integration",
+  "chain.api-integration.desc": "Third-party API integration",
+
+  // Security
+  "chain.pentest.name": "Pentest",
+  "chain.pentest.desc": "Penetration testing and remediation",
+  "chain.dep-audit.name": "Dep Audit",
+  "chain.dep-audit.desc": "Dependency vulnerability audit",
+
+  // Automation
+  "chain.bot-build.name": "Bot Build",
+  "chain.bot-build.desc": "Automation bot development",
+  "chain.ci-cd.name": "CI/CD",
+  "chain.ci-cd.desc": "CI/CD pipeline setup",
+  "chain.scraper.name": "Scraper",
+  "chain.scraper.desc": "Web scraper development",
+
+  // AI/ML
+  "chain.ai-feature.name": "AI Feature",
+  "chain.ai-feature.desc": "AI-powered feature development",
+  "chain.prompt-pipeline.name": "Prompt Pipeline",
+  "chain.prompt-pipeline.desc": "Prompt engineering workflow",
+  "chain.rag-setup.name": "RAG Setup",
+  "chain.rag-setup.desc": "RAG system architecture and build",
+
+  // DevOps
+  "chain.docker-deploy.name": "Docker Deploy",
+  "chain.docker-deploy.desc": "Docker containerization and deploy",
+  "chain.monitoring.name": "Monitoring",
+  "chain.monitoring.desc": "Monitoring and alerting setup",
+  "chain.infra.name": "Infrastructure",
+  "chain.infra.desc": "Infrastructure as code",
+
+  // Content / Web
+  "chain.landing-page.name": "Landing Page",
+  "chain.landing-page.desc": "Landing page design and build",
+  "chain.seo-audit.name": "SEO Audit",
+  "chain.seo-audit.desc": "SEO audit and optimization",
+  "chain.i18n.name": "i18n",
+  "chain.i18n.desc": "Internationalization setup",
+  "chain.perf.name": "Performance",
+  "chain.perf.desc": "Performance profiling and optimization",
 }
