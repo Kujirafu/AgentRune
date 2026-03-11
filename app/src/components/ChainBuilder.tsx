@@ -3,6 +3,7 @@ import { useState, useCallback, useEffect, useRef } from "react"
 import type { ChainNode, ChainStepDef, ParallelGroup, ChainPhase, StepAgentConfig, SkillChainDef } from "../lib/skillChains"
 import { isParallelGroup, BUILTIN_CHAINS, resolveChainText, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
+import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -140,23 +141,6 @@ function nextId(prefix = "s"): string {
   return `${prefix}${Date.now()}-${++_idCounter}`
 }
 
-function cycleStepAgent(step: ChainStepDef, agentIds: string[]): ChainStepDef {
-  const current = step.agentConfig?.agentId
-  const idx = current ? agentIds.indexOf(current) : -1
-  const next = agentIds[(idx + 1) % agentIds.length]
-  return { ...step, agentConfig: { agentId: next, model: AGENT_MODELS[next]?.[0] || "default" } }
-}
-
-function cycleStepModel(step: ChainStepDef): ChainStepDef {
-  const agentId = step.agentConfig?.agentId
-  if (!agentId) return step
-  const models = AGENT_MODELS[agentId] || ["default"]
-  const current = step.agentConfig?.model || "default"
-  const idx = models.indexOf(current)
-  const next = models[(idx + 1) % models.length]
-  return { ...step, agentConfig: { ...step.agentConfig, model: next } }
-}
-
 function createStepFromPalette(skill: typeof PALETTE_SKILLS[number]): ChainStepDef {
   return {
     id: nextId("s"),
@@ -190,18 +174,39 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
   const { t: tLocale } = useLocale()
   const t = tProp || tLocale
 
-  const [view, setView] = useState<"list" | "editor">("list")
+  const [view, setView] = useState<"list" | "editor" | "executing">("list")
   const [draft, setDraft] = useState<ChainDraft>({
     name: "", description: "", slug: "", steps: [],
   })
   const [showPalette, setShowPalette] = useState(false)
   const [insertIndex, setInsertIndex] = useState(-1)
+  // "branch:<stepIndex>" means adding a branch to step at stepIndex (creates parallel group)
+  const [paletteMode, setPaletteMode] = useState<"insert" | "branch" | "replace">("insert")
+  const [branchTargetIndex, setBranchTargetIndex] = useState(-1)
+  const [replaceStepId, setReplaceStepId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [paletteSearch, setPaletteSearch] = useState("")
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [mcpResults, setMcpResults] = useState<McpSkillResult[]>([])
   const [mcpLoading, setMcpLoading] = useState(false)
+  const [showAgentPicker, setShowAgentPicker] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{ title: string; onConfirm: () => void } | null>(null)
+  // ─── Execution state ───────────────────────────────────────
+  const [executionId, setExecutionId] = useState<string | null>(null)
+  const [executionStatus, setExecutionStatus] = useState<string>("QUEUED")
+  const [executionStep, setExecutionStep] = useState(0)
+  const [branchRuns, setBranchRuns] = useState<Array<{
+    id: string; parallelGroupId: string; branchIndex: number
+    status: string; stepSnapshot: Record<string, unknown>
+    output?: Record<string, unknown>; error?: string; tokenCount?: number
+    startedAt?: string; completedAt?: string
+  }>>([])
+  const [executionError, setExecutionError] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const mcpDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -230,11 +235,46 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
     }
   }, [])
 
+  // ─── Android back button ────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      // Close overlays first (innermost → outermost)
+      if (confirmDialog) { setConfirmDialog(null); return }
+      if (showPalette) { setShowPalette(false); setMcpResults([]); return }
+      if (showAgentPicker) { setShowAgentPicker(null); return }
+      if (view === "executing") {
+        // From executing → back to editor (stop polling)
+        if (pollRef.current) clearTimeout(pollRef.current)
+        setView("editor")
+        return
+      }
+      if (view === "editor") {
+        if (dirty) {
+          setConfirmDialog({
+            title: t("builder.unsavedConfirm"),
+            onConfirm: () => { setDirty(false); setView("list") },
+          })
+        } else {
+          setView("list")
+        }
+        return
+      }
+      onBack()
+    }
+    document.addEventListener("app:back", handler, true)
+    return () => document.removeEventListener("app:back", handler, true)
+  }, [view, dirty, showPalette, showAgentPicker, confirmDialog, onBack, t])
+
   // ─── Fetch my chains on mount ───────────────────────────────
   useEffect(() => {
     if (view !== "list") return
     setMyChainsLoading(true)
-    fetch("https://agentlore.vercel.app/api/chains?userId=me")
+    const token = localStorage.getItem("agentrune_phone_token")
+    fetch("https://agentlore.vercel.app/api/chains?userId=me", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then(r => r.ok ? r.json() : { data: [] })
       .then(d => setMyChains(d.data || []))
       .catch(() => setMyChains([]))
@@ -249,13 +289,26 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
       steps.splice(index, 0, step)
       return { ...d, steps }
     })
+    setDirty(true)
   }, [])
 
   const removeStep = useCallback((id: string) => {
     setDraft(d => ({
       ...d,
-      steps: d.steps.filter(n => getStepId(n) !== id),
+      steps: d.steps.map(n => {
+        // If it's a parallel group, try to remove the branch from it
+        if (isParallelGroup(n)) {
+          const remaining = (n as ParallelGroup).branches.filter(b => b.id !== id)
+          if (remaining.length < (n as ParallelGroup).branches.length) {
+            // Removed a branch — if only 1 left, dissolve to single step
+            if (remaining.length <= 1) return remaining[0] || null
+            return { ...n, branches: remaining }
+          }
+        }
+        return n
+      }).filter((n): n is ChainNode => n !== null && getStepId(n) !== id),
     }))
+    setDirty(true)
   }, [])
 
   const moveStep = useCallback((fromIndex: number, toIndex: number) => {
@@ -268,23 +321,69 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
     })
   }, [])
 
-  const createParallelGroup = useCallback((index: number) => {
+  // Replace a step's skill in-place (keeps position, agent config, etc.)
+  const replaceStep = useCallback((stepId: string, newSkill: typeof PALETTE_SKILLS[number]) => {
+    setDraft(d => ({
+      ...d,
+      steps: d.steps.map(n => {
+        if (!isParallelGroup(n) && (n as ChainStepDef).id === stepId) {
+          return { ...(n as ChainStepDef), labelKey: newSkill.labelKey, phase: newSkill.phase, skillSelection: { lite: newSkill.id, standard: newSkill.id, deep: newSkill.id } }
+        }
+        return n
+      }),
+    }))
+    setDirty(true)
+  }, [])
+
+  // Open palette in "replace" mode — user picks a skill to swap with existing step
+  const startReplace = useCallback((stepId: string) => {
+    setReplaceStepId(stepId)
+    setPaletteMode("replace")
+    setPaletteSearch("")
+    setMcpResults([])
+    setShowPalette(true)
+  }, [])
+
+  // Open palette in "branch" mode — user picks a skill to run in parallel with step at index
+  const startAddBranch = useCallback((index: number) => {
+    setBranchTargetIndex(index)
+    setPaletteMode("branch")
+    setPaletteSearch("")
+    setMcpResults([])
+    setShowPalette(true)
+  }, [])
+
+  // Actually create the parallel group once user picks a skill from palette
+  const addBranchToStep = useCallback((index: number, newStep: ChainStepDef) => {
     setDraft(d => {
       const steps = [...d.steps]
-      const a = steps[index]
-      const b = steps[index + 1]
-      if (!a || !b || isParallelGroup(a) || isParallelGroup(b)) return d
+      const target = steps[index]
+      if (!target) return d
+      if (isParallelGroup(target)) {
+        // Add branch to existing parallel group
+        if (target.branches.length >= 4) return d // max branches
+        return {
+          ...d,
+          steps: steps.map((n, i) =>
+            i === index && isParallelGroup(n)
+              ? { ...n, branches: [...n.branches, newStep] }
+              : n
+          ),
+        }
+      }
+      // Convert single step + new step into parallel group
       const pg: ParallelGroup = {
         type: "parallel",
         id: nextId("p"),
-        phase: (a as ChainStepDef).phase,
+        phase: (target as ChainStepDef).phase,
         labelKey: "chain.step.parallelVerify",
-        branches: [a as ChainStepDef, b as ChainStepDef],
+        branches: [target as ChainStepDef, newStep],
         joinStrategy: "all",
       }
-      steps.splice(index, 2, pg)
+      steps.splice(index, 1, pg)
       return { ...d, steps }
     })
+    setDirty(true)
   }, [])
 
   const dissolveParallelGroup = useCallback((pgId: string) => {
@@ -316,7 +415,7 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
 
   const agentIds = Object.keys(AGENT_MODELS)
 
-  const cycleAgent = useCallback((stepId: string) => {
+  const setStepAgent = useCallback((stepId: string, agentId: string, model: string) => {
     setDraft(d => ({
       ...d,
       steps: d.steps.map(node => {
@@ -324,34 +423,17 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
           return {
             ...node,
             branches: node.branches.map(b =>
-              b.id === stepId ? cycleStepAgent(b, agentIds) : b
+              b.id === stepId ? { ...b, agentConfig: { agentId, model } } : b
             ),
           }
         }
         return (node as ChainStepDef).id === stepId
-          ? cycleStepAgent(node as ChainStepDef, agentIds)
+          ? { ...(node as ChainStepDef), agentConfig: { agentId, model } }
           : node
       }),
     }))
-  }, [agentIds])
-
-  const cycleModel = useCallback((stepId: string) => {
-    setDraft(d => ({
-      ...d,
-      steps: d.steps.map(node => {
-        if (isParallelGroup(node)) {
-          return {
-            ...node,
-            branches: node.branches.map(b =>
-              b.id === stepId ? cycleStepModel(b) : b
-            ),
-          }
-        }
-        return (node as ChainStepDef).id === stepId
-          ? cycleStepModel(node as ChainStepDef)
-          : node
-      }),
-    }))
+    setDirty(true)
+    setShowAgentPicker(null)
   }, [])
 
   // ─── Drag reorder (long press) ────────────────────────────────
@@ -397,6 +479,7 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
 
   const openPalette = useCallback((index: number) => {
     setInsertIndex(index)
+    setPaletteMode("insert")
     setPaletteSearch("")
     setMcpResults([])
     setShowPalette(true)
@@ -406,6 +489,9 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
     setShowPalette(false)
     setMcpResults([])
   }, [])
+
+  // Swipe-to-dismiss for palette sheet
+  const { sheetRef: paletteRef, handlers: paletteSwipeHandlers } = useSwipeToDismiss({ onDismiss: closePalette })
 
   // MCP skill search — debounced, triggers on 2+ chars
   const searchMcpSkills = useCallback((query: string) => {
@@ -438,24 +524,39 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
   }, [searchMcpSkills])
 
   const handlePaletteSelect = useCallback((skill: typeof PALETTE_SKILLS[number]) => {
-    const step = createStepFromPalette(skill)
-    addStep(insertIndex, step)
+    if (paletteMode === "replace" && replaceStepId) {
+      replaceStep(replaceStepId, skill)
+    } else if (paletteMode === "branch") {
+      const step = createStepFromPalette(skill)
+      addBranchToStep(branchTargetIndex, step)
+    } else {
+      const step = createStepFromPalette(skill)
+      addStep(insertIndex, step)
+    }
     closePalette()
-  }, [insertIndex, addStep, closePalette])
+  }, [insertIndex, paletteMode, branchTargetIndex, replaceStepId, addStep, addBranchToStep, replaceStep, closePalette])
 
   // Select an MCP skill result → create step
   const handleMcpSelect = useCallback((mcpSkill: McpSkillResult) => {
-    const step: ChainStepDef = {
-      id: nextId("s"),
-      phase: inferMcpPhase(mcpSkill.skill),
-      labelKey: mcpSkill.skill, // literal name (not i18n key)
-      skillSelection: { lite: mcpSkill.skill, standard: mcpSkill.skill, deep: mcpSkill.skill },
-      required: true,
-      defaultDepth: "standard" as const,
+    if (paletteMode === "replace" && replaceStepId) {
+      replaceStep(replaceStepId, { id: mcpSkill.skill, labelKey: mcpSkill.skill, phase: inferMcpPhase(mcpSkill.skill) })
+    } else {
+      const step: ChainStepDef = {
+        id: nextId("s"),
+        phase: inferMcpPhase(mcpSkill.skill),
+        labelKey: mcpSkill.skill, // literal name (not i18n key)
+        skillSelection: { lite: mcpSkill.skill, standard: mcpSkill.skill, deep: mcpSkill.skill },
+        required: true,
+        defaultDepth: "standard" as const,
+      }
+      if (paletteMode === "branch") {
+        addBranchToStep(branchTargetIndex, step)
+      } else {
+        addStep(insertIndex, step)
+      }
     }
-    addStep(insertIndex, step)
     closePalette()
-  }, [insertIndex, addStep, closePalette])
+  }, [insertIndex, paletteMode, branchTargetIndex, replaceStepId, addStep, addBranchToStep, replaceStep, closePalette])
 
   const filteredSkills = paletteSearch
     ? PALETTE_SKILLS.filter(s =>
@@ -471,45 +572,161 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
 
   // ─── Save handler ─────────────────────────────────────────────
 
+  const getAuthHeaders = useCallback((): Record<string, string> => {
+    const token = localStorage.getItem("agentrune_phone_token")
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (token) headers["Authorization"] = `Bearer ${token}`
+    return headers
+  }, [])
+
   const handleSave = useCallback(async () => {
     if (!draft.name || draft.steps.length < 1) return
     setSaving(true)
+    setSaveResult(null)
     try {
       const apiBase = "https://agentlore.vercel.app"
       const method = draft.slug ? "PUT" : "POST"
       const url = draft.slug
         ? `${apiBase}/api/chains/${draft.slug}`
         : `${apiBase}/api/chains`
+      const desc = draft.description || draft.name
       const res = await fetch(url, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           name: draft.name,
-          description: draft.description || draft.name,
+          description: desc.length < 20 ? desc.padEnd(20, " — AI workflow chain") : desc,
           steps: draft.steps,
           forkedFrom: draft.forkedFromSlug,
         }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Save failed" }))
-        console.error("[ChainBuilder] save failed:", err)
+        setSaveResult({ ok: false, msg: err.error || err.message || `HTTP ${res.status}` })
         return
       }
       const { data } = await res.json()
       setDraft(d => ({ ...d, slug: data.slug }))
+      setDirty(false)
+      setSaveResult({ ok: true, msg: t("builder.saved") || "Saved!" })
+      setTimeout(() => setSaveResult(null), 3000)
+    } catch (e) {
+      setSaveResult({ ok: false, msg: e instanceof Error ? e.message : "Network error" })
     } finally {
       setSaving(false)
     }
-  }, [draft])
+  }, [draft, t, getAuthHeaders])
+
+  // ─── Execute handler ────────────────────────────────────────
+  const handleExecute = useCallback(async () => {
+    if (!draft.slug) {
+      setSaveResult({ ok: false, msg: t("builder.saveFirst") })
+      return
+    }
+    setExecutionError(null)
+    setExecutionStatus("QUEUED")
+    setExecutionStep(0)
+    setBranchRuns([])
+    setView("executing")
+
+    try {
+      const apiBase = "https://agentlore.vercel.app"
+      // Collect agent model from first step that has one, or session default
+      const firstStepWithAgent = draft.steps.find(s => {
+        if (isParallelGroup(s)) return false
+        return (s as ChainStepDef).agentConfig?.model
+      }) as ChainStepDef | undefined
+      const agentModel = firstStepWithAgent?.agentConfig?.model
+
+      const res = await fetch(`${apiBase}/api/chains/${draft.slug}/executions`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          depth: "standard",
+          agentModel: agentModel ?? undefined,
+          agentConfig: { preserveUserSelections: true },
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to start" }))
+        setExecutionError(err.error || `HTTP ${res.status}`)
+        setExecutionStatus("FAILED")
+        return
+      }
+      const { data } = await res.json()
+      setExecutionId(data.id)
+      setExecutionStatus(data.status)
+      if (data.branchRuns) setBranchRuns(data.branchRuns)
+      // Start polling
+      startPolling(data.id)
+    } catch (e) {
+      setExecutionError(e instanceof Error ? e.message : "Network error")
+      setExecutionStatus("FAILED")
+    }
+  }, [draft, t, getAuthHeaders])
+
+  const startPolling = useCallback((execId: string) => {
+    if (pollRef.current) clearTimeout(pollRef.current)
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `https://agentlore.vercel.app/api/chains/${draft.slug}/executions/${execId}`,
+          { headers: getAuthHeaders() },
+        )
+        if (!res.ok) return
+        const { data } = await res.json()
+        setExecutionStatus(data.status)
+        setExecutionStep(data.currentStep ?? 0)
+        if (data.branchRuns) setBranchRuns(data.branchRuns)
+        if (data.error) setExecutionError(data.error)
+        // Keep polling if still running
+        if (data.status === "QUEUED" || data.status === "RUNNING") {
+          pollRef.current = setTimeout(poll, 2000)
+        }
+      } catch {
+        // Retry on network error
+        pollRef.current = setTimeout(poll, 5000)
+      }
+    }
+    pollRef.current = setTimeout(poll, 1500)
+  }, [draft.slug, getAuthHeaders])
+
+  // Cleanup polling on unmount or view change
+  useEffect(() => {
+    return () => { if (pollRef.current) clearTimeout(pollRef.current) }
+  }, [])
+
+  const handleCancelExecution = useCallback(async () => {
+    if (!executionId || !draft.slug) return
+    try {
+      await fetch(
+        `https://agentlore.vercel.app/api/chains/${draft.slug}/executions/${executionId}`,
+        {
+          method: "PATCH",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ status: "CANCELLED" }),
+        },
+      )
+      setExecutionStatus("CANCELLED")
+      if (pollRef.current) clearTimeout(pollRef.current)
+    } catch { /* ignore */ }
+  }, [executionId, draft.slug, getAuthHeaders])
 
   // ─── Delete handler ─────────────────────────────────────────
-  const handleDeleteChain = useCallback(async (slug: string) => {
-    if (!confirm(t("builder.deleteConfirm"))) return
-    try {
-      await fetch(`https://agentlore.vercel.app/api/chains/${slug}`, { method: "DELETE" })
-      setMyChains(prev => prev.filter(c => c.slug !== slug))
-    } catch { /* ignore */ }
-  }, [t])
+  const handleDeleteChain = useCallback((slug: string) => {
+    setConfirmDialog({
+      title: t("builder.deleteConfirm"),
+      onConfirm: async () => {
+        try {
+          await fetch(`https://agentlore.vercel.app/api/chains/${slug}`, {
+            method: "DELETE",
+            headers: getAuthHeaders(),
+          })
+          setMyChains(prev => prev.filter(c => c.slug !== slug))
+        } catch { /* ignore */ }
+      },
+    })
+  }, [t, getAuthHeaders])
 
   // ─── Load chain into editor ─────────────────────────────────
   const loadChainToEditor = useCallback((chain: { name: string; description: string; slug: string; steps: ChainNode[]; forkedFromSlug?: string }) => {
@@ -575,14 +792,20 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
               <GripIcon size={12} />
             </div>
           )}
-          {/* Step name */}
-          <div style={{
-            flex: 1, fontSize: 13, fontWeight: 600,
-            color: "var(--text-primary)",
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-          }}>
+          {/* Step name — tap to replace skill */}
+          <button
+            onClick={(e) => { e.stopPropagation(); startReplace(step.id) }}
+            onTouchStart={(e) => e.stopPropagation()}
+            style={{
+              flex: 1, fontSize: 13, fontWeight: 600,
+              color: "var(--text-primary)",
+              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              background: "none", border: "none", padding: 0,
+              cursor: "pointer", textAlign: "left",
+            }}
+          >
             {t(step.labelKey) || step.labelKey}
-          </div>
+          </button>
           {/* Phase badge */}
           <div style={{
             fontSize: 9, fontWeight: 600, textTransform: "uppercase" as const,
@@ -593,16 +816,32 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
           }}>
             {t(`builder.phase.${step.phase}`)}
           </div>
+          {/* Make parallel button (only for non-parallel steps) */}
+          {!inParallel && (
+            <button
+              onClick={() => startAddBranch(index)}
+              title={t("builder.makeBranch")}
+              style={{
+                background: "none", border: "none", padding: 2,
+                color: "var(--text-secondary)", cursor: "pointer",
+                opacity: 0.5, display: "flex", alignItems: "center",
+              }}
+            >
+              <GitForkIcon size={12} />
+            </button>
+          )}
           {/* Delete button */}
           <button
-            onClick={() => removeStep(step.id)}
+            onClick={(e) => { e.stopPropagation(); removeStep(step.id) }}
+            onTouchStart={(e) => e.stopPropagation()}
             style={{
-              background: "none", border: "none", padding: 2,
+              background: "none", border: "none", padding: 6,
               color: "var(--text-secondary)", cursor: "pointer",
               opacity: 0.5, display: "flex", alignItems: "center",
+              margin: -4,
             }}
           >
-            <XIcon size={12} />
+            <XIcon size={14} />
           </button>
         </div>
 
@@ -614,32 +853,68 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
         }}>
           <BotIcon size={12} />
           <button
-            onClick={() => cycleAgent(step.id)}
+            onClick={() => setShowAgentPicker(showAgentPicker === step.id ? null : step.id)}
             style={{
               fontSize: 10, fontWeight: 600,
-              color: "var(--text-secondary)",
+              color: step.agentConfig?.agentId ? "var(--accent-primary)" : "var(--text-secondary)",
               background: "var(--glass-bg)",
               border: "1px solid var(--glass-border)",
               borderRadius: 4, padding: "2px 6px",
               cursor: "pointer",
             }}
           >
-            {step.agentConfig?.agentId || t("builder.sessionDefault")}
+            {step.agentConfig?.agentId
+              ? `${step.agentConfig.agentId} / ${step.agentConfig.model || "default"}`
+              : t("builder.sessionDefault")}
           </button>
-          {step.agentConfig?.agentId && (
-            <button
-              onClick={() => cycleModel(step.id)}
-              style={{
-                fontSize: 10, color: "var(--accent-primary)",
-                background: "var(--accent-primary-bg)",
-                border: "none", borderRadius: 4,
-                padding: "2px 6px", cursor: "pointer",
-              }}
-            >
-              {step.agentConfig.model || "default"}
-            </button>
-          )}
         </div>
+        {/* Agent picker — flat chip grid */}
+        {showAgentPicker === step.id && (
+          <div style={{
+            marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4,
+          }}>
+            {/* Session default */}
+            {(() => {
+              const isActive = !step.agentConfig?.agentId
+              return (
+                <button
+                  key="__auto__"
+                  onClick={() => { setStepAgent(step.id, "", ""); setShowAgentPicker(null) }}
+                  style={{
+                    fontSize: 10, fontWeight: 600, padding: "4px 8px",
+                    borderRadius: 6, cursor: "pointer",
+                    border: isActive ? "1px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+                    background: isActive ? "var(--accent-primary-bg)" : "transparent",
+                    color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
+                  }}
+                >
+                  {t("builder.inheritSession")}
+                </button>
+              )
+            })()}
+            {/* Agent · Model chips */}
+            {agentIds.flatMap(aid =>
+              (AGENT_MODELS[aid] || ["default"]).map(model => {
+                const isActive = step.agentConfig?.agentId === aid && step.agentConfig?.model === model
+                return (
+                  <button
+                    key={`${aid}-${model}`}
+                    onClick={() => { setStepAgent(step.id, aid, model); setShowAgentPicker(null) }}
+                    style={{
+                      fontSize: 10, fontWeight: 600, padding: "4px 8px",
+                      borderRadius: 6, cursor: "pointer",
+                      border: isActive ? "1px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+                      background: isActive ? "var(--accent-primary-bg)" : "transparent",
+                      color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
+                    }}
+                  >
+                    {aid === "terminal" ? "terminal" : `${aid} · ${model}`}
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -674,32 +949,8 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
       display: "flex", flexDirection: "column", alignItems: "center",
       padding: "2px 0",
     }}>
-      {/* Vertical line */}
       <div style={{
-        width: 2, height: 16,
-        background: "var(--glass-border)",
-        borderRadius: 1,
-      }} />
-      {/* Branch button */}
-      {index < draft.steps.length - 1 && !isParallelGroup(draft.steps[index]) && !isParallelGroup(draft.steps[index + 1]) && (
-        <button
-          onClick={() => createParallelGroup(index)}
-          style={{
-            fontSize: 9, fontWeight: 600,
-            color: "var(--text-secondary)",
-            background: "transparent",
-            border: "1px dashed var(--glass-border)",
-            borderRadius: 4, padding: "1px 6px",
-            cursor: "pointer", margin: "2px 0",
-            opacity: 0.5,
-          }}
-        >
-          <GitForkIcon size={10} /> {t("builder.addBranch")}
-        </button>
-      )}
-      {/* Vertical line */}
-      <div style={{
-        width: 2, height: 16,
+        width: 2, height: 20,
         background: "var(--glass-border)",
         borderRadius: 1,
       }} />
@@ -713,59 +964,116 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
       <div
         key={pg.id}
         data-node-index={index}
-        style={{
-          border: `1px solid ${phaseColor.line}`,
-          borderRadius: 12,
-          padding: 10,
-          background: phaseColor.bg,
-          position: "relative",
-        }}
+        style={{ position: "relative" }}
       >
-        {/* Parallel header */}
+        {/* Fork split indicator */}
         <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          marginBottom: 8,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          gap: 6, padding: "4px 0 8px",
         }}>
+          <div style={{ flex: 1, height: 1, background: phaseColor.line }} />
           <div style={{
-            display: "flex", alignItems: "center", gap: 6,
+            display: "flex", alignItems: "center", gap: 4,
+            padding: "2px 8px", borderRadius: 10,
+            background: phaseColor.bg,
+            border: `1px solid ${phaseColor.line}`,
           }}>
-            <GitForkIcon size={12} />
-            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)" }}>
-              {t("chain.parallel.label")}
+            <GitForkIcon size={10} />
+            <span style={{ fontSize: 9, fontWeight: 700, color: phaseColor.dot, textTransform: "uppercase" }}>
+              {pg.joinStrategy === "all" ? t("builder.joinAll") : t("builder.joinAny")}
             </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            {/* Join strategy toggle */}
             <button
               onClick={() => toggleJoinStrategy(pg.id)}
               style={{
-                fontSize: 9, fontWeight: 700,
-                color: pg.joinStrategy === "all" ? "#34d399" : "#fbbf24",
-                background: pg.joinStrategy === "all" ? "#34d39918" : "#fbbf2418",
-                border: "none", borderRadius: 4,
-                padding: "2px 8px", cursor: "pointer",
-                textTransform: "uppercase" as const,
+                background: "none", border: "none", padding: 0,
+                color: "var(--text-secondary)", cursor: "pointer", fontSize: 9,
+                opacity: 0.6,
               }}
             >
-              {pg.joinStrategy === "all" ? t("builder.joinAll") : t("builder.joinAny")}
+              ↔
             </button>
-            {/* Dissolve button */}
             <button
               onClick={() => dissolveParallelGroup(pg.id)}
               style={{
-                background: "none", border: "none", padding: 2,
-                color: "var(--text-secondary)", cursor: "pointer", opacity: 0.5,
+                background: "none", border: "none", padding: 0,
+                color: "var(--text-secondary)", cursor: "pointer", opacity: 0.4,
               }}
             >
-              <XIcon size={12} />
+              <XIcon size={10} />
             </button>
           </div>
+          <div style={{ flex: 1, height: 1, background: phaseColor.line }} />
         </div>
-        {/* Branch cards side by side */}
+
+        {/* Branch cards — horizontal scroll when overflow */}
         <div style={{
           display: "flex", gap: 8,
+          overflowX: "auto",
+          WebkitOverflowScrolling: "touch" as never,
+          scrollSnapType: "x mandatory",
+          paddingBottom: 4,
+          msOverflowStyle: "none",
+          scrollbarWidth: "none",
         }}>
-          {pg.branches.map(branch => renderStepCard(branch, index, true))}
+          {pg.branches.map(branch => (
+            <div key={branch.id} style={{
+              flex: "0 0 auto",
+              width: pg.branches.length <= 2 ? undefined : "min(45%, 160px)",
+              minWidth: pg.branches.length <= 2 ? 0 : 120,
+              ...(pg.branches.length <= 2 ? { flex: 1 } : {}),
+              scrollSnapAlign: "start",
+            }}>
+              {/* Vertical line into branch */}
+              <div style={{ display: "flex", justifyContent: "center", paddingBottom: 4 }}>
+                <div style={{ width: 2, height: 10, background: phaseColor.line, borderRadius: 1 }} />
+              </div>
+              {renderStepCard(branch, index, true)}
+            </div>
+          ))}
+          {/* Add branch button */}
+          <button
+            onClick={() => startAddBranch(index)}
+            style={{
+              flex: "0 0 40px",
+              minWidth: 40, borderRadius: 10,
+              border: `1px dashed ${phaseColor.line}`,
+              background: "transparent",
+              color: phaseColor.dot,
+              cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              opacity: 0.6,
+              scrollSnapAlign: "start",
+            }}
+          >
+            <PlusIcon size={16} />
+          </button>
+        </div>
+        {/* Scroll hint dots */}
+        {pg.branches.length > 2 && (
+          <div style={{
+            display: "flex", justifyContent: "center", gap: 4, padding: "4px 0 0",
+          }}>
+            {pg.branches.map((_, i) => (
+              <div key={i} style={{
+                width: 4, height: 4, borderRadius: "50%",
+                background: phaseColor.dot, opacity: 0.3,
+              }} />
+            ))}
+          </div>
+        )}
+
+        {/* Merge indicator */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: "8px 0 4px",
+        }}>
+          <div style={{ flex: 1, height: 1, background: phaseColor.line }} />
+          <div style={{
+            width: 8, height: 8, borderRadius: "50%",
+            background: phaseColor.dot,
+            boxShadow: `0 0 6px ${phaseColor.dot}40`,
+          }} />
+          <div style={{ flex: 1, height: 1, background: phaseColor.line }} />
         </div>
       </div>
     )
@@ -805,6 +1113,231 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
   }
 
   // ─── Render ───────────────────────────────────────────────────
+
+  // ─── Executing View ──────────────────────────────────────────
+  if (view === "executing") {
+    const isRunning = executionStatus === "QUEUED" || executionStatus === "RUNNING"
+    const isDone = executionStatus === "COMPLETED" || executionStatus === "FAILED" || executionStatus === "CANCELLED"
+    const statusKey = `builder.execution${executionStatus.charAt(0) + executionStatus.slice(1).toLowerCase()}` as string
+    const statusColor = executionStatus === "COMPLETED" ? "#34d399"
+      : executionStatus === "FAILED" ? "#FB8184"
+      : executionStatus === "CANCELLED" ? "#94a3b8"
+      : "#37ACC0"
+
+    // Group branches by parallel group
+    const groupedBranches = branchRuns.reduce<Record<string, typeof branchRuns>>((acc, br) => {
+      if (!acc[br.parallelGroupId]) acc[br.parallelGroupId] = []
+      acc[br.parallelGroupId].push(br)
+      return acc
+    }, {})
+
+    return (
+      <div style={{
+        height: "100dvh", display: "flex", flexDirection: "column",
+        background: "var(--bg-primary)", color: "var(--text-primary)",
+      }}>
+        {/* Top bar */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
+          borderBottom: "1px solid var(--glass-border)",
+          background: "var(--glass-bg)",
+          backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+          flexShrink: 0,
+        }}>
+          <button onClick={() => {
+            if (pollRef.current) clearTimeout(pollRef.current)
+            setView("editor")
+          }} style={{
+            background: "none", border: "none", color: "var(--text-primary)",
+            padding: 4, cursor: "pointer", display: "flex", alignItems: "center",
+          }}>
+            <ArrowLeftIcon />
+          </button>
+          <span style={{ flex: 1, fontSize: 16, fontWeight: 700 }}>{draft.name}</span>
+          {/* Status badge */}
+          <span style={{
+            padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700,
+            background: `${statusColor}18`, color: statusColor,
+            border: `1px solid ${statusColor}30`,
+          }}>
+            {t(statusKey) || executionStatus}
+          </span>
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {/* Error banner */}
+          {executionError && (
+            <div style={{
+              padding: "10px 14px", borderRadius: 12, marginBottom: 12,
+              background: "rgba(251,129,132,0.08)", border: "1px solid rgba(251,129,132,0.2)",
+              color: "#FB8184", fontSize: 13,
+            }}>
+              {executionError}
+            </div>
+          )}
+
+          {/* Sequential progress */}
+          <div style={{
+            padding: "12px 16px", borderRadius: 14, marginBottom: 12,
+            background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+          }}>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 8, fontWeight: 600 }}>
+              {(t("builder.sequentialStep") || "Step {current}/{total}")
+                .replace("{current}", String(executionStep + 1))
+                .replace("{total}", String(draft.steps.length))}
+            </div>
+            {/* Progress bar */}
+            <div style={{
+              height: 4, borderRadius: 2, background: "rgba(255,255,255,0.06)",
+              overflow: "hidden",
+            }}>
+              <div style={{
+                height: "100%", borderRadius: 2,
+                background: statusColor,
+                width: `${draft.steps.length > 0 ? ((executionStep + (isDone ? 1 : 0)) / draft.steps.length) * 100 : 0}%`,
+                transition: "width 0.5s ease",
+              }} />
+            </div>
+          </div>
+
+          {/* Timeline with execution status overlay */}
+          {draft.steps.map((step, i) => {
+            const isParallel = isParallelGroup(step)
+            const stepDef = step as ChainStepDef
+            const stepDone = i < executionStep || (isDone && executionStatus === "COMPLETED")
+            const stepActive = i === executionStep && isRunning
+            const phaseColor = isParallel ? "#60a5fa" : PHASE_COLORS[stepDef.phase]?.dot ?? "#94a3b8"
+
+            return (
+              <div key={isParallel ? `pg-${i}` : stepDef.id} style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+                {/* Timeline dot + line */}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 20 }}>
+                  <div style={{
+                    width: 12, height: 12, borderRadius: "50%", marginTop: 12, flexShrink: 0,
+                    background: stepDone ? phaseColor : stepActive ? `${phaseColor}80` : "rgba(255,255,255,0.1)",
+                    border: stepActive ? `2px solid ${phaseColor}` : "none",
+                    boxShadow: stepActive ? `0 0 8px ${phaseColor}40` : "none",
+                  }} />
+                  {i < draft.steps.length - 1 && (
+                    <div style={{ width: 2, flex: 1, background: stepDone ? `${phaseColor}60` : "rgba(255,255,255,0.06)" }} />
+                  )}
+                </div>
+
+                {/* Step card */}
+                <div style={{
+                  flex: 1, padding: "10px 14px", borderRadius: 12, marginBottom: 4,
+                  background: stepActive ? `${phaseColor}08` : "var(--glass-bg)",
+                  border: `1px solid ${stepActive ? `${phaseColor}30` : "var(--glass-border)"}`,
+                  opacity: stepDone ? 0.6 : 1,
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>
+                    {isParallel ? t("builder.parallelRunning") : (t(stepDef.labelKey) || stepDef.labelKey)}
+                  </div>
+
+                  {/* Agent/model info */}
+                  {!isParallel && stepDef.agentConfig && (
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
+                      {stepDef.agentConfig.agentId}{stepDef.agentConfig.model ? ` / ${stepDef.agentConfig.model}` : ""}
+                    </div>
+                  )}
+
+                  {/* Parallel branches */}
+                  {isParallel && (() => {
+                    const pg = step as ParallelGroup
+                    const pgBranches = groupedBranches[pg.id ?? `pg-${i}`] ?? []
+                    return (
+                      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                        {pg.branches.map((branch, bi) => {
+                          const branchDef = branch as ChainStepDef
+                          const branchRun = pgBranches.find(b => b.branchIndex === bi)
+                          const branchStatus = branchRun?.status ?? "QUEUED"
+                          const branchColor = branchStatus === "COMPLETED" ? "#34d399"
+                            : branchStatus === "FAILED" ? "#FB8184"
+                            : branchStatus === "RUNNING" ? "#37ACC0"
+                            : "var(--text-secondary)"
+                          return (
+                            <div key={branchDef.id ?? `b-${bi}`} style={{
+                              padding: "8px 12px", borderRadius: 10,
+                              background: "rgba(255,255,255,0.03)",
+                              border: `1px solid ${branchStatus === "RUNNING" ? `${branchColor}30` : "rgba(255,255,255,0.05)"}`,
+                              display: "flex", alignItems: "center", gap: 8,
+                            }}>
+                              {/* Status indicator */}
+                              <div style={{
+                                width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                                background: branchColor,
+                                boxShadow: branchStatus === "RUNNING" ? `0 0 6px ${branchColor}` : "none",
+                              }} />
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 12, fontWeight: 600 }}>
+                                  {t(branchDef.labelKey) || branchDef.labelKey}
+                                </div>
+                                {branchDef.agentConfig && (
+                                  <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                                    {branchDef.agentConfig.agentId}{branchDef.agentConfig.model ? ` / ${branchDef.agentConfig.model}` : ""}
+                                  </div>
+                                )}
+                              </div>
+                              <span style={{ fontSize: 10, color: branchColor, fontWeight: 600 }}>
+                                {t(`builder.execution${branchStatus.charAt(0) + branchStatus.slice(1).toLowerCase()}`) || branchStatus}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
+
+                  {/* Completed checkmark */}
+                  {stepDone && (
+                    <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span style={{ fontSize: 10, color: "#34d399", fontWeight: 600 }}>{t("builder.executionCompleted")}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Bottom bar */}
+        <div style={{
+          padding: "12px 16px calc(env(safe-area-inset-bottom, 0px) + 12px)",
+          borderTop: "1px solid var(--glass-border)",
+          background: "var(--glass-bg)",
+          display: "flex", gap: 10,
+        }}>
+          {isRunning ? (
+            <button onClick={handleCancelExecution} style={{
+              flex: 1, padding: "12px 0", borderRadius: 12,
+              border: "1px solid rgba(251,129,132,0.3)",
+              background: "rgba(251,129,132,0.08)",
+              color: "#FB8184", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            }}>
+              {t("builder.cancelExecution")}
+            </button>
+          ) : (
+            <button onClick={() => {
+              if (pollRef.current) clearTimeout(pollRef.current)
+              setView("editor")
+            }} style={{
+              flex: 1, padding: "12px 0", borderRadius: 12,
+              border: "1px solid var(--glass-border)",
+              background: "var(--glass-bg)",
+              color: "var(--text-primary)", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            }}>
+              {t("builder.backToEditor")}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   // ─── List View ──────────────────────────────────────────────
   if (view === "list") {
@@ -1007,7 +1540,17 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
         backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
         flexShrink: 0,
       }}>
-        <button onClick={() => setView("list")} style={{
+        <button onClick={() => {
+          if (dirty) {
+            setConfirmDialog({
+              title: t("builder.unsavedConfirm"),
+              onConfirm: () => { setDirty(false); setView("list") },
+            })
+            return
+          }
+          setDirty(false)
+          setView("list")
+        }} style={{
           background: "none", border: "none", color: "var(--text-primary)",
           padding: 4, cursor: "pointer", display: "flex", alignItems: "center",
         }}>
@@ -1036,7 +1579,37 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
         >
           {saving ? "..." : t("builder.save")}
         </button>
+        <button
+          onClick={handleExecute}
+          disabled={saving || !draft.slug || draft.steps.length < 1}
+          style={{
+            padding: "6px 14px", borderRadius: 8,
+            background: "#37ACC0", color: "#fff",
+            border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer",
+            opacity: (saving || !draft.slug || draft.steps.length < 1) ? 0.4 : 1,
+            transition: "opacity 0.15s ease",
+            display: "flex", alignItems: "center", gap: 4,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <polygon points="5,3 19,12 5,21" />
+          </svg>
+          {t("builder.execute")}
+        </button>
       </div>
+
+      {/* Save feedback */}
+      {saveResult && (
+        <div style={{
+          padding: "6px 16px", fontSize: 12, fontWeight: 600,
+          background: saveResult.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+          color: saveResult.ok ? "#22c55e" : "#ef4444",
+          borderBottom: `1px solid ${saveResult.ok ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`,
+          textAlign: "center",
+        }}>
+          {saveResult.msg}
+        </div>
+      )}
 
       {/* ═══ Timeline area ═══ */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 16 }}>
@@ -1103,7 +1676,10 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
             }}
           />
           {/* Sheet */}
-          <div style={{
+          <div
+            ref={paletteRef}
+            {...paletteSwipeHandlers}
+            style={{
             position: "fixed", bottom: 0, left: 0, right: 0,
             maxHeight: "70dvh",
             background: "var(--glass-bg)",
@@ -1129,7 +1705,7 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
               padding: "4px 16px 8px", fontSize: 15, fontWeight: 700,
               color: "var(--text-primary)",
             }}>
-              {t("builder.palette.title")}
+              {paletteMode === "branch" ? t("builder.addBranch") : paletteMode === "replace" ? (t("builder.replaceSkill") || "Replace Skill") : t("builder.palette.title")}
             </div>
             {/* Search */}
             <div style={{
@@ -1273,6 +1849,60 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
             }
           `}</style>
         </>
+      )}
+
+      {/* App-style confirm dialog */}
+      {confirmDialog && (
+        <div onClick={() => setConfirmDialog(null)} style={{
+          position: "fixed", inset: 0, zIndex: 10001,
+          background: "rgba(0,0,0,0.45)",
+          backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 32,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            backgroundImage: "var(--sheet-bg, linear-gradient(135deg, rgba(26,26,46,0.95), rgba(15,15,30,0.98)))",
+            backdropFilter: "blur(40px) saturate(1.5)", WebkitBackdropFilter: "blur(40px) saturate(1.5)",
+            border: "1px solid var(--glass-border, rgba(255,255,255,0.1))",
+            borderRadius: 20, padding: "28px 24px 20px",
+            maxWidth: 300, width: "100%", textAlign: "center",
+            boxShadow: "0 8px 40px rgba(0,0,0,0.3)",
+          }}>
+            {/* Icon */}
+            <div style={{
+              width: 44, height: 44, borderRadius: 14, margin: "0 auto 16px",
+              background: "rgba(251,129,132,0.12)", border: "1px solid rgba(251,129,132,0.2)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FB8184" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary, #fff)", marginBottom: 20, lineHeight: 1.5 }}>
+              {confirmDialog.title}
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setConfirmDialog(null)} style={{
+                flex: 1, padding: "11px 0", borderRadius: 12,
+                border: "1px solid var(--glass-border, rgba(255,255,255,0.1))",
+                background: "var(--glass-bg, rgba(255,255,255,0.05))",
+                color: "var(--text-secondary, rgba(255,255,255,0.6))",
+                fontSize: 14, fontWeight: 600, cursor: "pointer",
+              }}>
+                {t("app.cancel") || "Cancel"}
+              </button>
+              <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null) }} style={{
+                flex: 1, padding: "11px 0", borderRadius: 12,
+                border: "1px solid rgba(251,129,132,0.3)",
+                background: "rgba(251,129,132,0.12)",
+                color: "#FB8184",
+                fontSize: 14, fontWeight: 700, cursor: "pointer",
+              }}>
+                {t("app.confirm") || "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
