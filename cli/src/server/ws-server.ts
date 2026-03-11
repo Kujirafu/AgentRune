@@ -347,6 +347,38 @@ export function createServer(portOverride?: number) {
     return token
   }
 
+  // ─── Auth middleware for HTTP API routes ─────────────────────────
+  // All /api/* routes except /api/auth/* require a valid session token.
+  // Token can be passed via Authorization header or ?token= query param.
+  function requireAuth(req: any, res: any, next: any) {
+    // Skip auth routes (pairing, device auth, cloud auth, etc.)
+    if (req.path.startsWith("/api/auth/")) return next()
+
+    // Allow local connections without auth (same as WS local bypass)
+    const remoteAddr = req.socket?.remoteAddress || ""
+    const isLocal = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1"
+    if (isLocal) return next()
+
+    // Check for session token
+    const authHeader = req.headers.authorization || ""
+    const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : ""
+    const queryToken = req.query?.token || ""
+    const token = bearerToken || queryToken
+
+    if (!token) {
+      return res.status(401).json({ error: "Authentication required" })
+    }
+
+    if (sessionTokens.has(token) || validateSessionToken(token)) {
+      return next()
+    }
+
+    return res.status(401).json({ error: "Invalid or expired session token" })
+  }
+
+  // Apply auth middleware to all /api/* routes (before route handlers)
+  app.use("/api", requireAuth)
+
   const server = createHttpServer(app)
   const wss = new WebSocketServer({ server })
 
@@ -425,7 +457,13 @@ export function createServer(portOverride?: number) {
   }
   const worktreeManagers = new Map<string, WorktreeManager>()
   const projects = loadProjects()
-  const automationManager = new AutomationManager(sessions, projects)
+  const automationManager = new AutomationManager(sessions, projects, (event) => {
+    // Broadcast automation_completed to all connected WS clients
+    const payload = JSON.stringify(event)
+    for (const ws of wss.clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload)
+    }
+  })
 
   // --- CORS ---
   app.use((_req, res, next) => {
@@ -1819,18 +1857,27 @@ export function createServer(portOverride?: number) {
   app.post("/api/insight/generate", express.json(), (req, res) => {
     const { projectId, sessionId } = req.body as { projectId?: string; sessionId?: string }
 
-    // Gather events from a specific session or the most recent one
+    // Gather events from in-memory sessionRecentEvents (persisted events files)
+    // EventStore sessions/ is often empty; sessionRecentEvents is the live source
     let events: AgentEvent[] = []
     if (sessionId) {
-      events = eventStore.getSessionEvents(sessionId)
+      events = sessionRecentEvents.get(sessionId) || []
+      // Fallback: try loading from persisted events file
+      if (events.length === 0) {
+        events = loadPersistedEvents(sessionId)
+      }
     } else {
-      // Find most recent session for the project or any active session
+      // Find sessions for the project from PtyManager (live sessions)
       const pid = projectId || projects[0]?.id
       if (pid) {
-        const sessionsForProject = eventStore.getSessionsByProject(pid)
-        if (sessionsForProject.length > 0) {
-          events = eventStore.getSessionEvents(sessionsForProject[0].id)
+        const projectSessions = sessions.getByProject(pid)
+        // Collect events from all project sessions, pick the one with most events
+        let bestEvents: AgentEvent[] = []
+        for (const s of projectSessions) {
+          const sEvents = sessionRecentEvents.get(s.id) || loadPersistedEvents(s.id)
+          if (sEvents.length > bestEvents.length) bestEvents = sEvents
         }
+        events = bestEvents
       }
     }
 
@@ -1841,13 +1888,70 @@ export function createServer(portOverride?: number) {
     // Extract meaningful events for insight
     const errors = events.filter(e => e.type === "error")
     const fixes = events.filter(e => e.type === "file_edit" || e.type === "file_create")
+    const deletes = events.filter(e => e.type === "file_delete")
     const commands = events.filter(e => e.type === "command_run")
     const decisions = events.filter(e => e.type === "decision_request")
-    const infos = events.filter(e => e.type === "info" || e.type === "response")
+    const tests = events.filter(e => e.type === "test_result")
+    const summaryEvents = events.filter(e => e.type === "session_summary" || e.type === "progress_report")
+    const responses = events.filter(e => e.type === "response" || e.type === "info")
+
+    // Helper: strip common path prefix to show short relative paths
+    const shortPath = (p: string) => {
+      return p
+        .replace(/^.*[/\\](src[/\\])/, "$1")
+        .replace(/^.*[/\\](app[/\\]src[/\\])/, "$1")
+        .replace(/^.*[/\\](components[/\\])/, "$1")
+        .replace(/^.*[/\\](lib[/\\])/, "$1")
+        .replace(/^.*[/\\](pages[/\\])/, "$1")
+        .replace(/\\/g, "/")
+    }
 
     // Build markdown report
     const lines: string[] = []
     lines.push("# Session Insight Report\n")
+
+    // Overview stats
+    const statsItems: string[] = []
+    if (fixes.length > 0) statsItems.push(`${fixes.length} file edits`)
+    if (deletes.length > 0) statsItems.push(`${deletes.length} deletions`)
+    if (commands.length > 0) statsItems.push(`${commands.length} commands`)
+    if (errors.length > 0) statsItems.push(`${errors.length} errors`)
+    if (tests.length > 0) statsItems.push(`${tests.length} test runs`)
+    if (statsItems.length > 0) {
+      lines.push(`> ${statsItems.join(" · ")}\n`)
+    }
+
+    // Summary from AI responses (the actual insight)
+    if (summaryEvents.length > 0) {
+      lines.push("## Summary\n")
+      for (const e of summaryEvents.slice(-3)) {
+        lines.push(e.title)
+        if (e.detail) lines.push(`\n${e.detail.slice(0, 500)}`)
+      }
+      lines.push("")
+    } else if (responses.length > 0) {
+      // Extract key insights from response events
+      lines.push("## What Happened\n")
+      const meaningful = responses
+        .filter(e => e.title && e.title.length > 20 && !e.title.startsWith("Running"))
+        .slice(-5)
+      if (meaningful.length > 0) {
+        for (const e of meaningful) {
+          lines.push(`- ${e.title.slice(0, 150)}`)
+        }
+      } else {
+        // Infer from file changes
+        const fileNames = new Set<string>()
+        for (const e of fixes) {
+          const p = shortPath(e.diff?.filePath || e.title)
+          fileNames.add(p.split("/").pop() || p)
+        }
+        if (fileNames.size > 0) {
+          lines.push(`Modified ${fileNames.size} file(s): ${[...fileNames].join(", ")}`)
+        }
+      }
+      lines.push("")
+    }
 
     if (errors.length > 0) {
       lines.push("## Problems Encountered\n")
@@ -1862,19 +1966,27 @@ export function createServer(portOverride?: number) {
       lines.push("## Files Modified\n")
       const seen = new Set<string>()
       for (const e of fixes) {
-        const path = e.diff?.filePath || e.title
-        if (!seen.has(path)) {
-          seen.add(path)
-          lines.push(`- \`${path}\``)
+        const rawPath = e.diff?.filePath || e.title
+        const short = shortPath(rawPath)
+        if (!seen.has(short)) {
+          seen.add(short)
+          lines.push(`- \`${short}\``)
         }
       }
       lines.push("")
     }
 
-    if (commands.length > 0) {
-      lines.push("## Commands Executed\n")
-      for (const e of commands.slice(-8)) {
-        lines.push(`- \`${e.title}\` — ${e.status}`)
+    // Only show completed commands with actual content
+    const finishedCommands = commands.filter(e => e.status === "completed" && e.title && e.title !== "Running command")
+    if (finishedCommands.length > 0) {
+      lines.push("## Commands\n")
+      const seenCmds = new Set<string>()
+      for (const e of finishedCommands.slice(-8)) {
+        const cmd = e.title.slice(0, 80)
+        if (!seenCmds.has(cmd)) {
+          seenCmds.add(cmd)
+          lines.push(`- \`${cmd}\``)
+        }
       }
       lines.push("")
     }
@@ -1887,14 +1999,11 @@ export function createServer(portOverride?: number) {
       lines.push("")
     }
 
-    // Summary section from recent info/response events
-    const summaryEvents = events.filter(e => e.type === "session_summary" || e.type === "progress_report")
-    if (summaryEvents.length > 0) {
-      lines.push("## Summary\n")
-      for (const e of summaryEvents.slice(-3)) {
-        lines.push(`${e.title}`)
-        if (e.detail) lines.push(`\n${e.detail.slice(0, 500)}`)
-      }
+    if (tests.length > 0) {
+      const passed = tests.filter(e => e.status === "completed").length
+      const failed = tests.filter(e => e.status === "failed").length
+      lines.push("## Tests\n")
+      lines.push(`- ${passed} passed, ${failed} failed`)
       lines.push("")
     }
 
@@ -1902,9 +2011,11 @@ export function createServer(portOverride?: number) {
     const sourceText = lines.join("\n")
     const title = errors.length > 0
       ? `Debug: ${errors[0].title.slice(0, 60)}`
-      : fixes.length > 0
-        ? `Session: ${fixes.length} files modified`
-        : `Session insight — ${events.length} events`
+      : summaryEvents.length > 0
+        ? summaryEvents[summaryEvents.length - 1].title.slice(0, 60)
+        : fixes.length > 0
+          ? `Session: ${fixes.length} files modified`
+          : `Session insight — ${events.length} events`
 
     res.json({ markdown: sourceText, title, sourceText, empty: false })
   })
@@ -1954,7 +2065,7 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/automations/:projectId", express.json(), (req, res) => {
-    const { name, command, prompt, skill, templateId, schedule, runMode, agentId } = req.body
+    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model } = req.body
     if (!name || !schedule || (!command && !prompt)) {
       return res.status(400).json({ error: "name, schedule, and (prompt or command) are required" })
     }
@@ -1968,6 +2079,7 @@ export function createServer(portOverride?: number) {
       schedule,
       runMode: runMode || "local",
       agentId: agentId || "claude",
+      model: model || undefined,
       enabled: req.body.enabled !== false,
     })
     res.json(auto)
@@ -2045,15 +2157,14 @@ export function createServer(portOverride?: number) {
     const isLocal = url.searchParams.get("local") === "1" &&
       (req.socket.remoteAddress === "127.0.0.1" || req.socket.remoteAddress === "::1" || req.socket.remoteAddress === "::ffff:127.0.0.1")
     if (!isLocal) {
-      if (token && token !== "__open__" && !sessionTokens.has(token) && !validateSessionToken(token)) {
-        // Expired/unknown token — issue a fresh one to maintain session
-        const freshToken = issueSessionToken()
-        sessionTokens.add(freshToken)
-        ws.send(JSON.stringify({ type: "token_refresh", sessionToken: freshToken }))
-      }
-      // Reject connections with no token at all (unauthenticated)
+      // Reject connections with no token or invalid token
       if (!token) {
         ws.send(JSON.stringify({ type: "error", message: "Authentication required" }))
+        ws.close()
+        return
+      }
+      if (!sessionTokens.has(token) && !validateSessionToken(token)) {
+        ws.send(JSON.stringify({ type: "error", message: "Invalid or expired token" }))
         ws.close()
         return
       }
@@ -2448,7 +2559,39 @@ export function createServer(portOverride?: number) {
         case "input": {
           const sessionId = clientSessions.get(ws)
           if (sessionId) {
-            const inputStr = msg.data as string
+            let inputStr = msg.data as string
+            const inlineImages = msg.images as string[] | undefined
+
+            // If images are attached, save to disk and append paths to input text
+            if (inlineImages && inlineImages.length > 0) {
+              const session = sessions.get(sessionId)
+              const cwd = session?.cwd || homedir()
+              const uploadDir = join(cwd, ".agentrune", "uploads")
+              mkdirSync(uploadDir, { recursive: true })
+              const savedPaths: string[] = []
+              for (const imgData of inlineImages) {
+                try {
+                  const base64Data = imgData.replace(/^data:image\/\w+;base64,/, "")
+                  const ext = imgData.match(/^data:image\/(\w+)/)?.[1] || "png"
+                  const filePath = join(uploadDir, `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`)
+                  writeFileSync(filePath, Buffer.from(base64Data, "base64"))
+                  savedPaths.push(filePath)
+                  log.info(`[input] saved inline image: ${filePath}`)
+                } catch (err) {
+                  log.error(`[input] failed to save inline image: ${err}`)
+                }
+              }
+              if (savedPaths.length > 0) {
+                // Strip trailing \r, append image paths, re-add \r
+                const hasTrailingR = inputStr.endsWith("\r")
+                const baseText = hasTrailingR ? inputStr.slice(0, -1) : inputStr
+                const imagePaths = savedPaths.join(" ")
+                const withImages = baseText.trim()
+                  ? `${baseText} [Attached images — please read these files:] ${imagePaths}`
+                  : `[Attached images — please read these files:] ${imagePaths}`
+                inputStr = hasTrailingR ? withImages + "\r" : withImages
+              }
+            }
 
             // Reset resume state when user types /resume (allows new resume decision)
             if (/\/resume\b/i.test(inputStr)) {
@@ -2468,11 +2611,13 @@ export function createServer(portOverride?: number) {
               const commandPrompt = getCommandPrompt(cmdMatch[1])
               if (commandPrompt) {
                 sessions.write(sessionId, `${commandPrompt}\n`)
-                log.info(`Injected /${cmdMatch[1]} command prompt for session ${sessionId}`)
+                log.info(`Injected /${cmdMatch[1]} command ready for session ${sessionId}`)
                 break
               }
             }
 
+            // Direct write — client sends text and \r as separate WS messages
+            // (500ms delay on client side for Claude Code TUI to process text)
             sessions.write(sessionId, inputStr)
           }
           break

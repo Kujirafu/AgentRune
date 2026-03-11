@@ -2,6 +2,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
+import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
+import { SpringOverlay } from "./SpringOverlay"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 const COLORS = {
@@ -148,17 +150,23 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
   const selectedFileRef = useRef(selectedFile)
   selectedFileRef.current = selectedFile
 
-  // Hardware back via app:back
+  // Hardware back via app:back — use capture phase + stopImmediatePropagation
+  // so MissionControl's handler doesn't also fire (which would close the entire panel
+  // when we only want to close a diff sub-view)
   useEffect(() => {
     if (!open) return
     const onBack = (e: Event) => {
       e.preventDefault()
+      e.stopImmediatePropagation()
       if (selectedFileRef.current) setSelectedFile(null)
       else onClose()
     }
-    document.addEventListener("app:back", onBack)
-    return () => document.removeEventListener("app:back", onBack)
+    document.addEventListener("app:back", onBack, true)
+    return () => document.removeEventListener("app:back", onBack, true)
   }, [open, onClose])
+
+  // Swipe-down to dismiss
+  const { sheetRef: panelRef, handlers: swipeHandlers } = useSwipeToDismiss({ onDismiss: onClose })
 
   // Load diff for file
   const openDiff = useCallback((filePath: string) => {
@@ -345,8 +353,6 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
     }
   }, [tab])
 
-  if (!open) return null
-
   const statusColor: Record<string, string> = {
     modified: "#60a5fa",
     added: "#22c55e",
@@ -428,12 +434,15 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
 
   // Main view with tabs
   return (
-    <div style={{
+    <SpringOverlay open={open}>
+    <div
+      ref={panelRef}
+      {...swipeHandlers}
+      style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "var(--bg-gradient)",
       display: "flex", flexDirection: "column",
       color: "var(--text-primary)",
-      animation: `fadeSlideUp 0.3s ${SPRING}`,
     }}>
       {/* Header */}
       <div style={{
@@ -442,6 +451,12 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
         borderBottom: "1px solid var(--glass-border)",
         paddingTop: "max(env(safe-area-inset-top), 12px)",
       }}>
+        {/* Drag handle for swipe-to-dismiss */}
+        <div style={{
+          width: 36, height: 4, borderRadius: 2,
+          background: "var(--text-secondary)", opacity: 0.3,
+          margin: "8px auto 0",
+        }} />
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px 8px" }}>
           <button onClick={onClose}
             style={{ width: 36, height: 36, borderRadius: 12, border: "1px solid var(--glass-border)", background: "var(--card-bg)", color: "var(--text-primary)", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -810,5 +825,6 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
         </div>
       )}
     </div>
+    </SpringOverlay>
   )
 }

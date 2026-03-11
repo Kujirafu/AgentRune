@@ -1,6 +1,7 @@
 // components/NewSessionSheet.tsx
 // Bottom sheet for creating a new session (with resume past agent session support)
 import { useState, useEffect } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import type { Project } from "../types"
 import { AGENTS } from "../types"
 import { FileBrowser } from "./FileBrowser"
@@ -140,12 +141,17 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
     return () => document.removeEventListener("app:back", handler, true)
   }, [open, previewSession, onClose])
 
-  if (!open) return null
-
   return (
-    <>
+    <AnimatePresence>
+      {open && (
+      <>
       {/* Backdrop */}
-      <div
+      <motion.div
+        key="nss-backdrop"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0, transition: { duration: 0.15 } }}
+        transition={{ duration: 0.2 }}
         onClick={onClose}
         style={{
           position: "fixed", inset: 0, zIndex: 200,
@@ -155,7 +161,12 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
         }}
       />
       {/* Sheet */}
-      <div
+      <motion.div
+        key="nss-sheet"
+        initial={{ y: "100%" }}
+        animate={{ y: 0 }}
+        exit={{ y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
+        transition={{ type: "spring", stiffness: 200, damping: 20 }}
         ref={sheetRef}
         {...swipeHandlers}
         style={{
@@ -625,7 +636,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
             </button>
           </div>
         )}
-      </div>
+      </motion.div>
 
       {/* Session preview overlay */}
       {previewSession && (
@@ -794,5 +805,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
         initialPath={newCwd || undefined}
       />
     </>
+      )}
+    </AnimatePresence>
   )
 }

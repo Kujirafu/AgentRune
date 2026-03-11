@@ -2,6 +2,7 @@
 // Unified home screen: 3 top-level tabs (Projects / Schedules / Templates)
 // Replaces the 2-panel ProjectOverview with a single vertical-scrolling page.
 import React, { useState, useEffect, useRef, useCallback } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
@@ -803,9 +804,9 @@ export function UnifiedPanel({
                 cursor: "pointer",
               }}
             >
-              {/* Lucide git-branch */}
+              {/* Lucide workflow — chain/pipeline icon */}
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+                <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/>
               </svg>
             </button>
           )}
@@ -2418,9 +2419,15 @@ export function UnifiedPanel({
       />
 
       {/* Device sheet */}
+      <AnimatePresence>
       {showDevices && (
         <>
-          <div
+          <motion.div
+            key="dev-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 0.15 } }}
+            transition={{ duration: 0.2 }}
             onClick={() => setShowDevices(false)}
             style={{
               position: "fixed", inset: 0, zIndex: 200,
@@ -2428,16 +2435,23 @@ export function UnifiedPanel({
               backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
             }}
           />
-          <div style={{
-            position: "fixed",
-            bottom: 0, left: 0, right: 0, zIndex: 201,
-            background: "var(--card-bg)",
-            backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
-            borderTop: "1px solid var(--glass-border)",
-            borderRadius: "24px 24px 0 0",
-            padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
-            maxHeight: "70dvh", overflowY: "auto",
-          }}>
+          <motion.div
+            key="dev-sheet"
+            initial={{ y: "100%" }}
+            animate={{ y: 0 }}
+            exit={{ y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
+            transition={{ type: "spring", stiffness: 200, damping: 20 }}
+            style={{
+              position: "fixed",
+              bottom: 0, left: 0, right: 0, zIndex: 201,
+              background: "var(--card-bg)",
+              backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+              borderTop: "1px solid var(--glass-border)",
+              borderRadius: "24px 24px 0 0",
+              padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
+              maxHeight: "70dvh", overflowY: "auto",
+            }}
+          >
             <div style={{
               width: 36, height: 4, borderRadius: 2,
               background: "var(--text-secondary)", opacity: 0.3,
@@ -2550,9 +2564,10 @@ export function UnifiedPanel({
                 </button>
               </div>
             </div>
-          </div>
+          </motion.div>
         </>
       )}
+      </AnimatePresence>
 
       {/* AutomationSheet */}
       <AutomationSheet

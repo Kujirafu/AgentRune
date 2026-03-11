@@ -1,5 +1,6 @@
 // web/components/MissionControl.tsx
 import { useState, useEffect, useRef, useCallback } from "react"
+import { createPortal } from "react-dom"
 import type { Project, ProjectSettings, AppSession } from "../types"
 import type { AgentEvent } from "../types"
 import { AGENTS } from "../types"
@@ -99,6 +100,7 @@ export function MissionControl({
   const [showGit, setShowGit] = useState(false)
   const [showTasks, setShowTasks] = useState(false)
   const [previewFile, setPreviewFile] = useState<string | null>(null)
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null)
   // Multi-session activity tracking
   const [sessionActivity, setSessionActivity] = useState<Record<string, { title: string; status: string; unread: number }>>({})
   const [sessionProgress, setSessionProgress] = useState<Record<string, AgentEvent>>({})
@@ -829,7 +831,7 @@ export function MissionControl({
     }
   }, [project.id, sendInput, t, setEvents])
 
-  const handleSendCommand = useCallback((text: string, flags?: SendFlags) => {
+  const handleSendCommand = useCallback((text: string, flags?: SendFlags, images?: string[]) => {
     if (text === "\x03") { sendInput(text); return }
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
 
@@ -850,20 +852,22 @@ export function MissionControl({
     if (flags?.task) {
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
     }
-    // Attach any pending uploaded image paths to the message
-    // IMPORTANT: use space separator (not \n) — PTY sends \n as Enter to Claude Code,
-    // which would split the message and submit only the first line.
+    // Grab any pending image paths from successful HTTP uploads
     const pendingImages = pendingImagePathsRef.current.splice(0)
+    let usedHttpPaths = false
     if (pendingImages.length > 0) {
+      usedHttpPaths = true
       setHasPendingImages(false)
       const imagePaths = pendingImages.join(" ")
       text = text.trim()
         ? `${text} [Attached images — please read these files:] ${imagePaths}`
         : `[Attached images — please read these files:] ${imagePaths}`
     }
+    // If HTTP upload failed but we have inline images, use WS fallback
+    const wsImages = (!usedHttpPaths && images && images.length > 0) ? images : undefined
 
     const trimmedInput = text.trim()
-    if (!trimmedInput) return
+    if (!trimmedInput && !wsImages) return
 
     // If user clicked "Type custom response", interrupt TUI menu first (Esc),
     // then send the typed text after a short delay
@@ -883,11 +887,21 @@ export function MissionControl({
       // Continue to add user event below (don't return)
     }
 
-    // Send text + \r together — server-side ws-server.ts splits long inputs
-    // (>100 chars) and adds a 200ms delay before \r to ensure PTY processes text first.
-    // Exception: slash commands need autocomplete render time, so send text then delayed \r.
+    // Send text and \r as TWO separate WS messages.
+    // This matches the pattern that works reliably (e.g., claude --resume sends
+    // text and \r as separate messages, and PTY processes both correctly).
     const isSlash = text.startsWith("/")
-    const sent = pendingFreeText ? true : sendInput(isSlash ? text : text + "\r")
+    let sent: boolean
+    if (!pendingFreeText && wsImages) {
+      // WS fallback: send text + images (server saves images, appends paths)
+      sent = send({ type: "input", data: text, images: wsImages })
+      if (sent && !isSlash) setTimeout(() => sendInput("\r"), 500)
+    } else if (!pendingFreeText) {
+      sent = sendInput(text)
+      if (sent && !isSlash) setTimeout(() => sendInput("\r"), 500)
+    } else {
+      sent = true
+    }
     if (!sent) {
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`,
@@ -915,6 +929,8 @@ export function MissionControl({
     }
 
     // Insert user message as event for message-output correspondence
+    // Include image thumbnails if present (from WS inline or HTTP upload)
+    const eventImages = images && images.length > 0 ? images : undefined
     const userEvent = {
       id: `usr_${Date.now()}`,
       timestamp: Date.now(),
@@ -922,6 +938,7 @@ export function MissionControl({
       status: "completed" as const,
       title: text.length > 60 ? text.slice(0, 60) + "..." : text,
       detail: text.length > 60 ? text : undefined,
+      _images: eventImages,
     }
     setEvents(prev => [...prev, userEvent].slice(-200))
     // Persist to server so it survives navigation (replayed via events_replay)
@@ -1364,6 +1381,7 @@ export function MissionControl({
         mcCancelVoice()
         e.preventDefault(); return
       }
+      if (previewImageUrl) { setPreviewImageUrl(null); e.preventDefault(); return }
       if (previewFile) { setPreviewFile(null); e.preventDefault(); return }
       if (showGit) { setShowGit(false); e.preventDefault(); return }
       if (showTasks) { setShowTasks(false); e.preventDefault(); return }
@@ -1378,7 +1396,7 @@ export function MissionControl({
     }
     document.addEventListener("app:back", handler)
     return () => document.removeEventListener("app:back", handler)
-  }, [viewMode, voicePhase, previewFile, showGit, showTasks, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
+  }, [viewMode, voicePhase, previewImageUrl, previewFile, showGit, showTasks, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
 
   // TerminalView (always mounted) handles attach + auto-command.
   // MissionControl just listens for WS messages ??no attach needed.
@@ -1682,6 +1700,7 @@ return (
                     onQuote={handleQuote}
                     onSaveObsidian={(text) => handleSaveObsidian(text, event)}
                     onViewDiff={onEventDiff}
+                    onPreviewImage={setPreviewImageUrl}
                     apiBase={getApiBase()}
                     projectId={project.id}
                   />
@@ -1971,7 +1990,47 @@ return (
         send={send}
       />
 
-      {/* ?????? Session context menu (action sheet) ?????? */}
+      {/* Image preview overlay */}
+      {previewImageUrl && createPortal(
+        <div
+          onClick={() => setPreviewImageUrl(null)}
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "rgba(0,0,0,0.9)",
+            zIndex: 10000,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 16, cursor: "pointer",
+            animation: "fadeSlideUp 0.25s ease-out",
+          }}
+        >
+          <img
+            src={previewImageUrl}
+            alt="preview"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: "100%", maxHeight: "100%",
+              objectFit: "contain", borderRadius: 12,
+              cursor: "default",
+              animation: "springSlideUp 0.5s ease-out",
+            }}
+          />
+          <button onClick={() => setPreviewImageUrl(null)} style={{
+            position: "absolute", top: 16, right: 16,
+            width: 40, height: 40, borderRadius: 20,
+            border: "1px solid rgba(255,255,255,0.2)",
+            background: "rgba(0,0,0,0.5)", color: "#fff",
+            fontSize: 18, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+          }}>
+            {"\u2715"}
+          </button>
+        </div>,
+        document.body
+      )}
+
+      {/* Session context menu (action sheet) */}
       {contextSession && (() => {
         const s = activeSessions.find((x) => x.id === contextSession)
         if (!s) return null
@@ -2012,7 +2071,7 @@ return (
               position: "fixed", inset: 0, zIndex: 200,
               display: "flex", alignItems: "flex-end", justifyContent: "center",
               background: "rgba(0,0,0,0.45)",
-              animation: "fadeSlideUp 0.2s ease-out",
+              animation: "springSlideUp 0.45s ease-out",
             }}
           >
             <div
@@ -2167,7 +2226,7 @@ return (
             position: "fixed", inset: 0, zIndex: 250,
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "rgba(0,0,0,0.45)",
-            animation: "fadeSlideUp 0.2s ease-out",
+            animation: "springSlideUp 0.45s ease-out",
           }}
         >
           <div

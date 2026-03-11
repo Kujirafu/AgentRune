@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
+import { SpringOverlay } from "./SpringOverlay"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
@@ -50,19 +51,19 @@ export function FilePreview({ open, filePath, onClose }: FilePreviewProps) {
     onClose()
   }, [onClose])
 
-  if (!open || !filePath) return null
+  if (!filePath) return null
 
   const fileName = filePath.split(/[\\/]/).pop() || filePath
   const lines = content.split("\n")
   const sizeLabel = fileSize > 1024 ? `${(fileSize / 1024).toFixed(1)} KB` : `${fileSize} B`
 
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "var(--bg-gradient)",
       display: "flex", flexDirection: "column",
       color: "var(--text-primary)",
-      animation: `fadeSlideUp 0.3s ${SPRING}`,
     }}>
       {/* Header */}
       <div style={{
@@ -165,5 +166,6 @@ export function FilePreview({ open, filePath, onClose }: FilePreviewProps) {
         )}
       </div>
     </div>
+    </SpringOverlay>
   )
 }

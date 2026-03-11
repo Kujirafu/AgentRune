@@ -1,10 +1,11 @@
 // server/auth.ts
-// Session & device token management with disk persistence
+// Session & device token management with encrypted disk persistence
 
 import { randomBytes } from "node:crypto"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
+import { readFileSync, existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
 
 interface TokenEntry {
   deviceId: string
@@ -35,14 +36,17 @@ function saveToDisk(): void {
     sessionTokens: Object.fromEntries(sessionTokens),
     pairedDevices: Object.fromEntries(pairedDevices),
   }
-  writeFileSync(getTokensPath(), JSON.stringify(data, null, 2))
+  writeEncryptedFile(getTokensPath(), JSON.stringify(data, null, 2))
 }
 
 function loadFromDisk(): void {
-  const path = getTokensPath()
-  if (!existsSync(path)) return
+  const tokensPath = getTokensPath()
+  if (!existsSync(tokensPath)) return
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"))
+    // readEncryptedFile handles both encrypted and plaintext (migration)
+    const content = readEncryptedFile(tokensPath)
+    if (!content) return
+    const raw = JSON.parse(content)
     const now = Date.now()
 
     // Load session tokens (skip expired)
@@ -60,6 +64,12 @@ function loadFromDisk(): void {
       for (const [deviceId, entry] of Object.entries(raw.pairedDevices)) {
         pairedDevices.set(deviceId, entry as DeviceEntry)
       }
+    }
+
+    // Auto-migrate: if file was plaintext, re-encrypt on load
+    const rawFile = readFileSync(tokensPath, "utf-8")
+    if (!isEncrypted(rawFile)) {
+      saveToDisk() // re-saves encrypted
     }
   } catch {
     // Corrupted file — start fresh

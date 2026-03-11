@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { TaskStore, Task, Prd } from "../types"
+import { SpringOverlay } from "./SpringOverlay"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
@@ -57,8 +58,6 @@ export function PrdPage({ open, projectId, projectName, onClose, onStartTask, th
     }).catch(() => {})
   }, [store, projectId])
 
-  if (!open) return null
-
   const prd = store?.prd
   const tasks = store?.tasks || []
   const doneCount = tasks.filter((t) => t.status === "done").length
@@ -86,12 +85,12 @@ export function PrdPage({ open, projectId, projectName, onClose, onStartTask, th
   }
 
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "var(--bg-gradient)",
       display: "flex", flexDirection: "column",
       color: "var(--text-primary)",
-      animation: `fadeSlideUp 0.3s ${SPRING}`,
     }}>
       {/* Header */}
       <div style={{
@@ -421,5 +420,6 @@ export function PrdPage({ open, projectId, projectName, onClose, onStartTask, th
         )}
       </div>
     </div>
+    </SpringOverlay>
   )
 }

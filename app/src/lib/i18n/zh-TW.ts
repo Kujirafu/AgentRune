@@ -963,6 +963,7 @@ export const zhTW: Record<string, string> = {
   "builder.joinAll": "全部完成",
   "builder.joinAny": "任一完成",
   "builder.delete": "刪除",
+  "builder.edit": "編輯",
   "builder.palette.title": "新增步驟",
   "builder.palette.builtin": "內建技能",
   "builder.palette.search": "搜尋技能...",

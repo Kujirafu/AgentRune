@@ -13,6 +13,7 @@ import { ChainBuilder } from "./components/ChainBuilder"
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
+import { motion, AnimatePresence } from "framer-motion"
 
 // ─── Error Boundary ──────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -1774,217 +1775,245 @@ export function App() {
     setScreen("overview")
   }
 
-  // Chain Builder screen
-  if (screen === "builder") {
-    return (
-      <ErrorBoundary>
-        <ChainBuilder onBack={() => setScreen("overview")} t={t} />
-      </ErrorBoundary>
-    )
-  }
+  // Compute screen content for AnimatePresence transitions
+  const sessionProject = selectedProject ? projects.find((p) => p.id === selectedProject) : null
+  const isSessionReady = screen === "session" && !!sessionProject
 
-  if (screen === "session" && selectedProject) {
-    const project = projects.find((p) => p.id === selectedProject)
-    if (project) {
-      return (
-        <ErrorBoundary>
-          {/* Always keep TerminalView mounted to preserve xterm content.
-              When in board mode, push it behind MissionControl with lower z-index
-              and visibility:hidden so xterm keeps its layout dimensions. */}
-          <div style={viewMode !== "terminal" ? {
-            position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
-            visibility: "hidden", zIndex: 0,
-          } : undefined}>
-            <TerminalView
-              project={project}
-              agentId={activeAgentId}
-              sessionId={currentSessionId || undefined}
-              resumeSessionId={resumeSessionId}
-              sessionToken={sessionToken}
-              send={send}
-              on={on}
-              onBack={() => setViewMode("board")}
-            />
-          </div>
-          {/* Always keep MissionControl mounted to preserve events state.
-              When in terminal mode, hide it with visibility:hidden (mirrors TerminalView pattern). */}
-          <div style={viewMode === "terminal" ? {
-            position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
-            visibility: "hidden", zIndex: 0,
-          } : undefined}>
-            <MissionControl
-              project={project}
-              agentId={activeAgentId}
-              sessionId={currentSessionId || undefined}
-              sessionToken={sessionToken}
-              send={send}
-              on={on}
-              onBack={() => { setScreen("overview"); setViewMode("board") }}
-              onOpenTerminal={() => setViewMode("terminal")}
-              viewMode={viewMode}
-              projects={projects}
-              activeSessions={activeSessions}
-              onSwitchSession={handleResume}
-              onKillSession={handleKill}
-              onOpenSessionTerminal={handleOpenSessionTerminal}
-              theme={theme}
-              toggleTheme={toggleTheme}
-              onEventDiff={(e) => setDiffEvent(e)}
-              onDiffEventsChange={setAllDiffEvents}
-              onRequestVoiceRef={requestVoiceRef}
-              wsConnected={wsConnected}
-              onLaunchSession={handleLaunch}
-              onOpenBuilder={() => setScreen("builder")}
-            />
-            <DiffPanel
-              event={diffEvent}
-              allDiffEvents={allDiffEvents}
-              onClose={() => setDiffEvent(null)}
-              onSelectEvent={(e) => setDiffEvent(e)}
-              projectId={selectedProject || undefined}
-              apiBase={getApiBase() || undefined}
-              onSendEdit={(instruction) => {
-                send({ type: "input", data: instruction })
-                setTimeout(() => send({ type: "input", data: "\r" }), 30)
-              }}
-              onVoiceInput={(cb, label) => requestVoiceRef.current?.(cb, label)}
-            />
-          </div>
-        </ErrorBoundary>
-      )
-    }
-  }
+  // Determine screen key for AnimatePresence
+  let screenKey: string = screen
+  if (screen === "session" && !sessionProject) screenKey = "overview"
 
-  // UnifiedPanel screen — shows all projects with session summaries
-  // Also fallback here when session screen can't find its project
-  if (screen === "overview" || screen === "session") {
-    return (
-      <ErrorBoundary>
-        <UnifiedPanel
-          activeSessions={activeSessions}
-          sessionEvents={sessionEventsMap}
-          projects={projects}
-          selectedProject={selectedProject}
-          onSelectSession={handleResume}
-          onNewSession={() => {}}
-          onLaunch={handleLaunch}
-          onNewProject={handleNewProject}
-          onDeleteProject={handleDeleteProject}
-          onKillSession={handleKill}
-          onSessionInput={(sessionId, data) => {
-            send({ type: "session_input", sessionId, data })
-          }}
-          onNextStep={(sessionId, step) => {
-            handleResume(sessionId)
-            setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
-          }}
-          send={send}
-          theme={theme}
-          toggleTheme={toggleTheme}
-          wsConnected={wsConnected}
-          onOpenBuilder={() => setScreen("builder")}
-          onCloudConnect={async (url, token) => {
-            localStorage.setItem("agentrune_server", url)
-            setServerUrl(url)
-            setServerReady(true)
-            let csToken = token
-            if (!csToken) {
-              const phoneToken = localStorage.getItem("agentrune_phone_token")
-              if (phoneToken) {
-                try {
-                  const authRes = await fetch(`${url}/api/auth/cloud`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ phoneToken }),
-                  })
-                  if (authRes.ok) {
-                    const authData = await authRes.json()
-                    csToken = authData.sessionToken
-                  }
-                } catch {}
-              }
-            }
-            if (csToken) {
-              localStorage.setItem("agentrune_cloud_token", csToken)
-              setCloudSessionToken(csToken)
-            }
-            recheckAuth()
-          }}
-        />
-      </ErrorBoundary>
-    )
-  }
+  // Spring transition config — tuned for Android WebView performance
+  const springEnter = { type: "spring" as const, stiffness: 200, damping: 20 }
+  const quickExit = { duration: 0.12, ease: "easeIn" as const }
 
   return (
     <ErrorBoundary>
-    {cliUpdate && (
-      <div style={{
-        position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
-        background: "linear-gradient(90deg, #f59e0b, #d97706)", color: "#fff",
-        padding: "8px 16px", fontSize: 13, fontWeight: 500,
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-      }}>
-        <span>AgentRune v{cliUpdate.latest} {t("update.available") || "available"} (v{cliUpdate.current})</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => {
-            navigator.clipboard?.writeText(
-              navigator.userAgent.includes("Win")
-                ? "irm https://agentrune.com/install.ps1 | iex"
-                : "curl -fsSL https://agentrune.com/install.sh | bash"
-            )
-          }} style={{
-            background: "rgba(255,255,255,0.2)", border: "none", color: "#fff",
-            padding: "4px 12px", borderRadius: 4, fontSize: 12, cursor: "pointer",
-          }}>{t("update.copyCommand") || "Copy update command"}</button>
-          <button onClick={() => setCliUpdate(null)} style={{
-            background: "none", border: "none", color: "rgba(255,255,255,0.7)",
-            fontSize: 16, cursor: "pointer", padding: "0 4px",
-          }}>×</button>
-        </div>
-      </div>
-    )}
-    <LaunchPad
-      projects={projects}
-      activeSessions={activeSessions}
-      onLaunch={handleLaunch}
-      onResume={handleResume}
-      onKill={handleKill}
-      onNewProject={handleNewProject}
-      selectedProject={selectedProject}
-      onSelectProject={(id) => {
-        setSelectedProject(id)
-        saveLastProject(id)
-      }}
-      theme={theme}
-      toggleTheme={toggleTheme}
-      onCloudConnect={async (url, token) => {
-        localStorage.setItem("agentrune_server", url)
-        setServerUrl(url)
-        setServerReady(true)
-        let csToken = token
-        if (!csToken) {
-          const phoneToken = localStorage.getItem("agentrune_phone_token")
-          if (phoneToken) {
-            try {
-              const authRes = await fetch(`${url}/api/auth/cloud`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ phoneToken }),
-              })
-              if (authRes.ok) {
-                const authData = await authRes.json()
-                csToken = authData.sessionToken
-              }
-            } catch {}
-          }
-        }
-        if (csToken) {
-          localStorage.setItem("agentrune_cloud_token", csToken)
-          setCloudSessionToken(csToken)
-        }
-        recheckAuth()
-      }}
-    />
+      <AnimatePresence>
+        {screen === "builder" ? (
+          <motion.div
+            key="builder"
+            initial={{ opacity: 0, y: 28 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12, transition: quickExit }}
+            transition={springEnter}
+            style={{ position: "fixed", inset: 0 }}
+          >
+            <ChainBuilder onBack={() => setScreen("overview")} t={t} />
+          </motion.div>
+        ) : isSessionReady ? (
+          <motion.div
+            key="session"
+            initial={{ opacity: 0, y: 28 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12, transition: quickExit }}
+            transition={springEnter}
+            style={{ position: "fixed", inset: 0 }}
+          >
+            {/* Always keep TerminalView mounted to preserve xterm content.
+                When in board mode, push it behind MissionControl with lower z-index
+                and visibility:hidden so xterm keeps its layout dimensions. */}
+            <div style={viewMode !== "terminal" ? {
+              position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
+              visibility: "hidden", zIndex: 0,
+            } : undefined}>
+              <TerminalView
+                project={sessionProject!}
+                agentId={activeAgentId}
+                sessionId={currentSessionId || undefined}
+                resumeSessionId={resumeSessionId}
+                sessionToken={sessionToken}
+                send={send}
+                on={on}
+                onBack={() => setViewMode("board")}
+              />
+            </div>
+            {/* Always keep MissionControl mounted to preserve events state.
+                When in terminal mode, hide it with visibility:hidden (mirrors TerminalView pattern). */}
+            <div style={viewMode === "terminal" ? {
+              position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
+              visibility: "hidden", zIndex: 0,
+            } : undefined}>
+              <MissionControl
+                project={sessionProject!}
+                agentId={activeAgentId}
+                sessionId={currentSessionId || undefined}
+                sessionToken={sessionToken}
+                send={send}
+                on={on}
+                onBack={() => { setScreen("overview"); setViewMode("board") }}
+                onOpenTerminal={() => setViewMode("terminal")}
+                viewMode={viewMode}
+                projects={projects}
+                activeSessions={activeSessions}
+                onSwitchSession={handleResume}
+                onKillSession={handleKill}
+                onOpenSessionTerminal={handleOpenSessionTerminal}
+                theme={theme}
+                toggleTheme={toggleTheme}
+                onEventDiff={(e) => setDiffEvent(e)}
+                onDiffEventsChange={setAllDiffEvents}
+                onRequestVoiceRef={requestVoiceRef}
+                wsConnected={wsConnected}
+                onLaunchSession={handleLaunch}
+                onOpenBuilder={() => setScreen("builder")}
+              />
+              <DiffPanel
+                event={diffEvent}
+                allDiffEvents={allDiffEvents}
+                onClose={() => setDiffEvent(null)}
+                onSelectEvent={(e) => setDiffEvent(e)}
+                projectId={selectedProject || undefined}
+                apiBase={getApiBase() || undefined}
+                onSendEdit={(instruction) => {
+                  send({ type: "input", data: instruction })
+                  setTimeout(() => send({ type: "input", data: "\r" }), 30)
+                }}
+                onVoiceInput={(cb, label) => requestVoiceRef.current?.(cb, label)}
+              />
+            </div>
+          </motion.div>
+        ) : (screen === "overview" || screen === "session") ? (
+          <motion.div
+            key="overview"
+            initial={{ opacity: 0, y: 28 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12, transition: quickExit }}
+            transition={springEnter}
+            style={{ position: "fixed", inset: 0 }}
+          >
+            <UnifiedPanel
+              activeSessions={activeSessions}
+              sessionEvents={sessionEventsMap}
+              projects={projects}
+              selectedProject={selectedProject}
+              onSelectSession={handleResume}
+              onNewSession={() => {}}
+              onLaunch={handleLaunch}
+              onNewProject={handleNewProject}
+              onDeleteProject={handleDeleteProject}
+              onKillSession={handleKill}
+              onSessionInput={(sessionId, data) => {
+                send({ type: "session_input", sessionId, data })
+              }}
+              onNextStep={(sessionId, step) => {
+                handleResume(sessionId)
+                setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
+              }}
+              send={send}
+              theme={theme}
+              toggleTheme={toggleTheme}
+              wsConnected={wsConnected}
+              onOpenBuilder={() => setScreen("builder")}
+              onCloudConnect={async (url, token) => {
+                localStorage.setItem("agentrune_server", url)
+                setServerUrl(url)
+                setServerReady(true)
+                let csToken = token
+                if (!csToken) {
+                  const phoneToken = localStorage.getItem("agentrune_phone_token")
+                  if (phoneToken) {
+                    try {
+                      const authRes = await fetch(`${url}/api/auth/cloud`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ phoneToken }),
+                      })
+                      if (authRes.ok) {
+                        const authData = await authRes.json()
+                        csToken = authData.sessionToken
+                      }
+                    } catch {}
+                  }
+                }
+                if (csToken) {
+                  localStorage.setItem("agentrune_cloud_token", csToken)
+                  setCloudSessionToken(csToken)
+                }
+                recheckAuth()
+              }}
+            />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="launchpad"
+            initial={{ opacity: 0, y: 28 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12, transition: quickExit }}
+            transition={springEnter}
+            style={{ position: "fixed", inset: 0 }}
+          >
+            {cliUpdate && (
+              <div style={{
+                position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
+                background: "linear-gradient(90deg, #f59e0b, #d97706)", color: "#fff",
+                padding: "8px 16px", fontSize: 13, fontWeight: 500,
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <span>AgentRune v{cliUpdate.latest} {t("update.available") || "available"} (v{cliUpdate.current})</span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => {
+                    navigator.clipboard?.writeText(
+                      navigator.userAgent.includes("Win")
+                        ? "irm https://agentrune.com/install.ps1 | iex"
+                        : "curl -fsSL https://agentrune.com/install.sh | bash"
+                    )
+                  }} style={{
+                    background: "rgba(255,255,255,0.2)", border: "none", color: "#fff",
+                    padding: "4px 12px", borderRadius: 4, fontSize: 12, cursor: "pointer",
+                  }}>{t("update.copyCommand") || "Copy update command"}</button>
+                  <button onClick={() => setCliUpdate(null)} style={{
+                    background: "none", border: "none", color: "rgba(255,255,255,0.7)",
+                    fontSize: 16, cursor: "pointer", padding: "0 4px",
+                  }}>x</button>
+                </div>
+              </div>
+            )}
+            <LaunchPad
+              projects={projects}
+              activeSessions={activeSessions}
+              onLaunch={handleLaunch}
+              onResume={handleResume}
+              onKill={handleKill}
+              onNewProject={handleNewProject}
+              selectedProject={selectedProject}
+              onSelectProject={(id) => {
+                setSelectedProject(id)
+                saveLastProject(id)
+              }}
+              theme={theme}
+              toggleTheme={toggleTheme}
+              onCloudConnect={async (url, token) => {
+                localStorage.setItem("agentrune_server", url)
+                setServerUrl(url)
+                setServerReady(true)
+                let csToken = token
+                if (!csToken) {
+                  const phoneToken = localStorage.getItem("agentrune_phone_token")
+                  if (phoneToken) {
+                    try {
+                      const authRes = await fetch(`${url}/api/auth/cloud`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ phoneToken }),
+                      })
+                      if (authRes.ok) {
+                        const authData = await authRes.json()
+                        csToken = authData.sessionToken
+                      }
+                    } catch {}
+                  }
+                }
+                if (csToken) {
+                  localStorage.setItem("agentrune_cloud_token", csToken)
+                  setCloudSessionToken(csToken)
+                }
+                recheckAuth()
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </ErrorBoundary>
   )
 }

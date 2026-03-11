@@ -1,6 +1,7 @@
 // components/AutomationSheet.tsx
 // Alarm-clock style scheduling sheet with template support
 import { useState, useEffect, useCallback, useRef } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import { useLocale } from "../lib/i18n"
 import { AGENTS } from "../types"
 import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS } from "../data/builtin-templates"
@@ -284,6 +285,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formInterval, setFormInterval] = useState("30")
   const [formRunMode, setFormRunMode] = useState<"local" | "worktree">("local")
   const [formAgentId, setFormAgentId] = useState("claude")
+  const [formModel, setFormModel] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   // Template browsing
@@ -337,6 +339,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormInterval(String(initialEdit.schedule.intervalMinutes || 30))
         setFormRunMode((initialEdit.runMode as "local" | "worktree") || "local")
         setFormAgentId(initialEdit.agentId || "claude")
+        setFormModel((initialEdit as any).model || "")
         setPage("add")
       } else {
         setPage("pick")
@@ -405,6 +408,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     setFormInterval("30")
     setFormRunMode("local")
     setFormAgentId("claude")
+    setFormModel("")
     setPage("add")
   }
 
@@ -428,6 +432,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       schedule,
       runMode: formRunMode,
       agentId: formAgentId,
+      model: formModel || undefined,
       enabled: true,
     }
 
@@ -522,25 +527,41 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     return `${(ms / 60_000).toFixed(1)}m`
   }
 
-  if (!open) return null
-
   return (
-    <>
+    <AnimatePresence>
+      {open && (
+      <>
       {/* Backdrop */}
-      <div onClick={onClose} style={{
-        position: "fixed", inset: 0, zIndex: 200,
-        background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
-      }} />
+      <motion.div
+        key="auto-backdrop"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0, transition: { duration: 0.15 } }}
+        transition={{ duration: 0.2 }}
+        onClick={onClose}
+        style={{
+          position: "fixed", inset: 0, zIndex: 200,
+          background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
+        }}
+      />
 
       {/* Sheet */}
-      <div ref={sheetRef} {...swipeHandlers} style={{
-        position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 201,
-        background: "#e5ddd5",
-        borderTop: "1px solid rgba(0,0,0,0.08)", borderRadius: "24px 24px 0 0",
-        padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
-        maxHeight: "85dvh", overflowY: "auto",
-        color: "#1e293b",
-      }}>
+      <motion.div
+        key="auto-sheet"
+        initial={{ y: "100%" }}
+        animate={{ y: 0 }}
+        exit={{ y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
+        transition={{ type: "spring", stiffness: 200, damping: 20 }}
+        ref={sheetRef} {...swipeHandlers}
+        style={{
+          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 201,
+          background: "#e5ddd5",
+          borderTop: "1px solid rgba(0,0,0,0.08)", borderRadius: "24px 24px 0 0",
+          padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
+          maxHeight: "85dvh", overflowY: "auto",
+          color: "#1e293b",
+        }}
+      >
         {/* Handle */}
         <div style={{ width: 36, height: 4, borderRadius: 2, background: "#94a3b8", opacity: 0.3, margin: "0 auto 20px" }} />
 
@@ -876,6 +897,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 background: "var(--icon-bg)", color: "var(--text-secondary)", fontWeight: 600,
                               }}>
                                 {AGENTS.find((a) => a.id === auto.agentId)?.name || auto.agentId}
+                                {(auto as any).model ? ` · ${(auto as any).model}` : ""}
                               </span>
                             )}
                             <span style={{
@@ -909,6 +931,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               setFormInterval(String(auto.schedule.intervalMinutes || 30))
                               setFormRunMode(auto.runMode || "local")
                               setFormAgentId(auto.agentId || "claude")
+                              setFormModel((auto as any).model || "")
                               setPage("add")
                             }} style={{
                               flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
@@ -1419,6 +1442,34 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   )
                 })}
               </div>
+
+              {/* Model selector (agent-specific) */}
+              {formAgentId === "claude" && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6, fontWeight: 600 }}>Model</div>
+                  <div style={{ display: "flex", gap: 6, overflowX: "auto" }}>
+                    {[
+                      { id: "", label: "Default" },
+                      { id: "sonnet", label: "Sonnet" },
+                      { id: "opus", label: "Opus" },
+                      { id: "haiku", label: "Haiku" },
+                    ].map((m) => {
+                      const active = formModel === m.id
+                      return (
+                        <button key={m.id} onClick={() => setFormModel(m.id)} style={{
+                          padding: "6px 12px", borderRadius: 8, flexShrink: 0,
+                          border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
+                          background: active ? "rgba(55,172,192,0.12)" : "transparent",
+                          color: active ? "#37ACC0" : "var(--text-secondary)",
+                          fontSize: 11, fontWeight: 600, cursor: "pointer",
+                        }}>
+                          {m.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 6. Buttons */}
@@ -1453,7 +1504,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             </div>
           </>
         )}
-      </div>
+      </motion.div>
 
       {/* Fullscreen prompt editor */}
       {promptExpanded && (
@@ -1527,6 +1578,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         </div>
       )}
     </>
+      )}
+    </AnimatePresence>
   )
 }
 

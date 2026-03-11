@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import { PathBadge } from "./PathBadge"
+import { SpringOverlay } from "./SpringOverlay"
 
 interface FileEntry {
   name: string
@@ -114,9 +115,8 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
     } catch {}
   }
 
-  if (!open) return null
-
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed",
       inset: 0,
@@ -125,7 +125,6 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
       flexDirection: "column",
       background: "var(--bg-gradient)",
       color: "var(--text-primary)",
-      animation: "fadeSlideUp 0.3s ease-out",
     }}>
       {/* Header — same as LaunchPad header area */}
       <div style={{
@@ -445,6 +444,7 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
         </button>
       </div>
     </div>
+    </SpringOverlay>
   )
 }
 
