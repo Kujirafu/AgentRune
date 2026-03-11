@@ -276,7 +276,10 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
       .then(r => r.ok ? r.json() : { data: [] })
-      .then(d => setMyChains(d.data || []))
+      .then(d => {
+        const chains = d.data?.chains ?? d.data
+        setMyChains(Array.isArray(chains) ? chains : [])
+      })
       .catch(() => setMyChains([]))
       .finally(() => setMyChainsLoading(false))
   }, [view])
