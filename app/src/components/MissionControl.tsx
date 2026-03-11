@@ -49,6 +49,7 @@ interface MissionControlProps {
   onRequestVoiceRef?: React.MutableRefObject<((callback: (text: string) => void, label?: string) => void) | null>
   wsConnected?: boolean
   onLaunchSession?: (projectId: string, agentId: string) => void
+  onOpenBuilder?: () => void
 }
 
 // Session label helpers (localStorage-backed)
@@ -83,6 +84,7 @@ export function MissionControl({
   onRequestVoiceRef,
   wsConnected = false,
   onLaunchSession,
+  onOpenBuilder,
 }: MissionControlProps) {
   const { t, locale } = useLocale()
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
@@ -119,6 +121,7 @@ export function MissionControl({
   const promptReadyRef = useRef(false)
   const scrollbackProcessedRef = useRef(false)
   const pendingImagePathsRef = useRef<string[]>([])
+  const [hasPendingImages, setHasPendingImages] = useState(false)
 
   // Voice overlay state — Native Speech Recognition (Capacitor plugin)
   const [voicePhase, setVoicePhase] = useState<"preparing" | "recording" | "cleaning" | "result" | null>(null)
@@ -812,6 +815,7 @@ export function MissionControl({
       }].slice(-200))
       // Queue the path — will be sent together with the user's next message
       pendingImagePathsRef.current.push(data.path)
+      setHasPendingImages(true)
     } catch (err) {
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`, timestamp: Date.now(),
@@ -851,6 +855,7 @@ export function MissionControl({
     // which would split the message and submit only the first line.
     const pendingImages = pendingImagePathsRef.current.splice(0)
     if (pendingImages.length > 0) {
+      setHasPendingImages(false)
       const imagePaths = pendingImages.join(" ")
       text = text.trim()
         ? `${text} [Attached images — please read these files:] ${imagePaths}`
@@ -878,11 +883,11 @@ export function MissionControl({
       // Continue to add user event below (don't return)
     }
 
-    // Send text first, then Enter separately after a delay.
-    // TUI apps like Claude Code process input as a stream — if text+\r arrives
-    // as one chunk, \r gets treated as a newline in the input buffer instead of
-    // triggering submission. Splitting them ensures \r is handled as Enter.
-    const sent = pendingFreeText ? true : sendInput(text)
+    // Send text + \r together — server-side ws-server.ts splits long inputs
+    // (>100 chars) and adds a 200ms delay before \r to ensure PTY processes text first.
+    // Exception: slash commands need autocomplete render time, so send text then delayed \r.
+    const isSlash = text.startsWith("/")
+    const sent = pendingFreeText ? true : sendInput(isSlash ? text : text + "\r")
     if (!sent) {
       setEvents(prev => [...prev, {
         id: `err_${Date.now()}`,
@@ -894,13 +899,10 @@ export function MissionControl({
       }])
       return
     }
-    // Claude Code slash commands (e.g. /resume) need time for autocomplete to render
-    // before pressing Enter. Regular text needs only a short delay.
-    // Skip if free text path already handled Enter via its own setTimeout
-    if (!pendingFreeText) {
-      const enterDelay = text.startsWith("/") ? 300 : 30
-      setTimeout(() => sendInput("\r"), enterDelay)
+    if (!pendingFreeText && isSlash) {
+      setTimeout(() => sendInput("\r"), 300)
     }
+
 
     // For TUI commands like /resume, re-attach ONCE after TUI renders to get scrollback.
     // Live ANSI parsing is unreliable due to cursor positioning.
@@ -1355,6 +1357,8 @@ export function MissionControl({
   // Android back button — close overlays first (innermost → outermost)
   useEffect(() => {
     const handler = (e: Event) => {
+      // MissionControl is hidden when terminal is active — don't handle back
+      if (viewMode === "terminal") return
       // Voice overlay is topmost — close it first
       if (voicePhase) {
         mcCancelVoice()
@@ -1374,7 +1378,7 @@ export function MissionControl({
     }
     document.addEventListener("app:back", handler)
     return () => document.removeEventListener("app:back", handler)
-  }, [voicePhase, previewFile, showGit, showTasks, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
+  }, [viewMode, voicePhase, previewFile, showGit, showTasks, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
 
   // TerminalView (always mounted) handles attach + auto-command.
   // MissionControl just listens for WS messages ??no attach needed.
@@ -1739,6 +1743,8 @@ return (
               disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
               isUploadingImage={isUploadingImage}
               checkUploading={checkUploading}
+              hasPendingImages={hasPendingImages}
+              onOpenBuilder={onOpenBuilder}
             />
           </div>
 

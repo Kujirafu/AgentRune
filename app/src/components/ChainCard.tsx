@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { SkillChainDef, ChainDepth, ChainPhase, ChainNode } from "../lib/skillChains"
-import { estimateTokens, formatChainInstructions, HIGH_COMPLEXITY_THRESHOLD, isParallelGroup, getStepCount } from "../lib/skillChains"
+import { estimateTokens, formatChainInstructions, HIGH_COMPLEXITY_THRESHOLD, isParallelGroup, getStepCount, resolveChainText } from "../lib/skillChains"
 
 // Phase colors — distinct for dark/light via CSS vars, fallback to hardcoded
 const PHASE_COLORS: Record<ChainPhase, { dot: string; text: string }> = {
@@ -16,14 +16,15 @@ interface ChainCardProps {
   t: (key: string) => string
   collapsed?: boolean   // start collapsed when showing multiple suggestions
   relevance?: number    // 0-1 match score, shown as badge
+  onFork?: (chain: SkillChainDef) => void
 }
 
-export function ChainCard({ chain, onSend, t, collapsed, relevance }: ChainCardProps) {
+export function ChainCard({ chain, onSend, t, collapsed, relevance, onFork }: ChainCardProps) {
   const [depth, setDepth] = useState<ChainDepth>("lite")
   const [expanded, setExpanded] = useState(!collapsed)
 
   const tokens = estimateTokens(chain, depth)
-  const desc = t(chain.descKey)
+  const desc = resolveChainText(chain.descKey, t)
   const stepCount = getStepCount(chain)
 
   const handleStart = () => {
@@ -289,21 +290,44 @@ export function ChainCard({ chain, onSend, t, collapsed, relevance }: ChainCardP
             </div>
           )}
 
-          {/* Start button */}
-          <button
-            onClick={handleStart}
-            style={{
-              width: "100%",
-              padding: "8px 12px", borderRadius: 10,
-              border: "1px solid var(--accent-primary)",
-              background: "var(--accent-primary-bg)",
-              color: "var(--accent-primary)",
-              fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            {t("chain.start")} /{chain.slug}
-          </button>
+          {/* Action buttons */}
+          <div style={{ display: "flex", gap: 8 }}>
+            {onFork && (
+              <button
+                onClick={() => onFork(chain)}
+                style={{
+                  padding: "8px 12px", borderRadius: 10,
+                  border: "1px solid var(--glass-border)",
+                  background: "transparent",
+                  color: "var(--text-secondary)",
+                  fontSize: 12, fontWeight: 600,
+                  cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 5,
+                }}
+              >
+                {/* Lucide git-fork SVG */}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/>
+                  <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9"/><path d="M12 12v3"/>
+                </svg>
+                {t("chain.fork")}
+              </button>
+            )}
+            <button
+              onClick={handleStart}
+              style={{
+                flex: 1,
+                padding: "8px 12px", borderRadius: 10,
+                border: "1px solid var(--accent-primary)",
+                background: "var(--accent-primary-bg)",
+                color: "var(--accent-primary)",
+                fontSize: 12, fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {t("chain.start")} /{chain.slug}
+            </button>
+          </div>
         </div>
       )}
     </div>

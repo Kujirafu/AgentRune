@@ -9,6 +9,7 @@ import { MissionControl } from "./components/MissionControl"
 import { ProjectOverview } from "./components/ProjectOverview"
 import { UnifiedPanel } from "./components/UnifiedPanel"
 import { DiffPanel } from "./components/DiffPanel"
+import { ChainBuilder } from "./components/ChainBuilder"
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
@@ -1138,7 +1139,7 @@ const IS_DEV_PREVIEW = typeof window !== "undefined" &&
 
 // ─── Main App (Router) ──────────────────────────────────────────
 
-type Screen = "launchpad" | "overview" | "session"
+type Screen = "launchpad" | "overview" | "session" | "builder"
 
 // ─── Auto Update Checker ────────────────────────────────────────
 const UPDATE_CHECK_INTERVAL = 6 * 60 * 60 * 1000 // 6 hours
@@ -1438,6 +1439,33 @@ export function App() {
     return () => { unsub(); window.removeEventListener("notificationsChanged", onEnable) }
   }, [on])
 
+  // Automation completion notifications
+  useEffect(() => {
+    if (!isCapacitor()) return
+    const unsub = on("automation_completed", (msg) => {
+      if (!getNotificationsEnabled()) return
+      const auto = msg.automation as { name?: string } | undefined
+      const result = msg.result as { status?: string; finishedAt?: number; startedAt?: number } | undefined
+      if (!auto || !result) return
+      const name = auto.name || "Automation"
+      const duration = result.startedAt && result.finishedAt
+        ? Math.round((result.finishedAt - result.startedAt) / 1000)
+        : 0
+      const durationStr = duration > 60 ? `${Math.floor(duration / 60)}m ${duration % 60}s` : `${duration}s`
+      LocalNotifications.schedule({
+        notifications: [{
+          id: Date.now(),
+          title: result.status === "success" ? `${name} completed` : `${name} failed`,
+          body: result.status === "success"
+            ? `Finished in ${durationStr}`
+            : `Status: ${result.status} (${durationStr})`,
+          smallIcon: "ic_launcher",
+        }],
+      }).catch(() => {})
+    })
+    return () => unsub()
+  }, [on])
+
   // Populate sessionEventsMap from session_activity broadcasts (for ProjectOverview summaries)
   useEffect(() => {
     const unsub1 = on("session_activity", (msg) => {
@@ -1585,8 +1613,8 @@ export function App() {
           setScreen("overview")
           setViewMode("board")
         }
-      } else if (screenRef.current === "launchpad") {
-        // LaunchPad is only for creating new sessions — back goes to overview
+      } else if (screenRef.current === "launchpad" || screenRef.current === "builder") {
+        // LaunchPad / Builder — back goes to overview
         setScreen("overview")
       } else {
         // overview is home — minimize app
@@ -1744,6 +1772,15 @@ export function App() {
     setScreen("overview")
   }
 
+  // Chain Builder screen
+  if (screen === "builder") {
+    return (
+      <ErrorBoundary>
+        <ChainBuilder onBack={() => setScreen("overview")} t={(k: string) => k} />
+      </ErrorBoundary>
+    )
+  }
+
   if (screen === "session" && selectedProject) {
     const project = projects.find((p) => p.id === selectedProject)
     if (project) {
@@ -1795,6 +1832,7 @@ export function App() {
               onRequestVoiceRef={requestVoiceRef}
               wsConnected={wsConnected}
               onLaunchSession={handleLaunch}
+              onOpenBuilder={() => setScreen("builder")}
             />
             <DiffPanel
               event={diffEvent}
@@ -1842,6 +1880,7 @@ export function App() {
           theme={theme}
           toggleTheme={toggleTheme}
           wsConnected={wsConnected}
+          onOpenBuilder={() => setScreen("builder")}
           onCloudConnect={async (url, token) => {
             localStorage.setItem("agentrune_server", url)
             setServerUrl(url)
