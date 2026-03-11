@@ -7,6 +7,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, basename, dirname, isAbsolute, resolve, normalize } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { execFileSync, spawn as childSpawn } from "node:child_process"
+import { randomInt } from "node:crypto"
 import * as childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { PtyManager } from "./pty-manager.js"
@@ -330,10 +331,12 @@ export function createServer(portOverride?: number) {
   // CORS — allow cross-origin requests (phone app via tunnel)
   const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost"])
   function isAllowedOrigin(origin: string | undefined): string | false {
-    if (!origin) return false
+    if (!origin) return "*" // WebSocket upgrades and same-origin requests have no origin
     if (ALLOWED_ORIGINS.has(origin)) return origin
     // Allow http://localhost with any port
     if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
+    // Allow capacitor with any scheme (http or capacitor)
+    if (/^(capacitor|http):\/\/localhost$/.test(origin)) return origin
     return false
   }
   app.use((_req, res, next) => {
@@ -367,7 +370,8 @@ export function createServer(portOverride?: number) {
   // Token can be passed via Authorization header or ?token= query param.
   function requireAuth(req: any, res: any, next: any) {
     // Skip auth routes (pairing, device auth, cloud auth, etc.)
-    if (req.path.startsWith("/api/auth/")) return next()
+    // EXCEPT /api/auth/new-code which must require auth to prevent remote pairing bypass
+    if (req.path.startsWith("/api/auth/") && req.path !== "/api/auth/new-code") return next()
 
     // Allow local connections without auth (same as WS local bypass)
     const remoteAddr = req.socket?.remoteAddress || ""
@@ -448,7 +452,7 @@ export function createServer(portOverride?: number) {
       log.warn("[Self-heal] Server closed unexpectedly — attempting re-listen in 3s...")
       listenRetries = 0
       setTimeout(() => {
-        try { server.listen(PORT, "0.0.0.0") } catch (e: any) {
+        try { server.listen(PORT, "127.0.0.1") } catch (e: any) {
           log.error(`[Self-heal] Re-listen failed: ${e.message}`)
         }
       }, 3000)
@@ -502,7 +506,7 @@ export function createServer(portOverride?: number) {
   let pairingCodeExpiry = 0
 
   function generatePairingCode(): string {
-    pairingCode = String(Math.floor(100000 + Math.random() * 900000))
+    pairingCode = String(randomInt(100000, 1000000))
     pairingCodeExpiry = Date.now() + 5 * 60 * 1000 // 5 min expiry
     log.info(`\n  Pairing code: ${pairingCode}\n  (expires in 5 minutes)\n`)
     return pairingCode
@@ -605,7 +609,8 @@ export function createServer(portOverride?: number) {
       const sessionToken = issueSessionToken()
       res.json({ authenticated: true, sessionToken })
     } catch (err: any) {
-      res.status(500).json({ error: "Verification failed: " + (err?.message || "unknown") })
+      log.error(`[cloud auth] Verification failed: ${err?.message || "unknown"}`)
+      res.status(500).json({ error: "Verification failed" })
     }
   })
 
@@ -3411,7 +3416,7 @@ export function createServer(portOverride?: number) {
 
   // --- Start listening ---
 
-  server.listen(PORT, "0.0.0.0", async () => {
+  server.listen(PORT, "127.0.0.1", async () => {
     log.success(`AgentRune running at http://localhost:${PORT}`)
     const localIp = getLocalIp()
     if (localIp !== "127.0.0.1") {
