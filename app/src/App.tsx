@@ -1193,6 +1193,7 @@ async function checkForUpdate(): Promise<{ version: string; url: string; notes: 
 }
 
 export function App() {
+  const { t } = useLocale()
   // Cloud mode: user logged in via AgentLore — reactive state so login completes without reload
   const [isCloudMode, setIsCloudMode] = useState(() => !!localStorage.getItem("agentrune_phone_token"))
   const [serverReady, setServerReady] = useState(() => IS_DEV_PREVIEW || !needsServerSetup())
@@ -1284,8 +1285,9 @@ export function App() {
     // Load active sessions
     fetch(`${base}/api/sessions`)
       .then((r) => r.json())
-      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }[]) => {
-        const sessions = data.map((s) => ({
+      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }[] | unknown) => {
+        if (!Array.isArray(data)) return
+        const sessions = data.map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }) => ({
           id: s.id,
           projectId: s.projectId,
           agentId: s.agentId,
@@ -1776,7 +1778,7 @@ export function App() {
   if (screen === "builder") {
     return (
       <ErrorBoundary>
-        <ChainBuilder onBack={() => setScreen("overview")} t={(k: string) => k} />
+        <ChainBuilder onBack={() => setScreen("overview")} t={t} />
       </ErrorBoundary>
     )
   }
