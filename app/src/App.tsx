@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback, Component, type ErrorInfo, type ReactNode } from "react"
+import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
 import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { LaunchPad } from "./components/LaunchPad"
-import { TerminalView } from "./components/TerminalView"
+const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
 import { MissionControl } from "./components/MissionControl"
 import { ProjectOverview } from "./components/ProjectOverview"
 import { UnifiedPanel } from "./components/UnifiedPanel"
@@ -1351,6 +1351,8 @@ export function App() {
   const wsToken = cloudSessionToken || sessionToken
   useEffect(() => {
     if (!isAuthed || !wsToken) return
+    // In Capacitor, don't attempt WS if no server URL is configured (fresh install)
+    if (isCapacitor() && !getServerUrl()) return
     connect(wsToken)
     // Cleanup: don't close on re-render — useWs manages its own lifecycle.
     // Only close on full unmount (App teardown).
@@ -1783,20 +1785,20 @@ export function App() {
   let screenKey: string = screen
   if (screen === "session" && !sessionProject) screenKey = "overview"
 
-  // Spring transition config — tuned for Android WebView performance
-  const springEnter = { type: "spring" as const, stiffness: 200, damping: 20 }
-  const quickExit = { duration: 0.12, ease: "easeIn" as const }
+  // Page transition — GPU-friendly tween, tuned for mobile WebView
+  const pageEnter = { duration: 0.22, ease: [0.25, 0.1, 0.25, 1] as const }
+  const pageExit = { duration: 0.12, ease: [0.4, 0, 1, 1] as const }
 
   return (
     <ErrorBoundary>
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {screen === "builder" ? (
           <motion.div
             key="builder"
-            initial={{ opacity: 0, y: 28 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12, transition: quickExit }}
-            transition={springEnter}
+            exit={{ opacity: 0, y: -8, transition: pageExit }}
+            transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
             <ChainBuilder onBack={() => setScreen("overview")} t={t} />
@@ -1804,10 +1806,10 @@ export function App() {
         ) : isSessionReady ? (
           <motion.div
             key="session"
-            initial={{ opacity: 0, y: 28 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12, transition: quickExit }}
-            transition={springEnter}
+            exit={{ opacity: 0, y: -8, transition: pageExit }}
+            transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
             {/* Always keep TerminalView mounted to preserve xterm content.
@@ -1817,16 +1819,18 @@ export function App() {
               position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
               visibility: "hidden", zIndex: 0,
             } : undefined}>
-              <TerminalView
-                project={sessionProject!}
-                agentId={activeAgentId}
-                sessionId={currentSessionId || undefined}
-                resumeSessionId={resumeSessionId}
-                sessionToken={sessionToken}
-                send={send}
-                on={on}
-                onBack={() => setViewMode("board")}
-              />
+              <Suspense fallback={<div className="flex items-center justify-center h-full w-full bg-black"><div className="text-neutral-400 text-sm">Loading terminal…</div></div>}>
+                <TerminalView
+                  project={sessionProject!}
+                  agentId={activeAgentId}
+                  sessionId={currentSessionId || undefined}
+                  resumeSessionId={resumeSessionId}
+                  sessionToken={sessionToken}
+                  send={send}
+                  on={on}
+                  onBack={() => setViewMode("board")}
+                />
+              </Suspense>
             </div>
             {/* Always keep MissionControl mounted to preserve events state.
                 When in terminal mode, hide it with visibility:hidden (mirrors TerminalView pattern). */}
@@ -1876,10 +1880,10 @@ export function App() {
         ) : (screen === "overview" || screen === "session") ? (
           <motion.div
             key="overview"
-            initial={{ opacity: 0, y: 28 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12, transition: quickExit }}
-            transition={springEnter}
+            exit={{ opacity: 0, y: -8, transition: pageExit }}
+            transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
             <UnifiedPanel
@@ -1937,10 +1941,10 @@ export function App() {
         ) : (
           <motion.div
             key="launchpad"
-            initial={{ opacity: 0, y: 28 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12, transition: quickExit }}
-            transition={springEnter}
+            exit={{ opacity: 0, y: -8, transition: pageExit }}
+            transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
             {cliUpdate && (

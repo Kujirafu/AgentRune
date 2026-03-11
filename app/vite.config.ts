@@ -12,12 +12,22 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      __APP_VERSION__: JSON.stringify("0.2.9"),
+      __APP_VERSION__: JSON.stringify("0.2.10"),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
     build: {
       outDir: "dist",
       emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            // Split heavy deps into separate lazy-loadable chunks
+            xterm: ["@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"],
+            markdown: ["react-markdown", "remark-gfm", "remark-parse", "unified"],
+            // framer-motion stays in main bundle — needed for page transitions on first paint
+          },
+        },
+      },
     },
     server: {
       host: true,
