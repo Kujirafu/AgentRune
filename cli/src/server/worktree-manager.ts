@@ -1,6 +1,6 @@
 // server/worktree-manager.ts
 // Manages git worktrees for session isolation
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 
@@ -9,6 +9,11 @@ export interface Worktree {
   branch: string
   sessionId?: string
   createdAt: number
+}
+
+/** Sanitize slug to prevent command injection — allow only alphanumeric, hyphens, underscores */
+function sanitizeSlug(input: string): string {
+  return input.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64)
 }
 
 export class WorktreeManager {
@@ -25,21 +30,21 @@ export class WorktreeManager {
     if (existing) return existing
 
     const date = new Date().toISOString().slice(0, 10)
-    const slug = taskSlug || sessionId.slice(0, 8)
+    const slug = sanitizeSlug(taskSlug || sessionId.slice(0, 8))
     const branch = `agentrune/${date}-${slug}`
     const worktreeDir = join(this.projectCwd, ".worktrees", `${date}-${slug}`)
 
     mkdirSync(join(this.projectCwd, ".worktrees"), { recursive: true })
 
     try {
-      execSync(`git worktree add -b "${branch}" "${worktreeDir}"`, {
+      execFileSync("git", ["worktree", "add", "-b", branch, worktreeDir], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
       })
     } catch {
       // Branch might already exist — try without -b
-      execSync(`git worktree add "${worktreeDir}" "${branch}"`, {
+      execFileSync("git", ["worktree", "add", worktreeDir, branch], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
@@ -72,7 +77,7 @@ export class WorktreeManager {
     if (!wt) return { success: false, message: "Worktree not found" }
 
     try {
-      execSync(`git merge "${wt.branch}" --no-edit`, {
+      execFileSync("git", ["merge", wt.branch, "--no-edit"], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
@@ -91,7 +96,7 @@ export class WorktreeManager {
     if (!wt) return
 
     try {
-      execSync(`git worktree remove "${wt.path}" --force`, {
+      execFileSync("git", ["worktree", "remove", wt.path, "--force"], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
@@ -99,7 +104,7 @@ export class WorktreeManager {
     } catch { /* worktree may already be removed */ }
 
     try {
-      execSync(`git branch -D "${wt.branch}"`, {
+      execFileSync("git", ["branch", "-D", wt.branch], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
