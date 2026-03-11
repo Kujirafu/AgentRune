@@ -349,7 +349,7 @@ function highlightInput(text: string) {
 }
 
 interface InputBarProps {
-  onSend: (text: string, flags?: SendFlags) => void
+  onSend: (text: string, flags?: SendFlags, images?: string[]) => void
   onImagePaste?: (base64: string, filename: string) => void
   onBrowse?: () => void
   onVoice?: () => void
@@ -486,7 +486,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
         const data = await res.json()
         const textPayload = data.result?.[0]?.text || data.content?.[0]?.text || "{}"
         const parsed = JSON.parse(textPayload)
-        setMcpSkills(parsed.skills || [])
+        setMcpSkills(Array.isArray(parsed.skills) ? parsed.skills : [])
         setMcpScenario(parsed.matched_scenario || parsed.hint || null)
       } catch {
         setMcpSkills([])
@@ -802,11 +802,13 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
       const filePaths = attachedFiles!.join("\n")
       toSend = toSend ? `${toSend}\n${filePaths}` : filePaths
     }
+    // Collect images to send inline via WS (not HTTP upload)
+    const imagesToSend = pasteImages.length > 0 ? [...pasteImages] : undefined
     if (toSend.trim()) {
       addSent({ text: trimmed || attachedFiles![0], time: Date.now() })
-      onSend(toSend, flags)
-    } else if (pasteImages.length > 0 || hasPendingImages) {
-      onSend("", flags)
+      onSend(toSend, flags, imagesToSend)
+    } else if (imagesToSend || hasPendingImages) {
+      onSend("", flags, imagesToSend)
     }
     setInput("")
     setPasteImages([])
@@ -822,7 +824,9 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   // Keep ref in sync so useEffect always calls the latest version
   handleSendInnerRef.current = handleSendInner
 
-  // When upload finishes, auto-send if user already pressed Enter
+  // When upload finishes, auto-send if user already pressed Enter.
+  // Use both useEffect AND polling to handle React 18 batching edge cases
+  // where isUploadingImage state changes may not trigger the effect.
   useEffect(() => {
     if (!isUploadingImage && pendingSendRef.current) {
       pendingSendRef.current = false
@@ -830,6 +834,20 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
       setTimeout(() => handleSendInnerRef.current(), 0)
     }
   }, [isUploadingImage])
+
+  // Polling fallback: check ref directly every 200ms when pendingSend is active
+  useEffect(() => {
+    if (!uploadPendingSend) return
+    const interval = setInterval(() => {
+      if (pendingSendRef.current && !(checkUploading ? checkUploading() : false)) {
+        pendingSendRef.current = false
+        setUploadPendingSend(false)
+        clearInterval(interval)
+        setTimeout(() => handleSendInnerRef.current(), 0)
+      }
+    }, 200)
+    return () => clearInterval(interval)
+  }, [uploadPendingSend, checkUploading])
 
   const handleSend = () => {
     if (disabled) return

@@ -241,7 +241,18 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
             cursor: hasDetail ? "pointer" : "default",
           }}
         >
-          {userImgUrl && (
+          {event._images && event._images.length > 0 ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", marginBottom: 4 }}>
+              {event._images.map((img, i) => (
+                <img
+                  key={i}
+                  src={img}
+                  alt={`attached ${i + 1}`}
+                  style={{ maxWidth: event._images!.length > 1 ? 140 : "100%", maxHeight: event._images!.length > 1 ? 100 : 200, borderRadius: 10, objectFit: "cover", border: "1px solid var(--glass-border)" }}
+                />
+              ))}
+            </div>
+          ) : userImgUrl ? (
             <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
               <img
                 src={userImgUrl}
@@ -249,7 +260,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                 style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 10, objectFit: "contain" }}
               />
             </div>
-          )}
+          ) : null}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
             <span style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, flexShrink: 0 }}>
               {new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -419,6 +430,24 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                     alt="uploaded"
                     style={{ maxWidth: "100%", maxHeight: 300, borderRadius: 10, objectFit: "contain" }}
                   />
+                ) : event._images && event._images.length > 0 ? (
+                  <div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                      {event._images.map((img, i) => (
+                        <img
+                          key={i}
+                          src={img}
+                          alt={`attached ${i + 1}`}
+                          style={{ maxWidth: 120, maxHeight: 90, borderRadius: 8, objectFit: "cover", border: "1px solid var(--glass-border)" }}
+                        />
+                      ))}
+                    </div>
+                    {cleanDetail && (
+                      <div className="ec-md">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <>
                   <style>{`
@@ -498,7 +527,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
           const isDecided = event.status === "completed" && !!selectedInput
           return (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
-              {event.decision!.options.map((opt) => {
+              {(event.decision!.options || []).map((opt) => {
                 const isSelected = isDecided && opt.input === selectedInput
                 const isOther = isDecided && !isSelected
                 if (isOther) return null  // hide unselected options
