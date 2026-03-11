@@ -1,7 +1,7 @@
 // server/auth.ts
 // Session & device token management with encrypted disk persistence
 
-import { randomBytes } from "node:crypto"
+import { randomBytes, timingSafeEqual } from "node:crypto"
 import { readFileSync, existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -118,7 +118,9 @@ export function registerDevice(deviceName: string): DeviceEntry {
 export function validateDeviceToken(deviceId: string, token: string): boolean {
   const entry = pairedDevices.get(deviceId)
   if (!entry) return false
-  return entry.token === token
+  const a = Buffer.from(entry.token)
+  const b = Buffer.from(token)
+  return a.length === b.length && timingSafeEqual(a, b)
 }
 
 export function hasPairedDevices(): boolean {

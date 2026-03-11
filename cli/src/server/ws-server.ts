@@ -4,9 +4,9 @@ import express from "express"
 import { createServer as createHttpServer } from "node:http"
 import { WebSocketServer, WebSocket } from "ws"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile, unlinkSync, openSync, readSync, closeSync } from "node:fs"
-import { join, basename, dirname, isAbsolute } from "node:path"
+import { join, basename, dirname, isAbsolute, resolve, normalize } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
-import { execSync, spawn as childSpawn } from "node:child_process"
+import { execFileSync, spawn as childSpawn } from "node:child_process"
 import * as childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { PtyManager } from "./pty-manager.js"
@@ -314,6 +314,9 @@ async function checkCliUpdate(): Promise<void> {
   } catch {}
 }
 
+// Whitelist of allowed environment variable keys for API key injection
+const ALLOWED_ENV_KEYS = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY", "FIREWORKS_API_KEY", "TOGETHER_API_KEY", "COHERE_API_KEY", "PERPLEXITY_API_KEY", "OPENROUTER_API_KEY", "AZURE_OPENAI_API_KEY", "REPLICATE_API_TOKEN", "AGENTLORE_API_KEY", "OPENCLAW_API_KEY"])
+
 export function createServer(portOverride?: number) {
   const config = loadConfig()
   const PORT = portOverride || config.port || 3456
@@ -325,8 +328,20 @@ export function createServer(portOverride?: number) {
   app.use(express.json({ limit: "50mb" }))
 
   // CORS — allow cross-origin requests (phone app via tunnel)
+  const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost"])
+  function isAllowedOrigin(origin: string | undefined): string | false {
+    if (!origin) return false
+    if (ALLOWED_ORIGINS.has(origin)) return origin
+    // Allow http://localhost with any port
+    if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
+    return false
+  }
   app.use((_req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*")
+    const origin = _req.headers.origin
+    const allowed = isAllowedOrigin(origin)
+    if (allowed) {
+      res.header("Access-Control-Allow-Origin", allowed)
+    }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Id, X-Api-Keys")
     if (_req.method === "OPTIONS") return res.sendStatus(204)
@@ -467,7 +482,11 @@ export function createServer(portOverride?: number) {
 
   // --- CORS ---
   app.use((_req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*")
+    const origin = _req.headers.origin
+    const allowed = isAllowedOrigin(origin)
+    if (allowed) {
+      res.header("Access-Control-Allow-Origin", allowed)
+    }
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization")
     res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
     if (_req.method === "OPTIONS") {
@@ -504,8 +523,24 @@ export function createServer(portOverride?: number) {
     })
   })
 
+  // Rate limiter for pairing attempts (brute-force protection)
+  const pairAttempts = new Map<string, { count: number; resetAt: number }>()
+
   // Pair a new device with the 6-digit code shown in CLI
   app.post("/api/auth/pair", (req, res) => {
+    // Rate limit by IP
+    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    const now = Date.now()
+    const attempt = pairAttempts.get(ip)
+    if (attempt && attempt.resetAt > now && attempt.count >= 5) {
+      return res.status(429).json({ error: "Too many pairing attempts. Try again later.", retryAfter: Math.ceil((attempt.resetAt - now) / 1000) })
+    }
+    if (!attempt || attempt.resetAt <= now) {
+      pairAttempts.set(ip, { count: 1, resetAt: now + 60000 })
+    } else {
+      attempt.count++
+    }
+
     const { code, deviceName } = req.body
     if (!code || !deviceName) {
       return res.status(400).json({ error: "Missing code or deviceName" })
@@ -1041,10 +1076,10 @@ export function createServer(portOverride?: number) {
     if (typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "Missing text" })
     }
-    // Allow frontend to pass API keys (from app settings)
+    // Allow frontend to pass API keys (from app settings) — whitelist only known keys
     if (apiKeys && typeof apiKeys === "object") {
       for (const [k, v] of Object.entries(apiKeys)) {
-        if (typeof v === "string" && v && !process.env[k]) {
+        if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v && !process.env[k]) {
           process.env[k] = v
         }
       }
@@ -1103,7 +1138,7 @@ export function createServer(portOverride?: number) {
             const rawKeys = req.headers["x-api-keys"] as string
             if (rawKeys) try { Object.assign(apiKeys, JSON.parse(rawKeys)) } catch {}
             for (const [k, v] of Object.entries(apiKeys)) {
-              if (typeof v === "string" && v && !process.env[k]) process.env[k] = v
+              if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v && !process.env[k]) process.env[k] = v
             }
             const cleanup = await cleanupVoiceText(rawText, agentId)
             cleaned = cleanup.cleaned
@@ -1174,10 +1209,20 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  // --- Path validation: restrict file access to project directories ---
+  function isPathInProject(filePath: string): boolean {
+    const resolved = normalize(resolve(filePath))
+    return projects.some(p => resolved.startsWith(normalize(resolve(p.cwd))))
+  }
+
   // --- File browser ---
 
   app.get("/api/browse", (req, res) => {
     const dirPath = (req.query.path as string) || process.env.HOME || process.env.USERPROFILE || "."
+
+    if (!isPathInProject(dirPath)) {
+      return res.status(403).json({ error: "Access denied: path is outside project directories" })
+    }
 
     if (!existsSync(dirPath)) {
       return res.status(404).json({ error: "Path not found" })
@@ -1216,6 +1261,7 @@ export function createServer(portOverride?: number) {
   app.get("/api/file", (req, res) => {
     const filePath = req.query.path as string
     if (!filePath) return res.status(400).json({ error: "Missing path" })
+    if (!isPathInProject(filePath)) return res.status(403).json({ error: "Access denied: path is outside project directories" })
     if (!existsSync(filePath)) return res.status(404).json({ error: "File not found" })
 
     try {
@@ -1248,7 +1294,7 @@ export function createServer(portOverride?: number) {
     if (!project) return res.status(404).json({ error: "Project not found" })
 
     try {
-      const raw = execSync("git status --porcelain -b", { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+      const raw = execFileSync("git", ["status", "--porcelain", "-b"], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       const lines = raw.split("\n").filter(Boolean)
       let branch = "unknown"
       const branchLine = lines.find((l) => l.startsWith("## "))
@@ -1284,7 +1330,7 @@ export function createServer(portOverride?: number) {
       let before = ""
       let after = ""
       try {
-        before = execSync(`git show HEAD:${JSON.stringify(file)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+        before = execFileSync("git", ["show", `HEAD:${file}`], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       } catch { /* new file, no HEAD version */ }
       const fullPath = join(project.cwd, file)
       if (existsSync(fullPath)) {
@@ -1309,13 +1355,13 @@ export function createServer(portOverride?: number) {
       // Get unified diff (staged + unstaged)
       let rawDiff = ""
       try {
-        rawDiff = execSync(`git diff HEAD -- ${JSON.stringify(file)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+        rawDiff = execFileSync("git", ["diff", "HEAD", "--", file], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       } catch { /* new file or no HEAD */ }
 
       // If no diff against HEAD, try diff for untracked/new files
       if (!rawDiff) {
         try {
-          rawDiff = execSync(`git diff --no-index /dev/null ${JSON.stringify(file)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+          rawDiff = execFileSync("git", ["diff", "--no-index", "/dev/null", file], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
         } catch (e: unknown) {
           // git diff --no-index exits with 1 when there are differences
           if (e && typeof e === "object" && "stdout" in e) rawDiff = (e as { stdout: string }).stdout || ""
@@ -1325,9 +1371,9 @@ export function createServer(portOverride?: number) {
       // Check staged status
       let stagedRaw = ""
       try {
-        stagedRaw = execSync(`git diff --cached -- ${JSON.stringify(file)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+        stagedRaw = execFileSync("git", ["diff", "--cached", "--", file], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       } catch { /* ok */ }
-      const isFullyStaged = !!stagedRaw && !execSync(`git diff -- ${JSON.stringify(file)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 }).trim()
+      const isFullyStaged = !!stagedRaw && !execFileSync("git", ["diff", "--", file], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 }).trim()
 
       // Parse hunks from raw diff
       interface Hunk {
@@ -1383,19 +1429,19 @@ export function createServer(portOverride?: number) {
     try {
       if (!hunks || hunks.length === 0) {
         // Stage entire file
-        execSync(`git add ${JSON.stringify(filePath)}`, { cwd: project.cwd, timeout: 5000 })
+        execFileSync("git", ["add", filePath], { cwd: project.cwd, timeout: 5000 })
         res.json({ ok: true, message: `Staged ${filePath}` })
       } else {
         // Stage specific hunks via git apply
         // Get the full diff first
         let rawDiff = ""
         try {
-          rawDiff = execSync(`git diff -- ${JSON.stringify(filePath)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+          rawDiff = execFileSync("git", ["diff", "--", filePath], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
         } catch { /* ok */ }
 
         if (!rawDiff) {
           // File might be untracked, just stage it
-          execSync(`git add ${JSON.stringify(filePath)}`, { cwd: project.cwd, timeout: 5000 })
+          execFileSync("git", ["add", filePath], { cwd: project.cwd, timeout: 5000 })
           return res.json({ ok: true, message: `Staged ${filePath}` })
         }
 
@@ -1429,7 +1475,7 @@ export function createServer(portOverride?: number) {
         patchLines.push("") // trailing newline
 
         const patchContent = patchLines.join("\n")
-        execSync("git apply --cached -", { cwd: project.cwd, input: patchContent, timeout: 5000 })
+        execFileSync("git", ["apply", "--cached", "-"], { cwd: project.cwd, input: patchContent, timeout: 5000 })
 
         res.json({ ok: true, message: `Staged ${hunks.length} hunk(s) of ${filePath}` })
       }
@@ -1450,8 +1496,8 @@ export function createServer(portOverride?: number) {
         // Revert entire file
         // Check if file is tracked
         try {
-          execSync(`git ls-files --error-unmatch ${JSON.stringify(filePath)}`, { cwd: project.cwd, timeout: 5000, stdio: "pipe" })
-          execSync(`git checkout HEAD -- ${JSON.stringify(filePath)}`, { cwd: project.cwd, timeout: 5000 })
+          execFileSync("git", ["ls-files", "--error-unmatch", filePath], { cwd: project.cwd, timeout: 5000, stdio: "pipe" })
+          execFileSync("git", ["checkout", "HEAD", "--", filePath], { cwd: project.cwd, timeout: 5000 })
         } catch {
           // Untracked file — cannot revert via git, would need to delete
           return res.status(400).json({ error: "Cannot revert untracked file" })
@@ -1461,7 +1507,7 @@ export function createServer(portOverride?: number) {
         // Revert specific hunks via git apply --reverse
         let rawDiff = ""
         try {
-          rawDiff = execSync(`git diff -- ${JSON.stringify(filePath)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+          rawDiff = execFileSync("git", ["diff", "--", filePath], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
         } catch { /* ok */ }
 
         if (!rawDiff) {
@@ -1496,7 +1542,7 @@ export function createServer(portOverride?: number) {
         patchLines.push("")
 
         const patchContent = patchLines.join("\n")
-        execSync("git apply --reverse -", { cwd: project.cwd, input: patchContent, timeout: 5000 })
+        execFileSync("git", ["apply", "--reverse", "-"], { cwd: project.cwd, input: patchContent, timeout: 5000 })
 
         res.json({ ok: true, message: `Reverted ${hunks.length} hunk(s) of ${filePath}` })
       }
@@ -1514,12 +1560,12 @@ export function createServer(portOverride?: number) {
     try {
       if (files && Array.isArray(files) && files.length > 0) {
         for (const f of files) {
-          execSync(`git add ${JSON.stringify(f)}`, { cwd: project.cwd, timeout: 5000 })
+          execFileSync("git", ["add", f], { cwd: project.cwd, timeout: 5000 })
         }
       } else {
-        execSync("git add -A", { cwd: project.cwd, timeout: 5000 })
+        execFileSync("git", ["add", "-A"], { cwd: project.cwd, timeout: 5000 })
       }
-      const result = execSync(`git commit -m ${JSON.stringify(message)}`, { cwd: project.cwd, encoding: "utf-8", timeout: 10000 })
+      const result = execFileSync("git", ["commit", "-m", message], { cwd: project.cwd, encoding: "utf-8", timeout: 10000 })
       const hashMatch = result.match(/\[[\w/-]+ ([a-f0-9]+)\]/)
       res.json({ hash: hashMatch?.[1] || "unknown", message })
     } catch (err: unknown) {
@@ -1536,7 +1582,7 @@ export function createServer(portOverride?: number) {
     if (!project) return res.status(404).json({ error: "Project not found" })
 
     try {
-      const raw = execSync("git branch -a --no-color", { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+      const raw = execFileSync("git", ["branch", "-a", "--no-color"], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       const branches = raw.split("\n").filter(Boolean).map((l) => {
         const current = l.startsWith("* ")
         const name = l.replace(/^\*?\s+/, "").trim()
@@ -1556,7 +1602,7 @@ export function createServer(portOverride?: number) {
 
     try {
       const flag = force ? "-D" : "-d"
-      execSync(`git branch ${flag} ${JSON.stringify(branch)}`, { cwd: proj.cwd, encoding: "utf-8", timeout: 5000 })
+      execFileSync("git", ["branch", flag, branch], { cwd: proj.cwd, encoding: "utf-8", timeout: 5000 })
       res.json({ ok: true })
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Delete failed"
@@ -1574,7 +1620,7 @@ export function createServer(portOverride?: number) {
     if (!proj || !branch) return res.status(400).json({ error: "Missing project or branch" })
 
     try {
-      execSync(`git checkout ${JSON.stringify(branch)}`, { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
+      execFileSync("git", ["checkout", branch], { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
       res.json({ ok: true })
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : "Checkout failed" })
@@ -1589,7 +1635,7 @@ export function createServer(portOverride?: number) {
     if (!project) return res.status(404).json({ error: "Project not found" })
 
     try {
-      const raw = execSync("git worktree list --porcelain", { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+      const raw = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       const worktrees: { path: string; branch: string; bare: boolean }[] = []
       let current: { path: string; branch: string; bare: boolean } = { path: "", branch: "", bare: false }
       for (const line of raw.split("\n")) {
@@ -1615,8 +1661,10 @@ export function createServer(portOverride?: number) {
     if (!proj || !wtPath) return res.status(400).json({ error: "Missing project or path" })
 
     try {
-      const flag = force ? "--force" : ""
-      execSync(`git worktree remove ${flag} ${JSON.stringify(wtPath)}`, { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
+      const args = ["worktree", "remove"]
+      if (force) args.push("--force")
+      args.push(wtPath)
+      execFileSync("git", args, { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
       res.json({ ok: true })
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : "Remove failed" })
@@ -2793,7 +2841,7 @@ export function createServer(portOverride?: number) {
                     }
                     let before = ""
                     try {
-                      before = execSync(`git show HEAD:${JSON.stringify(arg)}`, { cwd: resumeProject.cwd, encoding: "utf-8", timeout: 3000 })
+                      before = execFileSync("git", ["show", `HEAD:${arg}`], { cwd: resumeProject.cwd, encoding: "utf-8", timeout: 3000 })
                       if (before.length > 50000) before = before.slice(0, 50000) + "\n... (truncated)"
                     } catch { /* new file or not in git */ }
                     if (before || after) {
@@ -2838,7 +2886,7 @@ export function createServer(portOverride?: number) {
           try {
 
             const tag = `agentrune/snapshot/${sid.slice(0, 12)}/${name}`
-            execSync(`git tag -f "${tag}"`, { cwd: s.project.cwd, stdio: "pipe" })
+            execFileSync("git", ["tag", "-f", tag], { cwd: s.project.cwd, stdio: "pipe", timeout: 5000 })
             ws.send(JSON.stringify({ type: "snapshot_result", success: true, tag, message: `Snapshot "${name}" created` }))
           } catch (err) {
             ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
@@ -2853,7 +2901,7 @@ export function createServer(portOverride?: number) {
           try {
 
             const prefix = `agentrune/snapshot/${sid.slice(0, 12)}/`
-            const raw = execSync(`git tag -l "${prefix}*" --sort=-creatordate`, { cwd: s.project.cwd, encoding: "utf-8" })
+            const raw = execFileSync("git", ["tag", "-l", `${prefix}*`, "--sort=-creatordate"], { cwd: s.project.cwd, encoding: "utf-8", timeout: 5000 })
             const snapshots = raw.trim().split("\n").filter(Boolean).map(tag => ({
               tag,
               name: tag.replace(prefix, ""),
@@ -2870,9 +2918,9 @@ export function createServer(portOverride?: number) {
           const tag = msg.tag as string
           const s = sessions.get(sid)
           if (!s || !tag) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Invalid" })); break }
+          if (!tag.startsWith("agentrune/snapshot/")) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Invalid snapshot tag" })); break }
           try {
-
-            execSync(`git checkout "${tag}" -- .`, { cwd: s.project.cwd, stdio: "pipe" })
+            execFileSync("git", ["checkout", tag, "--", "."], { cwd: s.project.cwd, stdio: "pipe", timeout: 10000 })
             ws.send(JSON.stringify({ type: "snapshot_result", success: true, message: `Restored to "${tag}"` }))
           } catch (err) {
             ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
@@ -2892,7 +2940,7 @@ export function createServer(portOverride?: number) {
 
             // Tests
             try {
-              const testOut = execSync("npm test -- --passWithNoTests 2>&1 || true", opts)
+              const testOut = execFileSync("npm", ["test", "--", "--passWithNoTests"], { cwd: project.cwd, encoding: "utf-8", timeout: 30000, stdio: "pipe" })
               const passMatch = testOut.match(/(\d+) passed/)
               const failMatch = testOut.match(/(\d+) failed/)
               health.tests = { passed: passMatch ? parseInt(passMatch[1]) : 0, failed: failMatch ? parseInt(failMatch[1]) : 0, raw: testOut.slice(-500) }
@@ -2900,14 +2948,14 @@ export function createServer(portOverride?: number) {
 
             // Security audit
             try {
-              const auditOut = execSync("npm audit --json 2>/dev/null || true", opts)
+              const auditOut = execFileSync("npm", ["audit", "--json"], { cwd: project.cwd, encoding: "utf-8", timeout: 30000, stdio: "pipe" })
               const audit = JSON.parse(auditOut || "{}")
               health.security = { vulnerabilities: audit.metadata?.vulnerabilities?.total || 0, details: audit.metadata?.vulnerabilities }
             } catch { health.security = null }
 
             // Outdated packages
             try {
-              const outdatedOut = execSync("npm outdated --json 2>/dev/null || true", opts)
+              const outdatedOut = execFileSync("npm", ["outdated", "--json"], { cwd: project.cwd, encoding: "utf-8", timeout: 30000, stdio: "pipe" })
               const outdated = JSON.parse(outdatedOut || "{}")
               health.outdated = { count: Object.keys(outdated).length, packages: Object.entries(outdated).slice(0, 10).map(([name, info]: [string, any]) => ({ name, current: info.current, wanted: info.wanted, latest: info.latest })) }
             } catch { health.outdated = null }
@@ -2940,6 +2988,7 @@ export function createServer(portOverride?: number) {
           const envVar = msg.envVar as string
           const value = msg.value as string
           if (!envVar || !value) { ws.send(JSON.stringify({ type: "api_key_result", success: false, message: "Missing envVar or value" })); break }
+          if (!ALLOWED_ENV_KEYS.has(envVar)) { ws.send(JSON.stringify({ type: "api_key_result", success: false, message: `Key "${envVar}" is not allowed` })); break }
           try {
             saveVaultKey(envVar, value)
             // If there's an active session, kill and restart with the new key
@@ -2975,6 +3024,7 @@ export function createServer(portOverride?: number) {
         case "delete_api_key": {
           const envVar = msg.envVar as string
           if (!envVar) break
+          if (!ALLOWED_ENV_KEYS.has(envVar)) { ws.send(JSON.stringify({ type: "api_key_result", success: false, message: `Key "${envVar}" is not allowed` })); break }
           try {
             deleteVaultKey(envVar)
             ws.send(JSON.stringify({ type: "api_key_result", success: true, deleted: true }))
