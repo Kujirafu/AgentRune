@@ -1447,13 +1447,16 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
                   {/* Delete button */}
                   <button
                     onClick={(e) => { e.stopPropagation(); handleDeleteChain(chain.slug) }}
+                    onTouchStart={(e) => e.stopPropagation()}
                     style={{
-                      background: "none", border: "none", padding: 4,
+                      background: "none", border: "none", padding: 10,
+                      margin: -6,
                       color: "var(--text-secondary)", cursor: "pointer", opacity: 0.5,
                       display: "flex", alignItems: "center",
+                      minWidth: 36, minHeight: 36, justifyContent: "center",
                     }}
                   >
-                    <TrashIcon size={14} />
+                    <TrashIcon size={16} />
                   </button>
                 </div>
               ))}
@@ -1692,7 +1695,7 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
             boxShadow: "var(--glass-shadow)",
             zIndex: 101,
             display: "flex", flexDirection: "column",
-            animation: "slideUp 0.25s ease-out",
+            animation: "springSlideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)",
           }}>
             {/* Handle */}
             <div style={{
