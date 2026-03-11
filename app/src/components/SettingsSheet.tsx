@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { SpringOverlay } from "./SpringOverlay"
 import type { ProjectSettings, CodexMode, CodexModel, CodexReasoningEffort, AiderModel, OpenClawProvider, CursorMode, CursorSandbox } from "../types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
 import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled, getWorktreeEnabled, setWorktreeEnabled, getAutoSaveKeysEnabled, setAutoSaveKeysEnabled, getAutoSaveKeysPath, setAutoSaveKeysPath, getNotificationsEnabled, setNotificationsEnabled, getAutoUpdateEnabled, setAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, setSkippedVersion } from "../lib/storage"
@@ -130,8 +131,6 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
     return () => { cleanup?.() }
   }, [])
 
-  if (!open) return null
-
   const models = ["sonnet", "opus", "haiku"] as const
   const codexModels: { value: CodexModel; label: string }[] = [
     { value: "default", label: "Default" },
@@ -205,6 +204,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
   }
 
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed",
       inset: 0,
@@ -213,7 +213,6 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
       flexDirection: "column",
       background: "var(--bg-gradient)",
       color: "var(--text-primary)",
-      animation: "fadeSlideUp 0.3s ease-out",
     }}>
       {/* Header */}
       <div style={{
@@ -1453,6 +1452,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
         </div>
       </div>
     </div>
+    </SpringOverlay>
   )
 }
 

@@ -115,6 +115,7 @@ export interface AgentEvent {
     options: DecisionOption[]
   }
   progress?: ProgressReport
+  _images?: string[]  // base64 image thumbnails for user messages
 }
 
 export interface DecisionOption {

@@ -1,6 +1,7 @@
 // InsightSheet — glassmorphism popup showing rendered insight report with submit button
 import { useState, useEffect } from "react"
 import ReactMarkdown from "react-markdown"
+import { SpringOverlay } from "./SpringOverlay"
 
 interface InsightSheetProps {
   open: boolean
@@ -70,9 +71,8 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
     }
   }
 
-  if (!open) return null
-
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed",
       inset: 0,
@@ -81,7 +81,6 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
       flexDirection: "column",
       background: "var(--bg-gradient)",
       color: "var(--text-primary)",
-      animation: "fadeSlideUp 0.3s ease-out",
     }}>
       {/* Header */}
       <div style={{
@@ -222,6 +221,7 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
         </div>
       </div>
     </div>
+    </SpringOverlay>
   )
 }
 

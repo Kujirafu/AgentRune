@@ -959,6 +959,7 @@ export const en: Record<string, string> = {
   "builder.joinAll": "Wait All",
   "builder.joinAny": "First Done",
   "builder.delete": "Delete",
+  "builder.edit": "Edit",
   "builder.palette.title": "Add Step",
   "builder.palette.builtin": "Built-in Skills",
   "builder.palette.search": "Search 1200+ skills...",

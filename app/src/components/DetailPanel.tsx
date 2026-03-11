@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import ReactMarkdown from "react-markdown"
 import type { OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
@@ -60,8 +61,14 @@ export function DetailPanel({ open, onClose, thinkingBlocks, codeBlocks, toolBlo
   return (
     <>
       {/* Backdrop */}
+      <AnimatePresence>
       {open && (
-        <div
+        <motion.div
+          key="detail-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0, transition: { duration: 0.15 } }}
+          transition={{ duration: 0.2 }}
           onClick={onClose}
           style={{
             position: "fixed",
@@ -69,13 +76,20 @@ export function DetailPanel({ open, onClose, thinkingBlocks, codeBlocks, toolBlo
             background: "rgba(0,0,0,0.4)",
             backdropFilter: "blur(2px)",
             zIndex: 200,
-            transition: "opacity 0.3s",
           }}
         />
       )}
+      </AnimatePresence>
 
       {/* Panel */}
-      <div
+      <AnimatePresence>
+      {open && (
+      <motion.div
+        key="detail-panel"
+        initial={{ x: "100%" }}
+        animate={{ x: 0 }}
+        exit={{ x: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
+        transition={{ type: "spring", stiffness: 200, damping: 20 }}
         ref={panelRef}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
@@ -92,8 +106,6 @@ export function DetailPanel({ open, onClose, thinkingBlocks, codeBlocks, toolBlo
           WebkitBackdropFilter: "blur(32px)",
           borderLeft: "1px solid rgba(255,255,255,0.1)",
           boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-          transform: open ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 0.3s ease-out",
           display: "flex",
           flexDirection: "column",
           color: "#e2e8f0",
@@ -369,7 +381,9 @@ export function DetailPanel({ open, onClose, thinkingBlocks, codeBlocks, toolBlo
         }}>
           {t("detail.swipeToClose")}
         </div>
-      </div>
+      </motion.div>
+      )}
+      </AnimatePresence>
     </>
   )
 }

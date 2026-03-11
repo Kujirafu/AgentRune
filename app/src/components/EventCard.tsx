@@ -12,6 +12,7 @@ interface EventCardProps {
   onQuote?: (text: string) => void
   onSaveObsidian?: (text: string) => void
   onViewDiff?: (event: AgentEvent) => void
+  onPreviewImage?: (url: string) => void
   apiBase?: string
   projectId?: string
 }
@@ -101,7 +102,7 @@ function extractImageUrl(text: string, apiBase?: string, projectId?: string): st
   return null
 }
 
-export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff, apiBase, projectId }: EventCardProps) {
+export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff, onPreviewImage, apiBase, projectId }: EventCardProps) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -241,14 +242,15 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
             cursor: hasDetail ? "pointer" : "default",
           }}
         >
-          {event._images && event._images.length > 0 ? (
+          {Array.isArray(event._images) && event._images.length > 0 ? (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", marginBottom: 4 }}>
               {event._images.map((img, i) => (
                 <img
                   key={i}
                   src={img}
                   alt={`attached ${i + 1}`}
-                  style={{ maxWidth: event._images!.length > 1 ? 140 : "100%", maxHeight: event._images!.length > 1 ? 100 : 200, borderRadius: 10, objectFit: "cover", border: "1px solid var(--glass-border)" }}
+                  onClick={(e) => { e.stopPropagation(); onPreviewImage?.(img) }}
+                  style={{ maxWidth: event._images!.length > 1 ? 140 : "100%", maxHeight: event._images!.length > 1 ? 100 : 200, borderRadius: 10, objectFit: "cover", border: "1px solid var(--glass-border)", cursor: onPreviewImage ? "pointer" : "default" }}
                 />
               ))}
             </div>
@@ -257,7 +259,8 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
               <img
                 src={userImgUrl}
                 alt="uploaded"
-                style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 10, objectFit: "contain" }}
+                onClick={(e) => { e.stopPropagation(); onPreviewImage?.(userImgUrl!) }}
+                style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 10, objectFit: "contain", cursor: onPreviewImage ? "pointer" : "default" }}
               />
             </div>
           ) : null}
@@ -428,9 +431,10 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                   <img
                     src={cleanDetail.slice(7)}
                     alt="uploaded"
-                    style={{ maxWidth: "100%", maxHeight: 300, borderRadius: 10, objectFit: "contain" }}
+                    onClick={(e) => { e.stopPropagation(); onPreviewImage?.(cleanDetail.slice(7)) }}
+                    style={{ maxWidth: "100%", maxHeight: 300, borderRadius: 10, objectFit: "contain", cursor: onPreviewImage ? "pointer" : "default" }}
                   />
-                ) : event._images && event._images.length > 0 ? (
+                ) : Array.isArray(event._images) && event._images.length > 0 ? (
                   <div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                       {event._images.map((img, i) => (
@@ -438,7 +442,8 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                           key={i}
                           src={img}
                           alt={`attached ${i + 1}`}
-                          style={{ maxWidth: 120, maxHeight: 90, borderRadius: 8, objectFit: "cover", border: "1px solid var(--glass-border)" }}
+                          onClick={(e) => { e.stopPropagation(); onPreviewImage?.(img) }}
+                          style={{ maxWidth: 120, maxHeight: 90, borderRadius: 8, objectFit: "cover", border: "1px solid var(--glass-border)", cursor: onPreviewImage ? "pointer" : "default" }}
                         />
                       ))}
                     </div>

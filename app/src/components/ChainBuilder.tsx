@@ -168,6 +168,128 @@ function getStepId(node: ChainNode): string {
   return isParallelGroup(node) ? node.id : (node as ChainStepDef).id
 }
 
+// ─── Swipeable Chain Card ────────────────────────────────────────
+
+function SwipeableChainCard({ chain, t, onEdit, onDelete }: {
+  chain: { slug: string; name: string; steps?: ChainNode[]; status: string }
+  t: (key: string) => string
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const [offsetX, setOffsetX] = useState(0)
+  const [swiping, setSwiping] = useState(false)
+  const startX = useRef(0)
+  const startY = useRef(0)
+  const locked = useRef<"h" | "v" | null>(null)
+
+  const THRESHOLD = 120
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    startX.current = e.touches[0].clientX
+    startY.current = e.touches[0].clientY
+    locked.current = null
+    setSwiping(true)
+  }
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (!swiping) return
+    const dx = e.touches[0].clientX - startX.current
+    const dy = e.touches[0].clientY - startY.current
+    if (!locked.current) {
+      if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+        locked.current = Math.abs(dx) > Math.abs(dy) ? "h" : "v"
+      }
+      return
+    }
+    if (locked.current === "v") return
+    setOffsetX(dx)
+  }
+  const onTouchEnd = () => {
+    setSwiping(false)
+    if (offsetX < -THRESHOLD) {
+      // Swiped left far enough → edit
+      setOffsetX(-200)
+      setTimeout(() => { onEdit(); setOffsetX(0) }, 200)
+    } else if (offsetX > THRESHOLD) {
+      // Swiped right far enough → delete
+      setOffsetX(200)
+      setTimeout(() => { onDelete(); setOffsetX(0) }, 200)
+    } else {
+      setOffsetX(0)
+    }
+  }
+
+  const absX = Math.abs(offsetX)
+  const isLeft = offsetX < 0
+  const actionOpacity = Math.min(absX / THRESHOLD, 1)
+
+  return (
+    <div style={{ position: "relative", overflow: "hidden", borderRadius: 10 }}>
+      {/* Background action indicators */}
+      <div style={{
+        position: "absolute", inset: 0,
+        display: "flex", alignItems: "center",
+        justifyContent: isLeft ? "flex-end" : "flex-start",
+        padding: "0 16px",
+        background: isLeft ? "rgba(55,172,192,0.15)" : "rgba(251,129,132,0.15)",
+        opacity: actionOpacity,
+        transition: swiping ? "none" : "opacity 0.2s",
+      }}>
+        {isLeft ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#37ACC0", fontWeight: 700, fontSize: 13 }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+            </svg>
+            {t("builder.edit") || "Edit"}
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#FB8184", fontWeight: 700, fontSize: 13 }}>
+            <TrashIcon size={16} />
+            {t("builder.delete")}
+          </div>
+        )}
+      </div>
+
+      {/* Card */}
+      <div
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onClick={() => { if (Math.abs(offsetX) < 5) onEdit() }}
+        style={{
+          background: "var(--glass-bg)",
+          border: "1px solid var(--glass-border)",
+          borderRadius: 10,
+          padding: "10px 12px",
+          cursor: "pointer",
+          display: "flex", alignItems: "center", gap: 10,
+          transform: `translateX(${offsetX}px)`,
+          transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+          position: "relative", zIndex: 1,
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {chain.name}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
+            {t("builder.steps").replace("{count}", String(chain.steps?.length || 0))}
+          </div>
+        </div>
+        <span style={{
+          fontSize: 9, fontWeight: 700, textTransform: "uppercase",
+          padding: "2px 8px", borderRadius: 4,
+          ...(chain.status === "PUBLISHED"
+            ? { color: "#34d399", background: "#34d39918" }
+            : { color: "var(--text-secondary)", background: "var(--glass-bg)", border: "1px solid var(--glass-border)" }
+          ),
+        }}>
+          {chain.status || "DRAFT"}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 // ─── Component ──────────────────────────────────────────────────
 
 export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
@@ -1413,52 +1535,13 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
               {myChains.map(chain => (
-                <div
+                <SwipeableChainCard
                   key={chain.slug}
-                  style={{
-                    background: "var(--glass-bg)",
-                    border: "1px solid var(--glass-border)",
-                    borderRadius: 10,
-                    padding: "10px 12px",
-                    cursor: "pointer",
-                    display: "flex", alignItems: "center", gap: 10,
-                  }}
-                  onClick={() => loadChainToEditor(chain)}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {chain.name}
-                    </div>
-                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
-                      {t("builder.steps").replace("{count}", String(chain.steps?.length || 0))}
-                    </div>
-                  </div>
-                  {/* Status badge */}
-                  <span style={{
-                    fontSize: 9, fontWeight: 700, textTransform: "uppercase",
-                    padding: "2px 8px", borderRadius: 4,
-                    ...(chain.status === "PUBLISHED"
-                      ? { color: "#34d399", background: "#34d39918" }
-                      : { color: "var(--text-secondary)", background: "var(--glass-bg)", border: "1px solid var(--glass-border)" }
-                    ),
-                  }}>
-                    {chain.status || "DRAFT"}
-                  </span>
-                  {/* Delete button */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDeleteChain(chain.slug) }}
-                    onTouchStart={(e) => e.stopPropagation()}
-                    style={{
-                      background: "none", border: "none", padding: 10,
-                      margin: -6,
-                      color: "var(--text-secondary)", cursor: "pointer", opacity: 0.5,
-                      display: "flex", alignItems: "center",
-                      minWidth: 36, minHeight: 36, justifyContent: "center",
-                    }}
-                  >
-                    <TrashIcon size={16} />
-                  </button>
-                </div>
+                  chain={chain}
+                  t={t}
+                  onEdit={() => loadChainToEditor(chain)}
+                  onDelete={() => handleDeleteChain(chain.slug)}
+                />
               ))}
             </div>
           )}
@@ -1695,7 +1778,7 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
             boxShadow: "var(--glass-shadow)",
             zIndex: 101,
             display: "flex", flexDirection: "column",
-            animation: "springSlideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            animation: "springSlideUp 0.45s ease-out",
           }}>
             {/* Handle */}
             <div style={{

@@ -3,6 +3,7 @@ import { spawn, execSync } from "node:child_process"
 import { writeFileSync, readFileSync, existsSync, openSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { createConnection } from "node:net"
+import { fileURLToPath } from "node:url"
 import { getPidFile, getConfigDir, loadConfig, saveConfig } from "../shared/config.js"
 import { log } from "../shared/logger.js"
 
@@ -66,10 +67,20 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
   const logFile = join(getConfigDir(), "daemon.log")
   const logFd = openSync(logFile, "a")
 
-  // Propagate execArgv (e.g. tsx --require/--import loaders) so daemon child can run .ts
+  // Resolve bin.ts from this file's location — process.argv is unreliable with npx tsx
+  const __filename = fileURLToPath(import.meta.url)
+  const binScript = join(__filename, "..", "..", "bin.ts")
+  // Only propagate --import flag (e.g. tsx/esm), not -e or script content
+  const loaderArgs: string[] = []
+  for (let i = 0; i < process.execArgv.length; i++) {
+    if (process.execArgv[i] === "--import" && process.execArgv[i + 1]) {
+      loaderArgs.push("--import", process.execArgv[i + 1])
+      i++
+    }
+  }
   const child = spawn(process.execPath, [
-    ...process.execArgv,
-    ...process.argv.slice(1, 2), // the script path
+    ...loaderArgs,
+    binScript,
     "start",
     "--foreground",
     "--port", String(port),

@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { Task, TaskStore } from "../types"
+import { SpringOverlay } from "./SpringOverlay"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
@@ -199,8 +200,6 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
     toggleStatus(task.id)
   }, [onStartTask, toggleStatus])
 
-  if (!open) return null
-
   const statusColors: Record<string, { bg: string; text: string; border: string }> = {
     pending: { bg: "rgba(148,163,184,0.1)", text: "#94a3b8", border: "rgba(148,163,184,0.2)" },
     in_progress: { bg: "rgba(96,165,250,0.1)", text: "#60a5fa", border: "rgba(96,165,250,0.2)" },
@@ -212,12 +211,12 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
   const totalCount = store?.tasks.length || 0
 
   return (
+    <SpringOverlay open={open}>
     <div style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "var(--bg-gradient)",
       display: "flex", flexDirection: "column",
       color: "var(--text-primary)",
-      animation: `fadeSlideUp 0.3s ${SPRING}`,
     }}>
       {/* Header */}
       <div style={{
@@ -587,5 +586,6 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
         )}
       </div>
     </div>
+    </SpringOverlay>
   )
 }

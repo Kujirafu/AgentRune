@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { log } from "../shared/logger.js"
+import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
 
 // Known API key env var patterns — only inject these (not random markdown headers)
 const API_KEY_PATTERNS = [
@@ -50,7 +51,7 @@ function parseMarkdownKeys(content: string): Record<string, string> {
 
 /**
  * Load API keys from a vault directory.
- * Reads all .md files in the directory and extracts key-value pairs.
+ * Reads all .md files in the directory, decrypting if encrypted.
  */
 function loadKeysFromDir(dir: string): Record<string, string> {
   if (!existsSync(dir)) return {}
@@ -59,9 +60,19 @@ function loadKeysFromDir(dir: string): Record<string, string> {
     const files = readdirSync(dir).filter(f => f.endsWith(".md"))
     for (const file of files) {
       try {
-        const content = readFileSync(join(dir, file), "utf-8")
+        const filePath = join(dir, file)
+        // Use encrypted reader — transparently handles both encrypted and plaintext files
+        const content = readEncryptedFile(filePath)
+        if (!content) continue
         const parsed = parseMarkdownKeys(content)
         Object.assign(keys, parsed)
+
+        // Auto-migrate: if file was plaintext in our secrets dir, re-encrypt it
+        const raw = readFileSync(filePath, "utf-8")
+        if (!isEncrypted(raw) && dir.includes(".agentrune")) {
+          writeEncryptedFile(filePath, content)
+          log.info(`Migrated ${file} to encrypted storage`)
+        }
       } catch {}
     }
   } catch {}
@@ -125,7 +136,8 @@ export function saveVaultKey(envVar: string, value: string): void {
 
   let content = ""
   if (existsSync(filePath)) {
-    content = readFileSync(filePath, "utf-8")
+    // Read and decrypt existing content
+    content = readEncryptedFile(filePath) || "# AgentRune API Keys\n"
   } else {
     content = "# AgentRune API Keys\n"
   }
@@ -140,7 +152,7 @@ export function saveVaultKey(envVar: string, value: string): void {
     content = content.trimEnd() + `\n\n${newEntry}\n`
   }
 
-  writeFileSync(filePath, content, "utf-8")
+  writeEncryptedFile(filePath, content)
   log.info(`Saved API key: ${envVar}`)
 }
 
@@ -151,10 +163,11 @@ export function deleteVaultKey(envVar: string): void {
   const filePath = join(getDefaultVaultDir(), "keys.md")
   if (!existsSync(filePath)) return
 
-  let content = readFileSync(filePath, "utf-8")
+  let content = readEncryptedFile(filePath)
+  if (!content) return
   const entryRegex = new RegExp(`\\n*### ${envVar}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
   content = content.replace(entryRegex, "")
-  writeFileSync(filePath, content, "utf-8")
+  writeEncryptedFile(filePath, content)
   log.info(`Deleted API key: ${envVar}`)
 }
 

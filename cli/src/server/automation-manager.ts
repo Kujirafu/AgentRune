@@ -29,6 +29,7 @@ export interface AutomationConfig {
   schedule: AutomationSchedule
   runMode: "local" | "worktree"
   agentId: string
+  model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   enabled: boolean
   createdAt: number
   lastRunAt?: number
@@ -77,7 +78,30 @@ export function wrapPromptWithLocale(prompt: string): string {
   return `[System] Respond in ${langName}. All output, summaries, and reports must be in ${langName}.\n\n${prompt}`
 }
 
+// --- Agent protocol (shared with ws-server) ---
+
+function buildAgentProtocol(locale?: string): string {
+  const langHint = locale ? ` Respond in the user's language (${locale}).` : ""
+  return [
+    "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
+    `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+    "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+  ].join(" ")
+}
+
+/** Escape a string for use as a single shell argument */
+function shellEscape(s: string): string {
+  // Use $'...' syntax which handles newlines and special chars
+  return "$'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n").replace(/\r/g, "\\r") + "'"
+}
+
 // --- Manager ---
+
+export type AutomationEventCallback = (event: {
+  type: "automation_completed"
+  automation: AutomationConfig
+  result: AutomationResult
+}) => void
 
 export class AutomationManager {
   private automations = new Map<string, AutomationConfig>()
@@ -87,13 +111,15 @@ export class AutomationManager {
   private storageDir: string
   private ptyManager: PtyManager
   private projects: Project[]
+  private onEvent?: AutomationEventCallback
 
   private static MAX_RESULTS_PER_AUTOMATION = 20
   private static MAX_OUTPUT_BYTES = 50_000
 
-  constructor(ptyManager: PtyManager, projects: Project[]) {
+  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback) {
     this.ptyManager = ptyManager
     this.projects = projects
+    this.onEvent = onEvent
     this.storageDir = join(getConfigDir(), "automations")
     mkdirSync(this.storageDir, { recursive: true })
     this.loadFromDisk()
@@ -133,11 +159,21 @@ export class AutomationManager {
     return deleted
   }
 
-  list(projectId?: string): (AutomationConfig & { nextRunAt?: number })[] {
-    const all = [...this.automations.values()].map(a => ({
-      ...a,
-      nextRunAt: this.nextRunAtMap.get(a.id),
-    }))
+  list(projectId?: string): (AutomationConfig & { nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number; duration?: number } })[] {
+    const all = [...this.automations.values()].map(a => {
+      const results = this.results.get(a.id) || []
+      const last = results.length > 0 ? results[results.length - 1] : undefined
+      return {
+        ...a,
+        nextRunAt: this.nextRunAtMap.get(a.id),
+        lastResult: last ? {
+          status: last.status,
+          startedAt: last.startedAt,
+          finishedAt: last.finishedAt,
+          duration: last.finishedAt - last.startedAt,
+        } : undefined,
+      }
+    })
     if (projectId) return all.filter((a) => a.projectId === projectId)
     return all
   }
@@ -164,7 +200,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "templateId">>): AutomationConfig | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -179,6 +215,7 @@ export class AutomationManager {
     if (updates.enabled !== undefined) auto.enabled = updates.enabled
     if (updates.runMode !== undefined) auto.runMode = updates.runMode
     if (updates.agentId !== undefined) auto.agentId = updates.agentId
+    if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
 
     const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
@@ -266,7 +303,42 @@ export class AutomationManager {
     this.nextRunAtMap.delete(id)
   }
 
-  /** Execute an automation: open a PTY, run command, collect output */
+  /** Build the agent CLI command for an automation */
+  private buildAutomationCommand(auto: AutomationConfig): { agentCmd: string; promptText: string } | null {
+    const rawPrompt = auto.prompt || ""
+    const promptText = wrapPromptWithLocale(rawPrompt)
+
+    // If automation has a raw command (legacy), use it directly
+    if (auto.command && !auto.prompt) {
+      return { agentCmd: auto.command, promptText: "" }
+    }
+
+    // Build agent command based on agentId
+    const locale = getSystemLocale()
+    switch (auto.agentId) {
+      case "claude": {
+        let cmd = "claude --print"
+        if (auto.model) cmd += ` --model ${auto.model}`
+        cmd += ` --append-system-prompt "${buildAgentProtocol(locale).replace(/"/g, '\\"')}"`
+        // Pass prompt via -p flag with escaped content
+        cmd += ` -p ${shellEscape(promptText)}`
+        return { agentCmd: cmd, promptText: "" }
+      }
+      case "codex": {
+        let cmd = "codex --full-auto"
+        if (auto.model) cmd += ` --model ${auto.model}`
+        cmd += ` -q ${shellEscape(promptText)}`
+        return { agentCmd: cmd, promptText: "" }
+      }
+      default: {
+        // For other agents (aider, gemini, etc.), launch agent then send prompt
+        const agentBin = auto.agentId || "claude"
+        return { agentCmd: agentBin, promptText }
+      }
+    }
+  }
+
+  /** Execute an automation: open a PTY, launch agent, collect output */
   private async executeAutomation(id: string) {
     const auto = this.automations.get(id)
     if (!auto || !auto.enabled) return
@@ -277,7 +349,13 @@ export class AutomationManager {
       return
     }
 
-    log.info(`[Automation] Executing "${auto.name}" in project "${project.name}"`)
+    const built = this.buildAutomationCommand(auto)
+    if (!built) {
+      log.warn(`[Automation] Could not build command for "${auto.name}" (agent=${auto.agentId})`)
+      return
+    }
+
+    log.info(`[Automation] Executing "${auto.name}" in project "${project.name}" (agent=${auto.agentId}, model=${auto.model || "default"})`)
 
     const startedAt = Date.now()
     let output = ""
@@ -298,14 +376,21 @@ export class AutomationManager {
       }
       this.ptyManager.on("data", dataHandler)
 
-      // Wait a moment for shell to initialize, then send prompt or command
-      await new Promise((resolve) => setTimeout(resolve, 500))
-      const rawInput = auto.prompt || auto.command || ""
-      const input = wrapPromptWithLocale(rawInput)
-      this.ptyManager.write(sessionId, input + "\n")
+      // Wait for shell to initialize
+      await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      // Wait for command to finish (with timeout)
-      const TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+      // Send the agent command (e.g. "claude --print -p 'prompt'")
+      this.ptyManager.write(sessionId, built.agentCmd + "\n")
+
+      // If agent needs interactive prompt (non-print mode), send it after agent starts
+      if (built.promptText) {
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        this.ptyManager.write(sessionId, built.promptText + "\n")
+      }
+
+      // Wait for agent to finish (with timeout)
+      // Agent tasks like Moltbook posting can take a while — allow 10 minutes
+      const TIMEOUT_MS = 10 * 60 * 1000
       const result = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve) => {
         let resolved = false
 
@@ -317,9 +402,10 @@ export class AutomationManager {
         }
         this.ptyManager.on("exit", exitHandler)
 
-        // Also detect completion by watching for shell prompt return
-        // Use a heuristic: if no output for 10 seconds after first output, consider done
+        // Idle detection: if no output for 30 seconds, consider done
+        // (agent --print mode exits on completion, but interactive agents may not)
         let idleTimer: NodeJS.Timeout | null = null
+        const IDLE_MS = 30_000
         const resetIdle = () => {
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
@@ -329,7 +415,7 @@ export class AutomationManager {
               this.ptyManager.kill(sessionId)
               resolve({ exitCode: 0, timedOut: false })
             }
-          }, 10_000)
+          }, IDLE_MS)
         }
 
         const idleDataHandler = (sid: string, _data: string) => {
@@ -337,8 +423,8 @@ export class AutomationManager {
         }
         this.ptyManager.on("data", idleDataHandler)
 
-        // Start idle detection after initial delay
-        setTimeout(() => resetIdle(), 2000)
+        // Start idle detection after giving agent time to start
+        setTimeout(() => resetIdle(), 5000)
 
         // Hard timeout
         setTimeout(() => {
@@ -389,6 +475,11 @@ export class AutomationManager {
     this.saveToDisk()
 
     log.info(`[Automation] "${auto.name}" finished: ${status} (${resultEntry.finishedAt - startedAt}ms)`)
+
+    // Broadcast completion event
+    if (this.onEvent) {
+      this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
+    }
   }
 
   // --- Persistence ---

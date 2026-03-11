@@ -2,6 +2,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import type { AgentEvent } from "../types"
 import { useLocale } from "../lib/i18n"
+import { SpringOverlay } from "./SpringOverlay"
 
 // ─── Types ──────────────────────────────────────────────────────
 interface DiffPanelProps {
@@ -988,9 +989,8 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
     )
   }
 
-  if (!open) return null
-
   return (
+    <SpringOverlay open={open} zIndex={300}>
     <div style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "var(--bg-gradient)",
@@ -1335,5 +1335,6 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
         </div>
       )}
     </div>
+    </SpringOverlay>
   )
 }
