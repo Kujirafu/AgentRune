@@ -30,6 +30,12 @@ export interface ChainStepDef {
   onFailure?: FailureAction
   contextFrom?: string[] // step IDs to inherit handoff from
   autoRemember?: boolean
+  agentConfig?: StepAgentConfig
+}
+
+export interface StepAgentConfig {
+  agentId?: string  // "claude" | "codex" | "gemini" | "cursor" | ...
+  model?: string    // "opus" | "sonnet" | "haiku" | "gpt-5" | "default"
 }
 
 export interface ParallelGroup {
@@ -46,6 +52,11 @@ export type ChainNode = ChainStepDef | ParallelGroup
 // Type guard
 export function isParallelGroup(node: ChainNode): node is ParallelGroup {
   return "type" in node && (node as ParallelGroup).type === "parallel"
+}
+
+/** Resolve chain display text — i18n key if starts with "chain.", otherwise literal */
+export function resolveChainText(key: string, t: (k: string) => string): string {
+  return key.startsWith("chain.") ? t(key) : key
 }
 
 export interface SkillChainDef {
@@ -222,17 +233,24 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.testVerify",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.testVerify",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.commit",
@@ -262,15 +280,22 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.commit",
@@ -288,16 +313,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
     tokenBudget: { lite: 750, deep: 10000 },
     steps: [
       {
-        id: "s1", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "abort" },
-      },
-      {
-        id: "s2", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s1", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "abort" },
+          },
+          {
+            id: "s2", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s3", phase: "verify", labelKey: "chain.step.security",
@@ -349,15 +381,22 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1", "s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "deep",
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.securityVerify",
-        skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
-        required: true, defaultDepth: "deep",
-        contextFrom: ["s1"],
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestSecurity",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "deep",
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.securityVerify",
+            skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
+            required: true, defaultDepth: "deep",
+            contextFrom: ["s1"],
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.postmortem",
@@ -388,15 +427,22 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         skipWhen: { type: "agentlore_has_pattern", hint: "Skip if .agentrune/agentlore.md already exists and is comprehensive" },
       },
       {
-        id: "s2", phase: "design", labelKey: "chain.step.onboard",
-        skillSelection: { lite: "onboard", standard: "onboard", deep: "onboard" },
-        required: true, defaultDepth: "lite",
-      },
-      {
-        id: "s3", phase: "design", labelKey: "chain.step.explain",
-        skillSelection: { lite: "explain", standard: "explain", deep: "architecture" },
-        required: false, defaultDepth: "lite",
-        skipWhen: { type: "agentlore_has_pattern", hint: "Skip if agentlore.md ## Key Files section is already thorough" },
+        type: "parallel", id: "p1", phase: "design",
+        labelKey: "chain.step.parallelOnboardExplain",
+        branches: [
+          {
+            id: "s2", phase: "design", labelKey: "chain.step.onboard",
+            skillSelection: { lite: "onboard", standard: "onboard", deep: "onboard" },
+            required: true, defaultDepth: "lite",
+          },
+          {
+            id: "s3", phase: "design", labelKey: "chain.step.explain",
+            skillSelection: { lite: "explain", standard: "explain", deep: "architecture" },
+            required: false, defaultDepth: "lite",
+            skipWhen: { type: "agentlore_has_pattern", hint: "Skip if agentlore.md ## Key Files section is already thorough" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s4", phase: "design", labelKey: "chain.step.remember",
@@ -437,17 +483,24 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.deviceTest",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.deviceTest",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.commit",
@@ -466,15 +519,22 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
     forcedDepthTags: ["app-store"],
     steps: [
       {
-        id: "s1", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "abort" },
-      },
-      {
-        id: "s2", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s1", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "abort" },
+          },
+          {
+            id: "s2", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s3", phase: "ship", labelKey: "chain.step.versionBump",
@@ -518,17 +578,24 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.doc",
@@ -610,16 +677,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.doc",
@@ -745,16 +819,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.commit",
@@ -789,15 +870,22 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "retry", maxRetries: 2 },
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: false, defaultDepth: "lite",
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "retry", maxRetries: 2 },
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: false, defaultDepth: "lite",
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.commit",
@@ -880,17 +968,24 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s3"],
       },
       {
-        id: "s5", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s4"],
-        onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
-      },
-      {
-        id: "s6", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: false, defaultDepth: "lite",
-        skipWhen: { type: "read_only", hint: "Skip if AI feature has no user input or external data exposure" },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s4"],
+            onFailure: { action: "fallback", fallbackSkill: "fix", maxRetries: 2 },
+          },
+          {
+            id: "s6", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: false, defaultDepth: "lite",
+            skipWhen: { type: "read_only", hint: "Skip if AI feature has no user input or external data exposure" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s7", phase: "ship", labelKey: "chain.step.commit",
@@ -964,16 +1059,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.commit",
@@ -1005,16 +1107,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "retry", maxRetries: 1 },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "retry", maxRetries: 1 },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.doc",
@@ -1088,16 +1197,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "retry", maxRetries: 1 },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelVerify",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.security",
+            skillSelection: { lite: "security", standard: "security", deep: "security-auditor" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "retry", maxRetries: 1 },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.doc",
@@ -1209,16 +1325,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s1"],
       },
       {
-        id: "s3", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s2"],
-      },
-      {
-        id: "s4", phase: "verify", labelKey: "chain.step.test",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s3", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s2"],
+          },
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.test",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s5", phase: "ship", labelKey: "chain.step.commit",
@@ -1254,16 +1377,23 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
         contextFrom: ["s2"],
       },
       {
-        id: "s4", phase: "verify", labelKey: "chain.step.benchmarkVerify",
-        skillSelection: { lite: "test", standard: "test", deep: "test" },
-        required: true, defaultDepth: "lite",
-        onFailure: { action: "fallback", fallbackSkill: "debug" },
-      },
-      {
-        id: "s5", phase: "verify", labelKey: "chain.step.review",
-        skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
-        required: true, defaultDepth: "lite",
-        contextFrom: ["s3"],
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s4", phase: "verify", labelKey: "chain.step.benchmarkVerify",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+          },
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.review",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s6", phase: "ship", labelKey: "chain.step.commit",
@@ -1411,7 +1541,7 @@ export function formatChainInstructions(
   depth: ChainDepth,
   t: (key: string) => string,
 ): string {
-  const name = t(chain.nameKey)
+  const name = resolveChainText(chain.nameKey, t)
   const tokens = estimateTokens(chain, depth)
   const depthLabel = t(`chain.depth.${depth}`)
 
@@ -1445,6 +1575,17 @@ export function formatChainInstructions(
   sections.push("5. Produce a HANDOFF (see format below)")
   sections.push("6. On failure, follow the onFailure action (retry/fallback/abort)")
   sections.push("7. Show progress: \"Step 3/9 done (tdd) — wrote 5 tests, all passing\"")
+
+  // ── Parallel execution protocol
+  sections.push("")
+  sections.push("=== PARALLEL EXECUTION ===")
+  sections.push("")
+  sections.push("When you encounter a [PARALLEL] block:")
+  sections.push("1. Check each branch's agentConfig — if different agents specified, launch separate sessions via AgentRune")
+  sections.push("2. If all branches use same agent (or no agentConfig), use Agent tool with run_in_background=true per branch")
+  sections.push("3. Each subagent receives: the skill slug, handoff context, and step instructions")
+  sections.push("4. Wait strategy: ALL = wait for every branch; ANY = proceed when first completes")
+  sections.push("5. Collect HANDOFF from each completed branch and merge for downstream steps")
 
   // ── Handoff format
   sections.push("")
@@ -1516,6 +1657,11 @@ export function formatChainInstructions(
         if (!branch.required) line += " (OPTIONAL)"
         sections.push(line)
         renderStepMeta(branch, "      ")
+        if (branch.agentConfig?.agentId) {
+          const agent = branch.agentConfig.agentId
+          const model = branch.agentConfig.model || "default"
+          sections.push(`      AGENT: ${agent} (${model})`)
+        }
       }
 
       sections.push(`   → Wait for ${node.joinStrategy === "all" ? "ALL" : "ANY"} branches before proceeding.`)

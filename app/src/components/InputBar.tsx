@@ -4,7 +4,8 @@ import { Clipboard } from "@capacitor/clipboard"
 import { App as CapApp } from "@capacitor/app"
 import type { SlashCommand } from "../types"
 import { useLocale } from "../lib/i18n/index.js"
-import { findChainBySlug, CHAIN_SLUGS } from "../lib/skillChains"
+import { searchChains } from "../lib/skillChains"
+import type { ChainMatch } from "../lib/skillChains"
 import { ChainCard } from "./ChainCard"
 
 const AGENTLORE_MCP_URL = "https://agentlore.vercel.app/api/mcp"
@@ -364,6 +365,8 @@ interface InputBarProps {
   disabledHint?: string
   isUploadingImage?: boolean
   checkUploading?: () => boolean
+  hasPendingImages?: boolean
+  onOpenBuilder?: () => void
 }
 
 // Module-level draft storage — survives unmount/remount
@@ -392,7 +395,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading }: InputBarProps) {
+export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading, hasPendingImages, onOpenBuilder }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -546,13 +549,24 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
     })
   }, [input, BUILTIN_MCP_SKILLS, SKILL_KEYWORDS])
 
-  // Match chain by exact slug (e.g. /feature, /bugfix)
-  const matchedChain = useMemo(() => {
-    if (!input.startsWith("/") || input.startsWith("//")) return null
-    const cmd = input.slice(1).trim().toLowerCase()
-    if (!cmd) return null
-    return findChainBySlug(cmd) ?? null
-  }, [input])
+  // Smart chain matching: exact slug, prefix, or natural language keywords
+  const chainMatches = useMemo((): ChainMatch[] => {
+    if (input.startsWith("//")) return [] // native commands
+    if (input.startsWith("/")) {
+      const cmd = input.slice(1).trim().toLowerCase()
+      if (!cmd) return []
+      return searchChains(cmd, t)
+    }
+    // Natural language — only match if input is 3+ chars and has meaningful content
+    const trimmed = input.trim()
+    if (trimmed.length < 3) return []
+    return searchChains(trimmed, t)
+  }, [input, t])
+
+  // Exact match = single chain, otherwise multiple suggestions
+  const matchedChain = chainMatches.length === 1 && chainMatches[0].matchType === "exact"
+    ? chainMatches[0].chain
+    : null
 
   // Trigger MCP search when input starts with / (but not //)
   useEffect(() => {
@@ -774,7 +788,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
   const handleSendInner = () => {
     const trimmed = input.trim()
     const hasFiles = attachedFiles && attachedFiles.length > 0
-    if (!trimmed && pasteImages.length === 0 && !hasFiles) {
+    if (!trimmed && pasteImages.length === 0 && !hasFiles && !hasPendingImages) {
       onSend("\r")
       return
     }
@@ -791,7 +805,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
     if (toSend.trim()) {
       addSent({ text: trimmed || attachedFiles![0], time: Date.now() })
       onSend(toSend, flags)
-    } else if (pasteImages.length > 0) {
+    } else if (pasteImages.length > 0 || hasPendingImages) {
       onSend("", flags)
     }
     setInput("")
@@ -935,8 +949,57 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
 
   return (
     <div style={{ flexShrink: 0, position: "relative" }}>
+      {/* Chain suggestions for natural language (non-slash) input */}
+      {!isSlashMode && !input.startsWith("//") && chainMatches.length > 0 && (
+        <div
+          ref={slashPanelRef}
+          style={{
+            position: "absolute",
+            bottom: "100%",
+            left: 0, right: 0,
+            maxHeight: "36vh",
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            padding: "8px 12px 6px",
+            background: "var(--bg-gradient, var(--glass-bg))",
+            borderTop: "1px solid var(--glass-border)",
+            boxShadow: "0 -4px 20px rgba(0,0,0,0.08)",
+            zIndex: 10,
+            WebkitOverflowScrolling: "touch" as never,
+          }}
+        >
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: "var(--accent-primary)",
+            textTransform: "uppercase", letterSpacing: 1.2,
+            padding: "4px 8px",
+          }}>
+            {t("chain.suggested")}
+          </div>
+          {chainMatches.map(({ chain, score }) => (
+            <ChainCard
+              key={chain.slug}
+              chain={chain}
+              t={t}
+              collapsed={chainMatches.length > 1}
+              relevance={score}
+              onSend={(instructions, display) => {
+                addSent({ text: display, time: Date.now() })
+                onSend(instructions)
+                setInput("")
+                setExpandedSkill(null)
+                inputRef.current?.focus()
+              }}
+              onFork={onOpenBuilder ? (c) => {
+                sessionStorage.setItem("chain-builder-fork", JSON.stringify(c))
+                onOpenBuilder()
+              } : undefined}
+            />
+          ))}
+        </div>
+      )}
+
       {/* / = Skill cards panel, // = Native commands panel */}
-      {isSlashMode && (matchedChain || filteredBuiltins.length > 0 || mcpSkills.length > 0 || mcpLoading || filteredSlash.length > 0) && (() => {
+      {isSlashMode && (matchedChain || chainMatches.length > 0 || filteredBuiltins.length > 0 || mcpSkills.length > 0 || mcpLoading || filteredSlash.length > 0) && (() => {
         const apiNames = new Set(mcpSkills.map(s => s.skill))
         const mergedSkills = [
           ...filteredBuiltins.filter(b => !apiNames.has(b.skill)),
@@ -979,11 +1042,48 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
                   setExpandedSkill(null)
                   inputRef.current?.focus()
                 }}
+                onFork={onOpenBuilder ? (c) => {
+                  sessionStorage.setItem("chain-builder-fork", JSON.stringify(c))
+                  onOpenBuilder()
+                } : undefined}
               />
             </div>
           )}
 
-          {/* AgentLore Skills section — hidden when chain is matched */}
+          {/* Chain suggestions — prefix/keyword matches (not exact) */}
+          {!matchedChain && chainMatches.length > 0 && (
+            <div>
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: "var(--accent-primary)",
+                textTransform: "uppercase", letterSpacing: 1.2,
+                padding: "4px 8px",
+              }}>
+                {t("chain.suggested")}
+              </div>
+              {chainMatches.map(({ chain, score }) => (
+                <ChainCard
+                  key={chain.slug}
+                  chain={chain}
+                  t={t}
+                  collapsed={chainMatches.length > 1}
+                  relevance={score}
+                  onSend={(instructions, display) => {
+                    addSent({ text: display, time: Date.now() })
+                    onSend(instructions)
+                    setInput("")
+                    setExpandedSkill(null)
+                    inputRef.current?.focus()
+                  }}
+                  onFork={onOpenBuilder ? (c) => {
+                    sessionStorage.setItem("chain-builder-fork", JSON.stringify(c))
+                    onOpenBuilder()
+                  } : undefined}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* AgentLore Skills section — hidden when exact chain is matched */}
           {!matchedChain && (mergedSkills.length > 0 || mcpLoading) && (
             <>
               <div style={{
@@ -1229,69 +1329,6 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
               )
             })}
           </div>
-        </div>
-      )}
-
-      {/* Sent command history — persistent, scrollable */}
-      {sentHistory.length > 0 && (
-        <div
-          ref={historyRef}
-          style={{
-            maxHeight: 120,
-            overflowY: "auto",
-            padding: "4px 12px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 3,
-            WebkitOverflowScrolling: "touch" as never,
-          }}
-        >
-          {sentHistory.filter((s) => !s.text.startsWith("/")).slice(-2).map((item) => (
-            <div
-              key={item.time}
-              onClick={() => handleResend(item.text)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "5px 10px",
-                borderRadius: 10,
-                background: "rgba(96, 165, 250, 0.06)",
-                border: "1px solid rgba(96, 165, 250, 0.12)",
-                cursor: "pointer",
-                animation: "fadeSlideUp 0.15s ease-out",
-              }}
-            >
-              <span style={{
-                fontSize: 10,
-                color: "rgba(96, 165, 250, 0.5)",
-                fontFamily: "monospace",
-                flexShrink: 0,
-              }}>
-                {formatTime(item.time)}
-              </span>
-              <span style={{
-                fontSize: 10,
-                color: "rgba(74, 222, 128, 0.7)",
-                flexShrink: 0,
-                fontWeight: 600,
-              }}>
-                {"->"}
-              </span>
-              <span style={{
-                fontSize: 12,
-                color: "var(--text-primary)",
-                fontFamily: "'JetBrains Mono', monospace",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                flex: 1,
-                opacity: 0.85,
-              }}>
-                {item.text}
-              </span>
-            </div>
-          ))}
         </div>
       )}
 
@@ -1581,19 +1618,20 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
         {/* Send button */}
         {uploadPendingSend && <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>}
         <button
-          onPointerDown={(e) => {
-            e.preventDefault() // prevent input blur / keyboard dismiss
+          onTouchStart={(e) => {
+            e.preventDefault() // prevent blur AND subsequent click
             if (sendFiredRef.current) return
             sendFiredRef.current = true
             handleSend()
-            setTimeout(() => { sendFiredRef.current = false }, 300)
+            setTimeout(() => { sendFiredRef.current = false }, 400)
           }}
-          onClick={(e) => {
-            // Fallback for cases where pointerdown doesn't fire (accessibility, etc.)
-            if (sendFiredRef.current) { e.preventDefault(); return }
+          onClick={() => {
+            // Desktop / accessibility fallback
+            if (sendFiredRef.current) return
             handleSend()
           }}
           style={{
+            touchAction: "manipulation",
             width: 44,
             height: 44,
             borderRadius: 14,
@@ -1699,18 +1737,19 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
             }}
           />
           <button
-            onPointerDown={(e) => {
+            onTouchStart={(e) => {
               e.preventDefault()
               if (sendFiredRef.current) return
               sendFiredRef.current = true
               handleSend()
-              setTimeout(() => { sendFiredRef.current = false }, 300)
+              setTimeout(() => { sendFiredRef.current = false }, 400)
             }}
-            onClick={(e) => {
-              if (sendFiredRef.current) { e.preventDefault(); return }
+            onClick={() => {
+              if (sendFiredRef.current) return
               handleSend()
             }}
             style={{
+              touchAction: "manipulation",
               marginTop: 12,
               padding: "14px 0",
               borderRadius: 14,

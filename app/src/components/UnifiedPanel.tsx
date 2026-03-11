@@ -41,6 +41,7 @@ interface UnifiedPanelProps {
   theme: "light" | "dark"
   toggleTheme: () => void
   wsConnected?: boolean
+  onOpenBuilder?: () => void
 }
 
 // --- Helpers (migrated from ProjectOverview) ---
@@ -160,6 +161,7 @@ export function UnifiedPanel({
   theme,
   toggleTheme,
   wsConnected,
+  onOpenBuilder,
 }: UnifiedPanelProps) {
   // --- Locale ---
   const { t, locale } = useLocale()
@@ -194,8 +196,10 @@ export function UnifiedPanel({
   const [automationProjectId, setAutomationProjectId] = useState<string | null>(null)
   const [editingAutomation, setEditingAutomation] = useState<typeof projectAutomations[0] | null>(null)
   const [automationCounts, setAutomationCounts] = useState<Map<string, number>>(new Map())
-  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; projectId: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; agentId?: string; runMode?: string; skill?: string; nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
+  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; projectId: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; agentId?: string; runMode?: string; skill?: string; nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number; duration?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
+  const [expandedResults, setExpandedResults] = useState<string | null>(null)
+  const [resultsData, setResultsData] = useState<Map<string, Array<{ id: string; status: string; startedAt: number; finishedAt: number; duration?: number; output: string }>>>(new Map())
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -784,6 +788,27 @@ export function UnifiedPanel({
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          {/* Chain Builder */}
+          {onOpenBuilder && (
+            <button
+              onClick={onOpenBuilder}
+              style={{
+                width: 40, height: 40, borderRadius: "50%",
+                background: "var(--glass-bg)",
+                backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                border: "1px solid var(--glass-border)",
+                boxShadow: "var(--glass-shadow)",
+                color: "var(--text-primary)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}
+            >
+              {/* Lucide git-branch */}
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+              </svg>
+            </button>
+          )}
           {/* Connection status */}
           <button
             onClick={() => setShowDevices(true)}
@@ -1060,6 +1085,8 @@ export function UnifiedPanel({
                       <div style={{
                         fontSize: 13, color: "var(--text-secondary)",
                         lineHeight: 1.5, minHeight: 18,
+                        display: "-webkit-box", WebkitLineClamp: 3,
+                        WebkitBoxOrient: "vertical" as never, overflow: "hidden",
                       }}>
                         {isLoadingSummary ? (
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -1074,7 +1101,10 @@ export function UnifiedPanel({
                           cached.text.length > 200 ? cached.text.slice(0, 200) + "..." : cached.text
                         ) : (
                           <span style={{ opacity: 0.5 }}>
-                            {sessionCount > 0 ? getProjectSummary(sessions) || t("mc.sessionStarted") : t("overview.tapToStart")}
+                            {sessionCount > 0 ? (() => {
+                              const s = getProjectSummary(sessions)
+                              return s ? (s.length > 200 ? s.slice(0, 200) + "..." : s) : t("mc.sessionStarted")
+                            })() : t("overview.tapToStart")}
                           </span>
                         )}
                       </div>
@@ -1496,18 +1526,108 @@ export function UnifiedPanel({
                         </svg>
                       </button>
                     </div>
+                    {/* Last result summary + expand toggle */}
                     {auto.lastResult && (
-                      <div style={{
-                        marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--glass-border)",
-                        fontSize: 10, color: "var(--text-secondary)", display: "flex", gap: 8,
-                      }}>
-                        <span style={{
-                          color: auto.lastResult.status === "success" ? "#22c55e" : "#ef4444",
-                          fontWeight: 600,
-                        }}>
-                          {auto.lastResult.status === "success" ? "OK" : "FAIL"}
-                        </span>
-                        <span>{new Date(auto.lastResult.startedAt).toLocaleString()}</span>
+                      <div style={{ marginTop: 8, borderTop: "1px solid var(--glass-border)" }}>
+                        <button
+                          onClick={async () => {
+                            if (expandedResults === auto.id) {
+                              setExpandedResults(null)
+                              return
+                            }
+                            setExpandedResults(auto.id)
+                            // Fetch results if not cached
+                            if (!resultsData.has(auto.id)) {
+                              const serverUrl = localStorage.getItem("agentrune_server") || ""
+                              try {
+                                const res = await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}/results`)
+                                if (res.ok) {
+                                  const data = await res.json()
+                                  setResultsData(prev => new Map(prev).set(auto.id, data))
+                                }
+                              } catch {}
+                            }
+                          }}
+                          style={{
+                            width: "100%", padding: "8px 0 4px", border: "none", background: "transparent",
+                            display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                            fontSize: 10, color: "var(--text-secondary)",
+                          }}
+                        >
+                          <span style={{
+                            color: auto.lastResult.status === "success" ? "#22c55e" : "#ef4444",
+                            fontWeight: 600,
+                          }}>
+                            {auto.lastResult.status === "success" ? "OK" : "FAIL"}
+                          </span>
+                          <span>{new Date(auto.lastResult.startedAt).toLocaleString()}</span>
+                          {auto.lastResult.duration != null && (
+                            <span style={{ opacity: 0.6 }}>
+                              {auto.lastResult.duration > 60000
+                                ? `${Math.floor(auto.lastResult.duration / 60000)}m ${Math.round((auto.lastResult.duration % 60000) / 1000)}s`
+                                : `${Math.round(auto.lastResult.duration / 1000)}s`}
+                            </span>
+                          )}
+                          <span style={{ marginLeft: "auto", opacity: 0.4, transition: "transform 0.2s", transform: expandedResults === auto.id ? "rotate(180deg)" : "rotate(0)" }}>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="6 9 12 15 18 9" />
+                            </svg>
+                          </span>
+                        </button>
+                        {/* Expanded results list */}
+                        {expandedResults === auto.id && (
+                          <div style={{
+                            display: "flex", flexDirection: "column", gap: 4, padding: "4px 0 4px",
+                            maxHeight: 300, overflowY: "auto",
+                          }}>
+                            {!resultsData.has(auto.id) && (
+                              <div style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, padding: 8 }}>Loading...</div>
+                            )}
+                            {(resultsData.get(auto.id) || []).slice().reverse().map((r) => {
+                              const dur = r.finishedAt - r.startedAt
+                              const durStr = dur > 60000
+                                ? `${Math.floor(dur / 60000)}m ${Math.round((dur % 60000) / 1000)}s`
+                                : `${Math.round(dur / 1000)}s`
+                              return (
+                                <div key={r.id} style={{
+                                  padding: "6px 8px", borderRadius: 8,
+                                  background: "var(--bg-secondary, rgba(0,0,0,0.05))",
+                                  fontSize: 10,
+                                }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                                    <span style={{
+                                      width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+                                      background: r.status === "success" ? "#22c55e" : r.status === "timeout" ? "#f59e0b" : "#ef4444",
+                                    }} />
+                                    <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                      {r.status === "success" ? "OK" : r.status === "timeout" ? "TIMEOUT" : "FAIL"}
+                                    </span>
+                                    <span style={{ color: "var(--text-secondary)" }}>{durStr}</span>
+                                    <span style={{ marginLeft: "auto", color: "var(--text-secondary)", opacity: 0.6 }}>
+                                      {new Date(r.startedAt).toLocaleString()}
+                                    </span>
+                                  </div>
+                                  {r.output && (
+                                    <pre style={{
+                                      margin: 0, padding: "4px 6px", borderRadius: 6,
+                                      background: "var(--bg-primary, rgba(0,0,0,0.1))",
+                                      color: "var(--text-secondary)", fontSize: 9, lineHeight: 1.4,
+                                      maxHeight: 120, overflowY: "auto", overflowX: "hidden",
+                                      whiteSpace: "pre-wrap", wordBreak: "break-all",
+                                    }}>
+                                      {r.output.length > 2000 ? r.output.slice(-2000) : r.output}
+                                    </pre>
+                                  )}
+                                </div>
+                              )
+                            })}
+                            {resultsData.has(auto.id) && (resultsData.get(auto.id) || []).length === 0 && (
+                              <div style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, padding: 8, textAlign: "center" }}>
+                                {t("automation.noResults") || "No results yet"}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
