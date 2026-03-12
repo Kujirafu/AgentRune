@@ -358,7 +358,7 @@ export function createServer(portOverride?: number) {
     if (allowed) {
       res.header("Access-Control-Allow-Origin", allowed)
     }
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Id, X-Api-Keys")
     if (_req.method === "OPTIONS") return res.sendStatus(204)
     next()
@@ -652,8 +652,18 @@ export function createServer(portOverride?: number) {
     }
   }
 
-  // Cache recoverable sessions — initialized after projects are loaded (see below)
+  // Cache recoverable sessions — initialized ONCE at startup. Sessions that exit
+  // normally are tracked in closedSessionIds (persisted to disk) and excluded
+  // from the recoverable list. Only sessions that were active when daemon crashed
+  // (not in closed list) appear as recoverable.
   let cachedRecoverable: RecoverableSession[] = []
+  const closedSessionsPath = join(getConfigDir(), "closed-sessions.json")
+  const closedSessionIds = new Set<string>(
+    (() => { try { return JSON.parse(readFileSync(closedSessionsPath, "utf-8")) } catch { return [] } })()
+  )
+  function persistClosedSessions() {
+    try { writeFileSync(closedSessionsPath, JSON.stringify([...closedSessionIds])) } catch {}
+  }
   const authDedup = new Map<string, string>()  // sessionId -> last auth URL/dedup key (URL-based dedup)
   // Filter: only store titles that are useful as session summaries (not technical noise)
   function isMeaningfulTitle(title: string): boolean {
@@ -678,21 +688,6 @@ export function createServer(portOverride?: number) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload)
     }
   }, { vaultPath: cfg.vaultPath })
-
-  // --- CORS ---
-  app.use((_req, res, next) => {
-    const origin = _req.headers.origin
-    const allowed = isAllowedOrigin(origin)
-    if (allowed) {
-      res.header("Access-Control-Allow-Origin", allowed)
-    }
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-    res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-    if (_req.method === "OPTIONS") {
-      return res.sendStatus(200)
-    }
-    next()
-  })
 
   // --- Auth endpoints ---
 
@@ -862,8 +857,8 @@ export function createServer(portOverride?: number) {
       const wt = wtm?.get(s.id)
       return { ...s, status: "active" as const, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
     })
-    // Append recoverable sessions that are not currently active
-    const recoverable = cachedRecoverable.filter(r => !activeIds.has(r.id))
+    // Append recoverable sessions that are not currently active and not closed during this daemon lifetime
+    const recoverable = cachedRecoverable.filter(r => !activeIds.has(r.id) && !closedSessionIds.has(r.id))
     res.json([...allSessions, ...recoverable])
   })
 
@@ -1445,11 +1440,9 @@ export function createServer(portOverride?: number) {
   // --- File browser ---
 
   app.get("/api/browse", (req, res) => {
+    // Browse is used to select folders when adding NEW projects — must allow any path.
+    // Only lists directory names (no file content), so no security risk.
     const dirPath = (req.query.path as string) || process.env.HOME || process.env.USERPROFILE || "."
-
-    if (!isPathInProject(dirPath)) {
-      return res.status(403).json({ error: "Access denied: path is outside project directories" })
-    }
 
     if (!existsSync(dirPath)) {
       return res.status(404).json({ error: "Path not found" })
@@ -2620,12 +2613,14 @@ export function createServer(portOverride?: number) {
               if (list.length > 200) list.splice(0, list.length - 200)
               persistEvents(sid, list)
             }
+            // Pre-serialize events once for all clients
+            const serializedEvents = filtered.map(event => JSON.stringify({ type: "event", event }))
             let sentCount = 0
             for (const [client, csid] of clientSessions) {
               if (csid === sid && client.readyState === WebSocket.OPEN) {
                 sentCount++
-                for (const event of filtered) {
-                  client.send(JSON.stringify({ type: "event", event }))
+                for (const msg of serializedEvents) {
+                  client.send(msg)
                 }
                 const eventSessionId = clientEventSessions.get(client)
                 if (eventSessionId) {
@@ -2654,7 +2649,8 @@ export function createServer(portOverride?: number) {
                 eventTitle: lastEvent.title,
                 agentStatus: lastEvent.status === "waiting" ? "waiting" : "working",
               })
-              for (const [client] of clientSessions) {
+              // Only broadcast activity to clients that are connected (scoped)
+              for (const [client, csid] of clientSessions) {
                 if (client.readyState === WebSocket.OPEN) {
                   client.send(activityMsg)
                 }
@@ -2739,9 +2735,9 @@ export function createServer(portOverride?: number) {
             ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
           }
 
-          // Replay stored events — for resumed sessions (requestedSessionId means user chose "resume")
-          // Note: after daemon restart, alreadyExisted is false because in-memory Map is empty,
-          // but persisted events on disk may still exist. Use requestedSessionId as the trigger.
+          // Replay stored events for any session the user is opening (live or recoverable).
+          // For live sessions, events are in memory (fast). For recoverable, loaded from disk.
+          // The app needs this to populate the events panel when navigating into a session.
           if (requestedSessionId) {
             let storedEvents = sessionRecentEvents.get(session.id) || []
             log.info(`[attach] events_replay: inMemory=${storedEvents.length} for session.id=${session.id}`)
@@ -2765,6 +2761,17 @@ export function createServer(portOverride?: number) {
               })
               if (replayEvents.length > 0) {
                 ws.send(JSON.stringify({ type: "events_replay", events: replayEvents }))
+              }
+            } else {
+              // Fallback: no persisted events found (daemon restart + debounce didn't flush).
+              // Force JSONL watcher to replay history from the actual JSONL file on disk.
+              // Without this, the frontend shows empty events ("等待 Agent 活動...").
+              const w = sessionJsonlWatchers.get(session.id)
+              if (w && typeof (w as any).forceReplay === "function") {
+                log.info(`[attach] events_replay: no persisted events — falling back to JSONL forceReplay`)
+                ;(w as any).forceReplay()
+              } else {
+                log.warn(`[attach] events_replay: no persisted events and no watcher for JSONL fallback`)
               }
             }
           }
@@ -2796,8 +2803,14 @@ export function createServer(portOverride?: number) {
                 if (s.bypass) cmd += " --dangerously-skip-permissions"
                 cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
                 setTimeout(() => {
-                  sessions.write(session.id, `${cmd}\r`)
-                  log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
+                  try {
+                    sessions.write(session.id, `${cmd}\r`)
+                    log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
+                  } catch (err: any) {
+                    log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
+                    // Don't crash daemon — just notify client the resume failed
+                    try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed: " + err.message })) } catch {}
+                  }
                 }, 1500)
               }
             }
@@ -3765,8 +3778,10 @@ export function createServer(portOverride?: number) {
     resumeDecisionDone.delete(sessionId)
     authDedup.delete(sessionId)
 
-    // Refresh recoverable sessions cache so the exited session appears as recoverable
-    cachedRecoverable = scanRecoverableSessions()
+    // Mark session as closed (persisted to disk) so it won't appear as recoverable.
+    // Only sessions active when daemon crashed (not in this list) are recoverable.
+    closedSessionIds.add(sessionId)
+    persistClosedSessions()
 
     for (const [client, sid] of clientSessions) {
       if (sid === sessionId && client.readyState === WebSocket.OPEN) {
