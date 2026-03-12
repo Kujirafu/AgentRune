@@ -23,6 +23,7 @@ import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager } from "./automation-manager.js"
+import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, getRulesPath } from "./behavior-rules.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
@@ -150,25 +151,31 @@ function getLocalIp(): string {
 
 // --- Agent command builder ---
 
-function buildAgentProtocol(locale?: string): string {
+function buildAgentProtocol(locale?: string, projectId?: string): string {
   // Sanitize locale to prevent shell injection via double-quoted strings
   const safeLocale = locale ? locale.replace(/[^a-zA-Z0-9_-]/g, "") : ""
   const langHint = safeLocale ? ` Respond in the user's language (${safeLocale}).` : ""
+  // PRD path hint — tell agent where to find project PRD & tasks
+  const safeProjectId = projectId ? projectId.replace(/[^a-zA-Z0-9_-]/g, "_") : ""
+  const prdHint = safeProjectId
+    ? ` PRD: Read ~/.agentrune/tasks/${safeProjectId}.json for the project PRD (goal, decisions, approaches, scope) and task list. Follow the PRD goals and complete tasks according to their status. When you finish a task, update its status to done by POSTing to the daemon API.`
+    : ""
   return [
     "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
     `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
     "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+    prdHint,
   ].join(" ")
 }
 
-function buildAgentCommand(agentId: string, settings?: Record<string, unknown>): string | null {
+function buildAgentCommand(agentId: string, settings?: Record<string, unknown>, projectId?: string): string | null {
   const s = settings || {}
   switch (agentId) {
     case "claude": {
       let cmd = "claude"
       if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
       if (s.bypass) cmd += " --dangerously-skip-permissions"
-      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
+      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId).replace(/"/g, '\\"')}"`
       return cmd
     }
     case "codex":
@@ -2447,6 +2454,54 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  // --- Skill security API ---
+
+  app.post("/api/skill-analyze", express.json(), (req, res) => {
+    const { content, manifest } = req.body
+    if (!content || typeof content !== "string") {
+      return res.status(400).json({ error: "content (string) is required" })
+    }
+    try {
+      const report = analyzeSkillContent(content, manifest)
+      res.json(report)
+    } catch (err) {
+      // analyzeSkillContent should never throw, but safety first
+      res.json({ score: 0, level: "low", findings: [], requiresManualReview: false, analyzedAt: Date.now() })
+    }
+  })
+
+  app.get("/api/skill-trust", (_req, res) => {
+    res.json(automationManager.getWhitelist().list())
+  })
+
+  app.post("/api/skill-trust", express.json(), (req, res) => {
+    const { skillId, level, riskScore } = req.body
+    if (!skillId || !level) {
+      return res.status(400).json({ error: "skillId and level are required" })
+    }
+    if (level !== "full" && level !== "prompt-only") {
+      return res.status(400).json({ error: "level must be 'full' or 'prompt-only'" })
+    }
+    const entry = automationManager.getWhitelist().trust(skillId, level, riskScore ?? 0)
+    res.json(entry)
+  })
+
+  app.delete("/api/skill-trust/:skillId", (req, res) => {
+    const revoked = automationManager.getWhitelist().revoke(req.params.skillId)
+    if (!revoked) return res.status(404).json({ error: "Skill not found in trust list" })
+    res.json({ ok: true })
+  })
+
+  app.post("/api/skill-trust/:automationId/confirm", express.json(), (req, res) => {
+    const { action } = req.body
+    if (!action || !["approve", "approve_and_trust", "deny"].includes(action)) {
+      return res.status(400).json({ error: "action must be 'approve', 'approve_and_trust', or 'deny'" })
+    }
+    const resolved = automationManager.resolveConfirmation(req.params.automationId, action)
+    if (!resolved) return res.status(404).json({ error: "No pending confirmation for this automation" })
+    res.json({ ok: true })
+  })
+
   /** Resolve current project name from first connected session */
   function resolveProjectName(): string {
     for (const [, sid] of clientSessions) {
@@ -2801,7 +2856,7 @@ export function createServer(portOverride?: number) {
                 let cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
                 if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
                 if (s.bypass) cmd += " --dangerously-skip-permissions"
-                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
+                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, sessionProject.id).replace(/"/g, '\\"')}"`
                 setTimeout(() => {
                   try {
                     sessions.write(session.id, `${cmd}\r`)
@@ -2855,7 +2910,7 @@ export function createServer(portOverride?: number) {
 
             // --- Auto-start agent with settings from frontend ---
             const appSettings = msg.settings as Record<string, unknown> | undefined
-            const agentCmd = buildAgentCommand(agentId, appSettings)
+            const agentCmd = buildAgentCommand(agentId, appSettings, sessionProject.id)
             if (agentCmd) {
               setTimeout(() => {
                 sessions.write(session.id, `${agentCmd}\r`)
@@ -3063,6 +3118,18 @@ export function createServer(portOverride?: number) {
             }
             sessions.write(targetId, inputStr)
             log.info(`Batch input sent to session ${targetId.slice(0, 8)}`)
+          }
+          break
+        }
+
+        case "skill_confirm":
+        case "bypass_confirm": {
+          const automationId = msg.automationId as string
+          const action = (msg.action as "approve" | "approve_and_trust" | "deny") || "deny"
+          if (automationId) {
+            const resolved = automationManager.resolveConfirmation(automationId, action)
+            log.info(`[WS] ${msg.type}: automationId=${automationId} action=${action} resolved=${resolved}`)
+            ws.send(JSON.stringify({ type: "confirmation_ack", automationId, resolved }))
           }
           break
         }
