@@ -1,4 +1,4 @@
-import { useState } from "react"
+import React, { useState } from "react"
 import type { AgentEvent } from "../types"
 
 interface ProgressCardProps {
@@ -12,7 +12,7 @@ const STATUS_CONFIG = {
   in_progress: { label: "Working", color: "var(--accent-primary)", bg: "var(--accent-primary-bg)", border: "rgba(96,165,250,0.3)" },
 } as const
 
-export function ProgressCard({ event, onNextStep }: ProgressCardProps) {
+export const ProgressCard = React.memo(function ProgressCard({ event, onNextStep }: ProgressCardProps) {
   const [expanded, setExpanded] = useState(false)
   const p = event.progress
   if (!p) return null

@@ -1,5 +1,5 @@
 // web/components/EventCard.tsx
-import { useState, useRef, useCallback, useEffect, useMemo } from "react"
+import React, { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -102,7 +102,7 @@ function extractImageUrl(text: string, apiBase?: string, projectId?: string): st
   return null
 }
 
-export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff, onPreviewImage, apiBase, projectId }: EventCardProps) {
+export const EventCard = React.memo(function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDiff, onPreviewImage, apiBase, projectId }: EventCardProps) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
