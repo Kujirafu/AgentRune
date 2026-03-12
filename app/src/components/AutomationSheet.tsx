@@ -807,7 +807,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {automations.map((auto) => {
                   const isExpanded = expandedId === auto.id
-                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : auto.lastRunStatus === "failed" ? "#ef4444" : undefined
+                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : (auto.lastRunStatus === "failed" || auto.lastRunStatus === "blocked_by_risk") ? "#ef4444" : auto.lastRunStatus === "skipped_no_confirmation" ? "#94a3b8" : undefined
                   return (
                     <div key={auto.id} style={{
                       borderRadius: 16,
@@ -854,11 +854,34 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         {/* Name + prompt preview + last run */}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{
-                            fontSize: 14, fontWeight: 600,
-                            color: auto.enabled ? "var(--text-primary)" : "var(--text-secondary)",
-                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            display: "flex", alignItems: "center", gap: 6,
                           }}>
-                            {auto.name}
+                            <span style={{
+                              fontSize: 14, fontWeight: 600,
+                              color: auto.enabled ? "var(--text-primary)" : "var(--text-secondary)",
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                              flex: 1, minWidth: 0,
+                            }}>
+                              {auto.name}
+                            </span>
+                            {auto.bypass && (
+                              <span style={{
+                                fontSize: 9, fontWeight: 700, padding: "2px 5px", borderRadius: 6,
+                                background: "rgba(251,129,132,0.15)", color: "#FB8184",
+                                whiteSpace: "nowrap", flexShrink: 0,
+                              }}>
+                                BYPASS
+                              </span>
+                            )}
+                            {auto.lastRunStatus === "blocked_by_risk" && (
+                              <span style={{
+                                fontSize: 9, fontWeight: 700, padding: "2px 5px", borderRadius: 6,
+                                background: "rgba(239,68,68,0.15)", color: "#ef4444",
+                                whiteSpace: "nowrap", flexShrink: 0,
+                              }}>
+                                BLOCKED
+                              </span>
+                            )}
                           </div>
                           <div style={{
                             fontSize: 11, color: "var(--text-secondary)", marginTop: 2,
@@ -874,7 +897,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             }}>
                               <StatusDot status={auto.lastRunStatus} />
                               <span style={{ color: statusColor, fontWeight: 600 }}>
-                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "failed" ? "Failed" : "—"}
+                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "blocked_by_risk" ? "Blocked" : auto.lastRunStatus === "skipped_no_confirmation" ? "Skipped" : auto.lastRunStatus === "failed" ? "Failed" : "—"}
                               </span>
                               <span style={{ color: "var(--text-secondary)", opacity: 0.6 }}>
                                 {formatTime(auto.lastRunAt)}

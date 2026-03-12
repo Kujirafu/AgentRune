@@ -34,7 +34,7 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
 }
 
 export interface AutomationResult {

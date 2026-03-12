@@ -253,7 +253,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -271,6 +271,7 @@ export class AutomationManager {
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
+    if (updates.manifest !== undefined) auto.manifest = updates.manifest
 
     const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
     const enabledChanged = wasEnabled !== auto.enabled
