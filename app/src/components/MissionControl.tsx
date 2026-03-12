@@ -1240,6 +1240,8 @@ export function MissionControl({
         const latest = filtered[filtered.length - 1]
         if (latest?.type === "decision_request" && latest.status === "waiting") {
           setAgentStatus("waiting")
+        } else if (latest?.status === "completed") {
+          setAgentStatus("idle")
         } else if (latest?.status === "in_progress") {
           setAgentStatus("working")
         }
@@ -1618,6 +1620,19 @@ return (
               }}>
                 <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#37ACC0", animation: "pulse 1s ease-in-out infinite" }} />
                 <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 600, opacity: 0.9 }}>{t("mc.connecting")}</span>
+              </div>
+            )}
+            {/* Daemon role badge — shown when connected to release (fallback) daemon */}
+            {wsConnected && localStorage.getItem("agentrune_daemon_role") === "release" && (
+              <div style={{
+                padding: "4px 16px",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                background: "rgba(251, 129, 132, 0.08)",
+                borderBottom: "1px solid rgba(251, 129, 132, 0.15)",
+                flexShrink: 0,
+              }}>
+                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#FB8184" }} />
+                <span style={{ fontSize: 10, color: "#FB8184", fontWeight: 600, letterSpacing: "0.5px" }}>RELEASE DAEMON</span>
               </div>
             )}
 
@@ -2307,49 +2322,48 @@ return (
           style={{
             position: "fixed", inset: 0, zIndex: 260,
             display: "flex", alignItems: "center", justifyContent: "center",
-            background: "rgba(0,0,0,0.5)",
+            background: "rgba(0,0,0,0.45)",
             animation: "springSlideUp 0.45s ease-out",
           }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(90vw, 380px)", padding: 24, borderRadius: 24,
+              width: "calc(100% - 40px)", maxWidth: 360,
+              padding: 24, borderRadius: 20,
               background: "var(--card-bg)",
-              border: "1px solid var(--glass-border)",
               backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
+              border: "1px solid var(--glass-border)",
               boxShadow: "var(--glass-shadow)",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FB8184" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-              <span style={{ fontSize: 17, fontWeight: 700, color: "var(--text-primary)" }}>
-                {t("mc.bypassConfirmTitle") || "Enable Bypass Mode?"}
-              </span>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4, color: "var(--text-primary)" }}>
+              {t("mc.bypassConfirmTitle") || "Enable Bypass Mode?"}
             </div>
-            <p style={{ fontSize: 14, lineHeight: 1.6, color: "var(--text-secondary)", margin: "0 0 20px" }}>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16, fontWeight: 500, lineHeight: 1.5 }}>
               {t("mc.bypassConfirmDesc") || "This allows the agent to execute commands without asking for permission. The agent can read, write, and delete files, run shell commands, and access the network without your approval."}
-            </p>
-            <div style={{ display: "flex", gap: 10 }}>
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
               <button
                 onClick={cancelBypass}
                 style={{
-                  flex: 1, padding: "12px 0", borderRadius: 14,
-                  background: "var(--card-bg)", border: "1px solid var(--glass-border)",
-                  color: "var(--text-primary)", fontSize: 15, fontWeight: 600, cursor: "pointer",
+                  flex: 1, padding: 12, borderRadius: 14,
+                  border: "1px solid var(--glass-border)",
+                  background: "transparent",
+                  color: "var(--text-secondary)",
+                  fontSize: 14, fontWeight: 600, cursor: "pointer",
                 }}
               >
-                {t("mc.cancel") || "Cancel"}
+                {t("mc.cancelAction")}
               </button>
               <button
                 onClick={confirmBypass}
                 style={{
-                  flex: 1, padding: "12px 0", borderRadius: 14,
-                  background: "#FB8184", border: "none",
-                  color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer",
+                  flex: 1, padding: 12, borderRadius: 14,
+                  border: "none",
+                  background: "#ef4444",
+                  color: "#fff",
+                  fontSize: 14, fontWeight: 700, cursor: "pointer",
                 }}
               >
                 {t("mc.bypassConfirmBtn") || "Enable Bypass"}
