@@ -116,11 +116,11 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
   }
 
   return (
-    <SpringOverlay open={open}>
+    <SpringOverlay open={open} zIndex={500}>
     <div style={{
       position: "fixed",
       inset: 0,
-      zIndex: 300,
+      zIndex: 500,
       display: "flex",
       flexDirection: "column",
       background: "var(--bg-gradient)",
