@@ -997,6 +997,14 @@ export const zhTW: Record<string, string> = {
   "chain.i18n.desc": "國際化 i18n 建置",
   "chain.perf.name": "效能優化",
   "chain.perf.desc": "效能分析與優化",
+  "chain.test.name": "測試策略",
+  "chain.test.desc": "依架構選擇測試模型的品質工程流程",
+  "chain.step.testStrategy": "選擇測試模型",
+  "chain.step.testPlan": "測試計畫",
+  "chain.step.testCore": "核心層測試",
+  "chain.step.testSupplementary": "補充測試",
+  "chain.step.testRun": "執行測試",
+  "chain.step.testQuality": "測試品質審查",
 
   // Chain Builder
   "builder.namePlaceholder": "Chain 名稱...",

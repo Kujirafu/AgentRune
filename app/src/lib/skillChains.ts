@@ -1402,6 +1402,89 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
       },
     ],
   },
+
+  // 29. /test — 測試策略與品質工程
+  // Based on: https://blog.wclee.me/testing-strategies-from-pyramid-to-ai-era/
+  // Core: analyse architecture → pick testing model → write tests by model → AI-era layers
+  {
+    slug: "test",
+    nameKey: "chain.test.name",
+    descKey: "chain.test.desc",
+    tokenBudget: { lite: 650, deep: 9000 },
+    forcedDepthTags: ["ai-agent", "payment"],
+    steps: [
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.testStrategy",
+        skillSelection: { lite: "test", standard: "test", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        autoRemember: true,
+        // Agent analyses architecture type (Monolith/SPA/Microservices/API-first/Event-driven/AI Agent)
+        // and selects a testing model (Pyramid/Trophy/Honeycomb/Diamond/Crab/AI Test Pyramid).
+        // Handoff includes: chosen model + layer proportions + risk areas.
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.testPlan",
+        skillSelection: { lite: "plan", standard: "plan", deep: "architecture" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1"],
+        skipWhen: { type: "agentlore_has_pattern", hint: "Skip if project already has a complete test plan or testing conventions in agentlore.md" },
+        // Identify high-risk areas (core paths, security, payment).
+        // Decide tools per layer (vitest/testing-library/playwright/pact).
+        // Target 80% coverage on high-risk paths.
+      },
+      {
+        id: "s3", phase: "implement", labelKey: "chain.step.testCore",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s2"],
+        onFailure: { action: "retry", maxRetries: 2 },
+        // Write the thickest layer of tests per the chosen model:
+        // Diamond → API integration tests
+        // Trophy  → component integration tests
+        // Honeycomb → contract tests (Pact)
+        // Crab    → E2E + visual regression
+        // AI Test Pyramid → deterministic + record/playback
+      },
+      {
+        id: "s4", phase: "implement", labelKey: "chain.step.testSupplementary",
+        skillSelection: { lite: "tdd", standard: "tdd", deep: "test-driven-development" },
+        required: false, defaultDepth: "lite",
+        contextFrom: ["s3"],
+        skipWhen: { type: "low_complexity", hint: "Skip if the core layer already provides sufficient coverage for the feature's risk level" },
+        // Secondary layer: edge cases, boundary tests, error paths.
+        // AI-era (deep): add benchmark tests + LLM-as-Judge evaluation.
+        // Acceptance tests for vibe-coding projects (Given-When-Then from requirements).
+      },
+      {
+        type: "parallel", id: "p1", phase: "verify",
+        labelKey: "chain.step.parallelTestReview",
+        branches: [
+          {
+            id: "s5", phase: "verify", labelKey: "chain.step.testRun",
+            skillSelection: { lite: "test", standard: "test", deep: "test" },
+            required: true, defaultDepth: "lite",
+            onFailure: { action: "fallback", fallbackSkill: "debug" },
+            // Run all tests, collect coverage report.
+          },
+          {
+            id: "s6", phase: "verify", labelKey: "chain.step.testQuality",
+            skillSelection: { lite: "review", standard: "code-review-checklist", deep: "code-review-checklist" },
+            required: true, defaultDepth: "lite",
+            contextFrom: ["s3"],
+            // Review: tests should test behaviour, not implementation (Kent C. Dodds).
+            // Check: no self-verification (AI-generated tests must not be the sole gate for AI-generated code).
+            // Verify acceptance tests cover business requirements.
+          },
+        ],
+        joinStrategy: "all",
+      },
+      {
+        id: "s7", phase: "ship", labelKey: "chain.step.commit",
+        skillSelection: { lite: "commit", standard: "commit", deep: "commit" },
+        required: true, defaultDepth: "lite",
+      },
+    ],
+  },
 ]
 
 // ── Chain keyword map for natural language matching ─────
@@ -1436,6 +1519,7 @@ const CHAIN_KEYWORDS: Record<string, string[]> = {
   "seo-audit":       ["seo", "meta tag", "sitemap", "lighthouse", "page speed", "搜尋優化"],
   "i18n":            ["i18n", "internationalization", "translate", "locale", "multilingual", "國際化", "翻譯", "多語"],
   "perf":            ["performance", "optimize", "slow", "speed", "benchmark", "效能", "優化", "太慢", "加速"],
+  "test":            ["test", "testing", "tdd", "unit test", "integration test", "e2e", "coverage", "quality", "pyramid", "diamond", "trophy", "測試", "品質", "覆蓋率", "測試策略"],
 }
 
 // ── Helpers ──────────────────────────────────────────────
