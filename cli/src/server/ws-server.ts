@@ -24,6 +24,8 @@ import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager } from "./automation-manager.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, getRulesPath } from "./behavior-rules.js"
+import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
+import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { log } from "../shared/logger.js"
 import type { AgentEvent, TaskStore, Project } from "../shared/types.js"
@@ -149,7 +151,9 @@ function getLocalIp(): string {
 // --- Agent command builder ---
 
 function buildAgentProtocol(locale?: string): string {
-  const langHint = locale ? ` Respond in the user's language (${locale}).` : ""
+  // Sanitize locale to prevent shell injection via double-quoted strings
+  const safeLocale = locale ? locale.replace(/[^a-zA-Z0-9_-]/g, "") : ""
+  const langHint = safeLocale ? ` Respond in the user's language (${safeLocale}).` : ""
   return [
     "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
     `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
@@ -162,7 +166,7 @@ function buildAgentCommand(agentId: string, settings?: Record<string, unknown>):
   switch (agentId) {
     case "claude": {
       let cmd = "claude"
-      if (s.model && s.model !== "sonnet") cmd += ` --model ${s.model}`
+      if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
       if (s.bypass) cmd += " --dangerously-skip-permissions"
       cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
       return cmd
@@ -326,12 +330,21 @@ export function createServer(portOverride?: number) {
   checkCliUpdate()
 
   const app = express()
-  app.use(express.json({ limit: "50mb" }))
+  app.use(express.json({ limit: "10mb" }))
+
+  // Security headers
+  app.use((_req, res, next) => {
+    res.header("X-Content-Type-Options", "nosniff")
+    res.header("X-Frame-Options", "DENY")
+    res.header("X-XSS-Protection", "1; mode=block")
+    res.header("Referrer-Policy", "no-referrer")
+    next()
+  })
 
   // CORS — allow cross-origin requests (phone app via tunnel)
   const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost"])
   function isAllowedOrigin(origin: string | undefined): string | false {
-    if (!origin) return "*" // WebSocket upgrades and same-origin requests have no origin
+    if (!origin) return "http://localhost" // Same-origin requests have no origin — use localhost as default
     if (ALLOWED_ORIGINS.has(origin)) return origin
     // Allow http://localhost with any port
     if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
@@ -463,6 +476,184 @@ export function createServer(portOverride?: number) {
   const eventStore = new EventStore()
   const progressInterceptor = new ProgressInterceptor()
   const sessionLastTitle = new Map<string, string>()  // Track last meaningful event title per session
+
+  // --- Recoverable sessions: scan persisted events on startup ---
+  interface RecoverableSession {
+    id: string
+    projectId: string
+    projectName: string
+    agentId: string
+    lastEventTitle: string
+    lastActivity: number
+    status: "recoverable"
+    claudeSessionId?: string
+  }
+
+  function scanRecoverableSessions(): RecoverableSession[] {
+    try {
+      const eventsDir = getEventsDir()
+      const files = readdirSync(eventsDir).filter(f => f.endsWith(".json"))
+      // Group by projectId (prefix before first _timestamp)
+      const byProject = new Map<string, { file: string; sessionId: string; mtime: number }[]>()
+      for (const f of files) {
+        const sessionId = f.replace(/\.json$/, "")
+        // Extract projectId from sessionId format: projectId_timestamp_suffix
+        const match = sessionId.match(/^(.+?)_(\d{13,})/)
+        if (!match) continue
+        const projectId = match[1]
+        const mtime = parseInt(match[2], 10)
+        const list = byProject.get(projectId) || []
+        list.push({ file: f, sessionId, mtime })
+        byProject.set(projectId, list)
+      }
+
+      const result: RecoverableSession[] = []
+      const maxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
+      const now = Date.now()
+
+      for (const [projectId, entries] of byProject) {
+        // Sort by mtime desc, take the latest 3 per project
+        entries.sort((a, b) => b.mtime - a.mtime)
+        const recent = entries.filter(e => now - e.mtime < maxAge).slice(0, 3)
+
+        const project = projects.find(p => p.id === projectId)
+        if (!project) continue
+
+        for (const entry of recent) {
+          // Read last event title from persisted events
+          let lastTitle = ""
+          try {
+            const events: AgentEvent[] = JSON.parse(readFileSync(join(eventsDir, entry.file), "utf-8"))
+            // Find last meaningful title (walk backwards)
+            for (let i = events.length - 1; i >= 0; i--) {
+              const t = events[i].title
+              if (t && isMeaningfulTitle(t)) { lastTitle = t; break }
+            }
+            if (!lastTitle && events.length > 0) {
+              // Fallback: use first event title
+              lastTitle = events[0].title || ""
+            }
+          } catch { /* skip unreadable */ }
+
+          const mapping = sessionClaudeMap.get(entry.sessionId)
+          result.push({
+            id: entry.sessionId,
+            projectId,
+            projectName: project.name,
+            agentId: "claude",
+            lastEventTitle: lastTitle || mapping?.lastTitle || "",
+            lastActivity: entry.mtime,
+            status: "recoverable",
+            claudeSessionId: mapping?.claudeSessionId,
+          })
+        }
+      }
+
+      return result.sort((a, b) => b.lastActivity - a.lastActivity)
+    } catch {
+      return []
+    }
+  }
+
+  // --- Session-to-Claude mapping (persisted to disk for resume across daemon restarts) ---
+  const sessionMapPath = join(getConfigDir(), "session-map.json")
+  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string }>()
+  let lastResumeTime = 0
+
+  function loadSessionMap() {
+    try {
+      if (existsSync(sessionMapPath)) {
+        const raw = JSON.parse(readFileSync(sessionMapPath, "utf-8"))
+        for (const [k, v] of Object.entries(raw)) {
+          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string })
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  function saveSessionMap() {
+    try {
+      writeFileSync(sessionMapPath, JSON.stringify(Object.fromEntries(sessionClaudeMap), null, 2))
+    } catch { /* ignore */ }
+  }
+
+  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string) {
+    const existing = sessionClaudeMap.get(agentruneSessionId)
+    sessionClaudeMap.set(agentruneSessionId, {
+      claudeSessionId,
+      projectId,
+      lastTitle: lastTitle || existing?.lastTitle || "",
+    })
+    saveSessionMap()
+  }
+
+  loadSessionMap()
+
+  // Build initial session mapping from JSONL files if session-map is empty
+  function buildInitialSessionMap() {
+    if (sessionClaudeMap.size > 0) return // Already have mappings
+    try {
+      const claudeProjectsDir = join(homedir(), ".claude", "projects")
+      if (!existsSync(claudeProjectsDir)) return
+
+      for (const project of projects) {
+        // Convert project cwd to Claude Code dir name
+        const normalized = project.cwd.replace(/\\/g, "/")
+        const dirName = normalized.replace(/^([A-Za-z]):/, "$1-").replace(/\//g, "-")
+        const jsonlDir = join(claudeProjectsDir, dirName)
+        if (!existsSync(jsonlDir)) continue
+
+        // Get all JSONL files sorted by mtime desc
+        const jsonlFiles = readdirSync(jsonlDir)
+          .filter(f => f.endsWith(".jsonl"))
+          .map(f => ({
+            name: f,
+            claudeId: f.replace(/\.jsonl$/, ""),
+            mtime: statSync(join(jsonlDir, f)).mtimeMs,
+          }))
+          .sort((a, b) => b.mtime - a.mtime)
+
+        // Get event files for this project
+        const eventsDir = getEventsDir()
+        const eventFiles = readdirSync(eventsDir)
+          .filter(f => f.startsWith(project.id + "_") && f.endsWith(".json"))
+          .map(f => {
+            const m = f.match(/^(.+?)_(\d{13,})/)
+            return m ? { sessionId: f.replace(/\.json$/, ""), ts: parseInt(m[2], 10) } : null
+          })
+          .filter(Boolean) as { sessionId: string; ts: number }[]
+
+        // Match event files to JSONL files by closest timestamp
+        for (const ef of eventFiles) {
+          if (sessionClaudeMap.has(ef.sessionId)) continue
+          // Find JSONL file with closest mtime to event timestamp
+          let bestMatch: typeof jsonlFiles[0] | null = null
+          let bestDiff = Infinity
+          for (const jf of jsonlFiles) {
+            const diff = Math.abs(jf.mtime - ef.ts)
+            if (diff < bestDiff) { bestDiff = diff; bestMatch = jf }
+          }
+          // Only accept matches within 5 minutes
+          if (bestMatch && bestDiff < 5 * 60 * 1000) {
+            sessionClaudeMap.set(ef.sessionId, {
+              claudeSessionId: bestMatch.claudeId,
+              projectId: project.id,
+              lastTitle: "",
+            })
+          }
+        }
+      }
+      if (sessionClaudeMap.size > 0) {
+        saveSessionMap()
+        log.info(`[session-map] Built initial mapping: ${sessionClaudeMap.size} sessions`)
+      }
+    } catch (err) {
+      log.warn(`[session-map] Failed to build initial mapping: ${err}`)
+    }
+  }
+
+  // Cache recoverable sessions — initialized after projects are loaded (see below)
+  let cachedRecoverable: RecoverableSession[] = []
   const authDedup = new Map<string, string>()  // sessionId -> last auth URL/dedup key (URL-based dedup)
   // Filter: only store titles that are useful as session summaries (not technical noise)
   function isMeaningfulTitle(title: string): boolean {
@@ -476,13 +667,17 @@ export function createServer(portOverride?: number) {
   }
   const worktreeManagers = new Map<string, WorktreeManager>()
   const projects = loadProjects()
+  buildInitialSessionMap()
+  cachedRecoverable = scanRecoverableSessions()
+  log.info(`[Startup] Found ${cachedRecoverable.length} recoverable sessions`)
+  const cfg = loadConfig()
   const automationManager = new AutomationManager(sessions, projects, (event) => {
     // Broadcast automation_completed to all connected WS clients
     const payload = JSON.stringify(event)
     for (const ws of wss.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload)
     }
-  })
+  }, { vaultPath: cfg.vaultPath })
 
   // --- CORS ---
   app.use((_req, res, next) => {
@@ -659,13 +854,17 @@ export function createServer(portOverride?: number) {
   })
 
   app.get("/api/sessions", (_req, res) => {
+    const activeIds = new Set<string>()
     const allSessions = sessions.getAll().map((s) => {
+      activeIds.add(s.id)
       // Attach worktree branch info if available
       const wtm = worktreeManagers.get(s.projectId)
       const wt = wtm?.get(s.id)
-      return { ...s, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
+      return { ...s, status: "active" as const, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
     })
-    res.json(allSessions)
+    // Append recoverable sessions that are not currently active
+    const recoverable = cachedRecoverable.filter(r => !activeIds.has(r.id))
+    res.json([...allSessions, ...recoverable])
   })
 
   // List past agent sessions for a project — supports all agents with session history
@@ -848,8 +1047,8 @@ export function createServer(portOverride?: number) {
 
       res.json(sessions)
     } catch (err) {
-      log.error("Error listing agent sessions:", err)
-      res.status(500).json({ error: "Failed to list sessions", detail: String(err) })
+      log.error(`Failed to list sessions: ${err}`)
+      res.status(500).json({ error: "Failed to list sessions" })
     }
   })
 
@@ -967,8 +1166,8 @@ export function createServer(portOverride?: number) {
 
       res.json(messages)
     } catch (err) {
-      log.error("Error reading session messages:", err)
-      res.status(500).json({ error: "Failed to read messages", detail: String(err) })
+      log.error(`Failed to read messages: ${err}`)
+      res.status(500).json({ error: "Failed to read messages" })
     }
   })
 
@@ -1081,10 +1280,12 @@ export function createServer(portOverride?: number) {
     if (typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "Missing text" })
     }
-    // Allow frontend to pass API keys (from app settings) — whitelist only known keys
+    // Temporarily set API keys for this request only, then restore
+    const savedEnv: Record<string, string | undefined> = {}
     if (apiKeys && typeof apiKeys === "object") {
       for (const [k, v] of Object.entries(apiKeys)) {
-        if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v && !process.env[k]) {
+        if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
+          savedEnv[k] = process.env[k]
           process.env[k] = v
         }
       }
@@ -1095,7 +1296,13 @@ export function createServer(portOverride?: number) {
       res.json(result)
     } catch (e: any) {
       log.error(`Voice cleanup error: ${e.message}`)
-      res.status(500).json({ error: e.message, original: text, cleaned: text.trim() })
+      res.status(500).json({ error: "Voice cleanup failed" })
+    } finally {
+      // Restore original env values
+      for (const [k, orig] of Object.entries(savedEnv)) {
+        if (orig === undefined) delete process.env[k]
+        else process.env[k] = orig
+      }
     }
   })
 
@@ -1126,7 +1333,7 @@ export function createServer(portOverride?: number) {
         // Convert Simplified → Traditional Chinese (Whisper base model outputs Simplified)
         let rawText = result.text
         try {
-          const OpenCC = await import("opencc-js")
+          const OpenCC: any = await import("opencc-js")
           const s2t = OpenCC.Converter({ from: "cn", to: "tw" })
           rawText = s2t(rawText)
         } catch (e: any) {
@@ -1136,18 +1343,33 @@ export function createServer(portOverride?: number) {
         // Optionally run LLM cleanup on the result
         const agentId = req.headers["x-agent-id"] as string || "claude"
         let cleaned = rawText
+        const savedEnv2: Record<string, string | undefined> = {}
         if (rawText.trim()) {
           try {
             const { cleanupVoiceText } = await import("./voice-cleanup.js")
             const apiKeys: Record<string, string> = {}
             const rawKeys = req.headers["x-api-keys"] as string
             if (rawKeys) try { Object.assign(apiKeys, JSON.parse(rawKeys)) } catch {}
+            // Temporarily set API keys for this request only
             for (const [k, v] of Object.entries(apiKeys)) {
-              if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v && !process.env[k]) process.env[k] = v
+              if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
+                savedEnv2[k] = process.env[k]
+                process.env[k] = v
+              }
             }
             const cleanup = await cleanupVoiceText(rawText, agentId)
             cleaned = cleanup.cleaned
+            // Restore env
+            for (const [k2, orig2] of Object.entries(savedEnv2)) {
+              if (orig2 === undefined) delete process.env[k2]
+              else process.env[k2] = orig2
+            }
           } catch (e: any) {
+            // Restore env even on error
+            for (const [k2, orig2] of Object.entries(savedEnv2)) {
+              if (orig2 === undefined) delete process.env[k2]
+              else process.env[k2] = orig2
+            }
             log.warn(`Voice cleanup after transcribe failed: ${e.message}`)
           }
         }
@@ -1155,7 +1377,7 @@ export function createServer(portOverride?: number) {
         res.json({ text: rawText, cleaned, model: result.model, duration_ms: result.duration_ms })
       } catch (e: any) {
         log.error(`Voice transcribe error: ${e.message}`)
-        res.status(500).json({ error: e.message })
+        res.status(500).json({ error: "Voice transcription failed" })
       } finally {
         // Cleanup temp files
         try { unlinkSync(inputPath) } catch {}
@@ -1179,7 +1401,7 @@ export function createServer(portOverride?: number) {
       res.json({ ok: true, ...result })
     } catch (e: any) {
       log.error(`Whisper setup error: ${e.message}`)
-      res.status(500).json({ error: e.message })
+      res.status(500).json({ error: "Whisper setup failed" })
     }
   })
 
@@ -1195,7 +1417,7 @@ export function createServer(portOverride?: number) {
       res.json({ edited: result })
     } catch (e: any) {
       log.error(`Voice edit error: ${e.message}`)
-      res.status(500).json({ error: e.message, edited: original })
+      res.status(500).json({ error: "Voice edit failed", edited: original })
     }
   })
 
@@ -1692,16 +1914,20 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/tasks/:projectId", (req, res) => {
-    const { requirement, tasks } = req.body
+    const { requirement, tasks, prd } = req.body
+    const filePath = join(TASKS_DIR, `${req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
+    // Merge with existing store to avoid overwriting prd/tasks when only one is sent
+    let existing: TaskStore | null = null
+    try { existing = existsSync(filePath) ? JSON.parse(readFileSync(filePath, "utf-8")) : null } catch {}
     const store: TaskStore = {
       projectId: req.params.projectId,
-      requirement: requirement || "",
-      tasks: tasks || [],
-      createdAt: Date.now(),
+      requirement: requirement ?? existing?.requirement ?? "",
+      tasks: tasks ?? existing?.tasks ?? [],
+      prd: prd ?? existing?.prd,
+      createdAt: existing?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
     }
-    const path = join(TASKS_DIR, `${req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
-    writeFileSync(path, JSON.stringify(store, null, 2))
+    writeFileSync(filePath, JSON.stringify(store, null, 2))
     res.json(store)
   })
 
@@ -1780,7 +2006,7 @@ export function createServer(portOverride?: number) {
       res.json({ summary: concatenated })
     } catch (e: any) {
       log.error(`Project summary error: ${e.message}`)
-      res.status(500).json({ error: e.message })
+      res.status(500).json({ error: "Failed to generate summary" })
     }
   })
 
@@ -1903,6 +2129,67 @@ export function createServer(portOverride?: number) {
     updateProjectMemory(cwd, content)
     log.info(`[Memory] Updated agentlore.md for project at ${cwd} (${content.length} chars)`)
     res.json({ ok: true, path: getMemoryPath(cwd) })
+  })
+
+  // --- Standards endpoints ---
+
+  app.get("/api/standards", (_req, res) => {
+    const cwd = resolveProjectCwd()
+    const standards = loadStandards(cwd || undefined)
+    res.json(standards)
+  })
+
+  app.get("/api/standards/categories/:categoryId/rules", (req, res) => {
+    const cwd = resolveProjectCwd()
+    const standards = loadStandards(cwd || undefined)
+    const category = standards.categories.find(c => c.id === req.params.categoryId)
+    if (!category) { res.status(404).json({ error: "Category not found" }); return }
+    res.json(category)
+  })
+
+  app.post("/api/standards/categories", express.json(), (req, res) => {
+    const { id, name, icon, description, scope } = req.body as { id: string; name: Record<string, string>; icon: string; description: Record<string, string>; scope?: string }
+    if (!id || !name) { res.status(400).json({ error: "Missing id or name" }); return }
+    const cwd = resolveProjectCwd()
+    const dir = scope === "global" ? getGlobalStandardsDir() : cwd ? getProjectStandardsDir(cwd) : getGlobalStandardsDir()
+    saveCategory(dir, { id, name, icon: icon || "file-text", description: description || { en: "", "zh-TW": "" }, builtin: false })
+    log.info(`[Standards] Saved category: ${id} to ${dir}`)
+    res.json({ ok: true })
+  })
+
+  app.delete("/api/standards/categories/:categoryId", (req, res) => {
+    const cwd = resolveProjectCwd()
+    const dir = cwd ? getProjectStandardsDir(cwd) : getGlobalStandardsDir()
+    deleteCategory(dir, req.params.categoryId)
+    log.info(`[Standards] Deleted category: ${req.params.categoryId}`)
+    res.json({ ok: true })
+  })
+
+  app.post("/api/standards/rules", express.json(), (req, res) => {
+    const { categoryId, rule, scope } = req.body as { categoryId: string; rule: any; scope?: string }
+    if (!categoryId || !rule?.id) { res.status(400).json({ error: "Missing categoryId or rule" }); return }
+    const cwd = resolveProjectCwd()
+    const dir = scope === "global" ? getGlobalStandardsDir() : cwd ? getProjectStandardsDir(cwd) : getGlobalStandardsDir()
+    saveRule(dir, categoryId, rule)
+    log.info(`[Standards] Saved rule: ${categoryId}/${rule.id}`)
+    res.json({ ok: true })
+  })
+
+  app.delete("/api/standards/rules/:categoryId/:ruleId", (req, res) => {
+    const cwd = resolveProjectCwd()
+    const dir = cwd ? getProjectStandardsDir(cwd) : getGlobalStandardsDir()
+    deleteRule(dir, req.params.categoryId, req.params.ruleId)
+    log.info(`[Standards] Deleted rule: ${req.params.categoryId}/${req.params.ruleId}`)
+    res.json({ ok: true })
+  })
+
+  app.post("/api/standards/validate", express.json(), (req, res) => {
+    const { prdTaskCount } = req.body || {}
+    const cwd = resolveProjectCwd()
+    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    const standards = loadStandards(cwd)
+    const report = validateStandards(standards, cwd, { prdTaskCount })
+    res.json(report)
   })
 
   // --- Insight endpoints ---
@@ -2118,7 +2405,7 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/automations/:projectId", express.json(), (req, res) => {
-    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model } = req.body
+    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model, bypass } = req.body
     if (!name || !schedule || (!command && !prompt)) {
       return res.status(400).json({ error: "name, schedule, and (prompt or command) are required" })
     }
@@ -2133,8 +2420,10 @@ export function createServer(portOverride?: number) {
       runMode: runMode || "local",
       agentId: agentId || "claude",
       model: model || undefined,
+      bypass: bypass || false,
       enabled: req.body.enabled !== false,
     })
+    if ("error" in auto) return res.status(429).json(auto)
     res.json(auto)
   })
 
@@ -2153,6 +2442,16 @@ export function createServer(portOverride?: number) {
   app.get("/api/automations/:projectId/:id/results", (req, res) => {
     const results = automationManager.getResults(req.params.id)
     res.json(results)
+  })
+
+  app.post("/api/automations/:projectId/:id/trigger", async (req, res) => {
+    try {
+      const result = await automationManager.trigger(req.params.id)
+      if (!result.ok) return res.status(429).json({ error: result.error })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Trigger failed" })
+    }
   })
 
   /** Resolve current project name from first connected session */
@@ -2184,7 +2483,7 @@ export function createServer(portOverride?: number) {
   // Per-PTY-session state (survives WS reconnects)
   const sessionEngines = new Map<string, ParseEngine>()
   const sessionRecentEvents = new Map<string, AgentEvent[]>()
-  const sessionJsonlWatchers = new Map<string, { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null }>()
+  const sessionJsonlWatchers = new Map<string, { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null; [key: string]: any }>()
 
   // Per-session timer for delayed Resume Session detection
   const resumeTimers = new Map<string, NodeJS.Timeout>()
@@ -2194,7 +2493,7 @@ export function createServer(portOverride?: number) {
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
-    log.info(`WS connection from ${req.socket.remoteAddress} token=${(new URL(req.url || "/", "http://localhost").searchParams.get("token") || "").substring(0, 16)}...`)
+    log.info(`WS connection from ${req.socket.remoteAddress} token=${(new URL(req.url || "/", "http://localhost").searchParams.get("token") || "").substring(0, 8)}...`)
 
     // Push CLI update notification to app
     if (updateInfo) {
@@ -2343,6 +2642,9 @@ export function createServer(portOverride?: number) {
               for (let i = filtered.length - 1; i >= 0; i--) {
                 if (filtered[i].title && isMeaningfulTitle(filtered[i].title)) {
                   sessionLastTitle.set(sid, filtered[i].title)
+                  // Update session map title for recovery
+                  const existing = sessionClaudeMap.get(sid)
+                  if (existing) { existing.lastTitle = filtered[i].title; saveSessionMap() }
                   break
                 }
               }
@@ -2372,15 +2674,29 @@ export function createServer(portOverride?: number) {
           log.info(`[attach] watcherExists=${sessionJsonlWatchers.has(session.id)} session.id=${session.id} agentId=${agentId}`)
           if (!sessionJsonlWatchers.has(session.id)) {
             const sid = session.id
-            const cb = makeWatcherCallback(sid)
-            let watcher: { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null } | null = null
+            const baseCb = makeWatcherCallback(sid)
+            // Wrap callback to capture Claude session ID from JSONL watcher path
+            const cb = (events: AgentEvent[]) => {
+              baseCb(events)
+              // Try to extract Claude session ID from watcher's JSONL path
+              if (agentId === "claude" && watcher && (watcher as any).jsonlPath) {
+                const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
+                if (jsonlFile && !sessionClaudeMap.has(sid)) {
+                  updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid))
+                  log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile}`)
+                }
+              }
+            }
+            let watcher: { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null; [key: string]: any } | null = null
 
             // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
             const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              // Always replay JSONL history — it's the authoritative source for conversation events
-              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, false)
-              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=false`)
+              // Skip JSONL replay for recoverable/resumed sessions — persisted events
+              // will be replayed separately (avoids sending events twice + faster attach).
+              const skipReplay = !!requestedSessionId
+              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, skipReplay)
+              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
               watcher = new CodexWatcher(cb)
             } else if (agentId === "gemini") {
@@ -2455,6 +2771,38 @@ export function createServer(portOverride?: number) {
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
 
+          // For recoverable sessions (daemon restarted, PTY gone but events persisted):
+          // Only auto-resume when user explicitly opens the session (isAgentResume flag from TerminalView).
+          // MissionControl re-attach on WS reconnect does NOT set isAgentResume, preventing
+          // multiple Claude instances from launching simultaneously and crashing the daemon.
+          // Safety: 10s cooldown between resume operations to prevent resource exhaustion.
+          const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
+          if (isRecoverable) {
+            const now = Date.now()
+            const RESUME_COOLDOWN_MS = 5_000
+            if (now - lastResumeTime < RESUME_COOLDOWN_MS) {
+              log.warn(`[attach] Resume cooldown: skipped ${session.id} (${Math.round((RESUME_COOLDOWN_MS - (now - lastResumeTime)) / 1000)}s remaining)`)
+            } else {
+              lastResumeTime = now
+              const claudeId = (msg.claudeSessionId as string) || sessionClaudeMap.get(requestedSessionId)?.claudeSessionId
+              if (agentId === "claude") {
+                const appSettings = msg.settings as Record<string, unknown> | undefined
+                const s = appSettings || {}
+                // Use --resume <id> if we have the Claude session ID, otherwise --continue (most recent)
+                // Validate claudeId format (UUID-like) to prevent command injection
+                const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
+                let cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
+                if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
+                if (s.bypass) cmd += " --dangerously-skip-permissions"
+                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string).replace(/"/g, '\\"')}"`
+                setTimeout(() => {
+                  sessions.write(session.id, `${cmd}\r`)
+                  log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
+                }, 1500)
+              }
+            }
+          }
+
           // For new sessions: auto-install agent if not found, then inject rules prompt.
           // Skip injection when resuming (requestedSessionId means user chose to resume an existing session —
           // the agent already has context from the previous conversation).
@@ -2502,12 +2850,15 @@ export function createServer(portOverride?: number) {
               }, 1500)
             }
 
-            // --- Ensure rules.md exists, then inject short rules instruction ---
+            // --- Ensure rules.md exists, generate standards prompt, then inject ---
             ensureRulesFile(sessionProject.cwd)
             const rulesPath = getRulesPath(sessionProject.cwd)
             const memoryPath = getMemoryPath(sessionProject.cwd)
             const hasRules = existsSync(rulesPath)
             const hasMemory = existsSync(memoryPath)
+
+            // Standards injection is opt-in — users can run validation manually from the Standards page.
+            // Standards prompt file can be generated via POST /api/standards/generate-prompt if needed.
 
             {
               let attempts = 0
@@ -2618,7 +2969,7 @@ export function createServer(portOverride?: number) {
             // If images are attached, save to disk and append paths to input text
             if (inlineImages && inlineImages.length > 0) {
               const session = sessions.get(sessionId)
-              const cwd = session?.cwd || homedir()
+              const cwd = session?.project.cwd || homedir()
               const uploadDir = join(cwd, ".agentrune", "uploads")
               mkdirSync(uploadDir, { recursive: true })
               const savedPaths: string[] = []
@@ -2680,7 +3031,9 @@ export function createServer(portOverride?: number) {
         case "session_input": {
           const targetId = msg.sessionId as string
           const inputStr = msg.data as string
-          if (targetId && inputStr && sessions.get(targetId)) {
+          // Security: verify the requesting client owns this session (prevent cross-session injection)
+          const clientOwnedSid = clientSessions.get(ws)
+          if (targetId && inputStr && sessions.get(targetId) && (clientOwnedSid === targetId || isLocal)) {
             if (/\/resume\b/i.test(inputStr)) {
               resumeDecisionDone.delete(targetId)
               resumeTimers.delete(targetId + "_scrolled")
@@ -2710,6 +3063,11 @@ export function createServer(portOverride?: number) {
         case "start_watch": {
           const targetSid = msg.sessionId as string
           if (!targetSid) break
+          // Security: validate session ID format (alphanumeric + underscore + hyphen only)
+          if (!/^[a-zA-Z0-9_-]+$/.test(targetSid)) {
+            ws.send(JSON.stringify({ type: "error", message: "Invalid session ID format" }))
+            break
+          }
           // Spawn a new terminal window running `agentrune watch --session <id>`
           const watchedSessions = (globalThis as any).__watchedSessions as Set<string> || new Set<string>()
           ;(globalThis as any).__watchedSessions = watchedSessions
@@ -2741,7 +3099,7 @@ export function createServer(portOverride?: number) {
           } catch (err: any) {
             log.error(`Failed to spawn watch: ${err.message}`)
             watchedSessions.delete(targetSid)
-            ws.send(JSON.stringify({ type: "error", message: `Failed to open watch terminal: ${err.message}` }))
+            ws.send(JSON.stringify({ type: "error", message: "Failed to open watch terminal" }))
           }
           break
         }
@@ -3062,7 +3420,7 @@ export function createServer(portOverride?: number) {
           sessions.kill(currentSid)
           // Clean up watchers
           const oldWatcher = sessionJsonlWatchers.get(currentSid)
-          if (oldWatcher) { oldWatcher.dispose(); sessionJsonlWatchers.delete(currentSid) }
+          if (oldWatcher) { oldWatcher.stop(); sessionJsonlWatchers.delete(currentSid) }
           sessionEngines.delete(currentSid)
           sessionRecentEvents.delete(currentSid)
           // Create new session (command will be regenerated from current APP settings)
@@ -3192,7 +3550,7 @@ export function createServer(portOverride?: number) {
         const lastKey = authDedup.get(sessionId)
         if (dedupKey !== lastKey) {
           authDedup.set(sessionId, dedupKey)
-          const options: { label: string; input: string; style: string }[] = []
+          const options: { label: string; input: string; style: "primary" | "danger" | "default" }[] = []
           if (authUrl) {
             options.push({ label: "Open in browser", input: `__open_url__${authUrl}`, style: "primary" })
             options.push({ label: "Copy URL", input: `__copy_url__${authUrl}`, style: "default" })
@@ -3407,6 +3765,9 @@ export function createServer(portOverride?: number) {
     resumeDecisionDone.delete(sessionId)
     authDedup.delete(sessionId)
 
+    // Refresh recoverable sessions cache so the exited session appears as recoverable
+    cachedRecoverable = scanRecoverableSessions()
+
     for (const [client, sid] of clientSessions) {
       if (sid === sessionId && client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({ type: "exit", sessionId }))
@@ -3424,15 +3785,16 @@ export function createServer(portOverride?: number) {
     }
 
     // Start Cloudflare Tunnel for remote access
-    let tunnelUrl: string | undefined
+    // Use object so heartbeat closure always reads latest URL
+    const tunnelState = { url: undefined as string | undefined }
     try {
       const { startTunnel } = await import("./tunnel.js")
       const tunnel = await startTunnel(PORT)
-      tunnelUrl = tunnel.url
-      log.info(`Remote access: ${tunnelUrl}`)
+      tunnelState.url = tunnel.url
+      log.info(`Remote access: ${tunnelState.url}`)
       // Auto-update AgentLore when tunnel restarts with new URL
       tunnel.onRestart = (newUrl: string) => {
-        tunnelUrl = newUrl
+        tunnelState.url = newUrl
         log.info(`Tunnel URL changed: ${newUrl}`)
         // Push new URL to AgentLore immediately
         const agentloreConfig = config.agentlore
@@ -3467,8 +3829,8 @@ export function createServer(portOverride?: number) {
         writeFileSync(cloudTokenPath, cloudToken)
       }
       sessionTokens.add(cloudToken)
-      await agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelUrl)
-      setInterval(() => agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelUrl), 2 * 60 * 1000)
+      await agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelState.url)
+      setInterval(() => agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelState.url), 2 * 60 * 1000)
     }
   })
 

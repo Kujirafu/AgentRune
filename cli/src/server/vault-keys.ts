@@ -114,7 +114,7 @@ export function loadVaultKeys(opts: {
 
   const count = Object.keys(keys).length
   if (count > 0) {
-    log.info(`Loaded ${count} API keys from vault: ${Object.keys(keys).join(", ")}`)
+    log.info(`Loaded ${count} API keys from vault`)
   }
 
   return keys
