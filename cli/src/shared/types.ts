@@ -71,6 +71,7 @@ export interface TaskStore {
   projectId: string
   requirement: string
   tasks: Task[]
+  prd?: string
   createdAt: number
   updatedAt: number
 }

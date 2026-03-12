@@ -312,7 +312,12 @@ function useWs() {
 
       // After 3+ failures (backoff >= 2400ms), refresh tunnel URL from AgentLore
       if (delay >= 2400 && isCapacitor()) {
-        refreshTunnelUrl().then(() => {
+        refreshTunnelUrl().then((device) => {
+          // Update token if AgentLore returned a fresh cloudSessionToken
+          if (device?.sessionToken) {
+            tokenRef.current = device.sessionToken
+            localStorage.setItem("agentrune_cloud_token", device.sessionToken)
+          }
           reconnectTimerRef.current = setTimeout(() => doConnect(tokenRef.current), 500)
         }).catch(() => {
           reconnectTimerRef.current = setTimeout(() => doConnect(tokenRef.current), delay)
@@ -1283,16 +1288,18 @@ export function App() {
       })
       .catch(() => { })
 
-    // Load active sessions
+    // Load active + recoverable sessions
     fetch(`${base}/api/sessions`)
       .then((r) => r.json())
-      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }[] | unknown) => {
+      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string }[] | unknown) => {
         if (!Array.isArray(data)) return
-        const sessions = data.map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string }) => ({
+        const sessions = data.map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string; claudeSessionId?: string }) => ({
           id: s.id,
           projectId: s.projectId,
           agentId: s.agentId,
           worktreeBranch: s.worktreeBranch || null,
+          status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
+          claudeSessionId: s.claudeSessionId,
         }))
         setActiveSessions(sessions)
         // Seed sessionEventsMap with lastEventTitle from server so summaries show immediately
@@ -1708,11 +1715,16 @@ export function App() {
     const session = activeSessions.find((s) => s.id === sessionId)
     if (session) {
       const projectMatch = projects.find((p) => p.id === session.projectId)
-      console.log("[handleResume]", { sessionId, projectId: session.projectId, projectMatch: !!projectMatch, projects: projects.map(p => p.id) })
+      console.log("[handleResume]", { sessionId, projectId: session.projectId, status: session.status, projectMatch: !!projectMatch })
       setSelectedProject(session.projectId)
       setActiveAgentId(session.agentId)
       setCurrentSessionId(sessionId)
-      setResumeSessionId(undefined)  // Clear — this resumes an existing PTY, not a new Claude Code resume
+      // For recoverable sessions, pass the Claude session ID so daemon can --resume
+      if (session.status === "recoverable" && session.claudeSessionId) {
+        setResumeSessionId(session.claudeSessionId)
+      } else {
+        setResumeSessionId(undefined)
+      }
       saveLastProject(session.projectId)
       setScreen("session")
     } else {

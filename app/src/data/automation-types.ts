@@ -29,6 +29,7 @@ export interface AutomationConfig {
   // Execution environment
   runMode: "local" | "worktree"
   agentId: string
+  bypass?: boolean           // --dangerously-skip-permissions (unattended mode)
 
   enabled: boolean
   createdAt: number

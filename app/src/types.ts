@@ -72,6 +72,8 @@ export interface AppSession {
   projectId: string
   agentId: string
   worktreeBranch?: string | null
+  status?: "active" | "recoverable"
+  claudeSessionId?: string
 }
 
 export interface SmartAction {

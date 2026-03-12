@@ -4,6 +4,7 @@ import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { Task, TaskStore } from "../types"
 import { SpringOverlay } from "./SpringOverlay"
+import { StandardsContent } from "./StandardsPage"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
@@ -17,6 +18,7 @@ interface TaskBoardProps {
 
 export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskBoardProps) {
   const { t } = useLocale()
+  const [activeTab, setActiveTab] = useState<"tasks" | "standards">("tasks")
   const [store, setStore] = useState<TaskStore | null>(null)
   const [loading, setLoading] = useState(false)
   const [requirement, setRequirement] = useState("")
@@ -230,8 +232,10 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
             style={{ width: 36, height: 36, borderRadius: 12, border: "1px solid var(--glass-border)", background: "var(--card-bg)", color: "var(--text-primary)", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
           </button>
-          <div style={{ flex: 1, fontSize: 17, fontWeight: 600 }}>Tasks</div>
-          {hasTasks && (
+          <div style={{ flex: 1, fontSize: 17, fontWeight: 600 }}>
+            {activeTab === "tasks" ? "Tasks" : (t("standards.title") || "Standards")}
+          </div>
+          {activeTab === "tasks" && hasTasks && (
             <span style={{
               fontSize: 11, padding: "4px 10px", borderRadius: 20,
               background: doneCount === totalCount ? "rgba(34,197,94,0.1)" : "rgba(96,165,250,0.1)",
@@ -243,16 +247,37 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
             </span>
           )}
         </div>
+        {/* Tab switcher */}
+        <div style={{ display: "flex", gap: 4, padding: "0 16px 8px" }}>
+          {(["tasks", "standards"] as const).map(tab => (
+            <button key={tab} onClick={() => setActiveTab(tab)} style={{
+              flex: 1, padding: "6px 0", borderRadius: 8, fontSize: 12, fontWeight: 600,
+              cursor: "pointer", transition: "all 0.2s",
+              background: activeTab === tab ? "var(--accent-primary-bg, rgba(55,172,192,0.12))" : "transparent",
+              color: activeTab === tab ? "var(--accent-primary, #37ACC0)" : "var(--text-secondary)",
+              border: activeTab === tab ? "1px solid var(--accent-primary, #37ACC0)" : "1px solid var(--glass-border)",
+            }}>
+              {tab === "tasks" ? "Tasks" : (t("standards.title") || "Standards")}
+            </button>
+          ))}
+        </div>
         {/* Queue hint */}
-        {hasTasks && (
+        {activeTab === "tasks" && hasTasks && (
           <div style={{ padding: "0 16px 8px", fontSize: 10, color: "var(--text-secondary)", opacity: 0.6 }}>
             {t("tasks.queueHint") || "Top = next to execute. Drag or use arrows to reorder."}
           </div>
         )}
       </div>
 
-      {/* Body */}
-      <div
+      {/* Standards tab */}
+      {activeTab === "standards" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: 16, WebkitOverflowScrolling: "touch" as never }}>
+          <StandardsContent />
+        </div>
+      )}
+
+      {/* Tasks tab - Body */}
+      {activeTab === "tasks" && <div
         style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 8, WebkitOverflowScrolling: "touch" as never }}
         onTouchMove={(e) => { if (dragIdx !== null) { e.preventDefault(); handleDragMove(e.touches[0].clientY) } }}
         onTouchEnd={() => handleDragEnd()}
@@ -584,7 +609,7 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
             </button>
           </div>
         )}
-      </div>
+      </div>}
     </div>
     </SpringOverlay>
   )
