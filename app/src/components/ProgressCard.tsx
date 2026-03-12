@@ -139,4 +139,11 @@ export const ProgressCard = React.memo(function ProgressCard({ event, onNextStep
       )}
     </div>
   )
-}
+}, (prev, next) => {
+  const pp = prev.event.progress, np = next.event.progress
+  return prev.event.id === next.event.id
+    && prev.event.status === next.event.status
+    && pp?.status === np?.status
+    && pp?.summary === np?.summary
+    && pp?.title === np?.title
+})

@@ -1,5 +1,5 @@
 // web/components/MissionControl.tsx
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { createPortal } from "react-dom"
 import type { Project, ProjectSettings, AppSession } from "../types"
 import type { AgentEvent } from "../types"
@@ -10,14 +10,15 @@ import { ProgressCard } from "./ProgressCard"
 import type { AgentStatus } from "./StatusIndicator"
 import { InputBar } from "./InputBar"
 import type { SendFlags } from "./InputBar"
-import { SettingsSheet } from "./SettingsSheet"
-import { FileBrowser } from "./FileBrowser"
-import { FilePreview } from "./FilePreview"
-import { GitPanel } from "./GitPanel"
+import { lazy, Suspense } from "react"
+const SettingsSheet = lazy(() => import("./SettingsSheet").then(m => ({ default: m.SettingsSheet })))
+const FileBrowser = lazy(() => import("./FileBrowser").then(m => ({ default: m.FileBrowser })))
+const FilePreview = lazy(() => import("./FilePreview").then(m => ({ default: m.FilePreview })))
+const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPanel })))
 import { TaskBoard } from "./TaskBoard"
 import { PlanPanel } from "./PlanPanel"
 import { PathBadge } from "./PathBadge"
-import { InsightSheet } from "./InsightSheet"
+const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
@@ -1401,7 +1402,7 @@ export function MissionControl({
   // MissionControl just listens for WS messages ??no attach needed.
 
   // ?????? Filtered events: only well-defined actions (no text accumulator noise) ??????
-    const mainEvents = events.filter((e) => {
+    const mainEvents = useMemo(() => events.filter((e) => {
     if (e.id.startsWith("usr_")) return true
     if (![
       "file_edit",
@@ -1433,7 +1434,13 @@ export function MissionControl({
       if (/^\$ node -e/i.test(t)) return false
     }
     return true
-  })
+  }), [events])
+
+    // L1 events: important actions only (memoized, used in render + empty check)
+    const L1_TYPES = new Set(["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"])
+    const l1Events = useMemo(() => mainEvents.filter(
+      e => L1_TYPES.has(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_")
+    ), [mainEvents])
 return (
     <>
       {/* Status indicator overlay ??only when working/waiting */}
@@ -1663,9 +1670,7 @@ return (
               }}
             >
               {/* L1: Important events only — progress, decisions, responses, errors, file edits */}
-              {mainEvents
-                .filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_"))
-                .map((event) => (
+              {l1Events.map((event) => (
                 event.type === "progress_report" ? (
                   <ProgressCard
                     key={event.id}
@@ -1708,7 +1713,7 @@ return (
                   ))}
                 </div>
               )}
-              {mainEvents.filter(e => ["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"].includes(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_")).length === 0 && (
+              {l1Events.length === 0 && (
                 <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)", opacity: 0.5 }}>
                   <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.4 }}>
@@ -1977,7 +1982,8 @@ return (
       </div>
 
       {/* Settings overlay ??outside swipe container */}
-      <SettingsSheet
+      <Suspense fallback={null}>
+      {showSettings && <SettingsSheet
         open={showSettings}
         settings={settings}
         agentId={agentId}
@@ -1987,17 +1993,17 @@ return (
         on={on}
         theme={document.documentElement.classList.contains("dark") ? "dark" : "light"}
         toggleTheme={toggleTheme}
-      />
+      />}
 
-      <InsightSheet
+      {showInsight && <InsightSheet
         open={showInsight}
         onClose={() => setShowInsight(false)}
         apiBase={getApiBase()}
         projectId={project.id}
         sessionId={sessionId}
-      />
+      />}
 
-      <FileBrowser
+      {showBrowser && <FileBrowser
         open={showBrowser}
         onClose={() => setShowBrowser(false)}
         onSelectPath={(path) => {
@@ -2006,15 +2012,15 @@ return (
         }}
         onPreviewFile={(path) => setPreviewFile(path)}
         initialPath={attachedFiles.length > 0 ? attachedFiles[attachedFiles.length - 1].replace(/[/\\][^/\\]+$/, "") : project.cwd}
-      />
+      />}
 
-      <FilePreview
+      {previewFile !== null && <FilePreview
         open={previewFile !== null}
         filePath={previewFile}
         onClose={() => setPreviewFile(null)}
-      />
+      />}
 
-      <GitPanel
+      {showGit && <GitPanel
         open={showGit}
         projectId={project.id}
         onClose={() => setShowGit(false)}
@@ -2022,7 +2028,8 @@ return (
           setShowGit(false)
           onLaunchSession(project.id, agentId)
         } : undefined}
-      />
+      />}
+      </Suspense>
 
       {/* Image preview overlay */}
       {previewImageUrl && createPortal(

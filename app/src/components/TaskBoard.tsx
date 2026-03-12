@@ -8,6 +8,12 @@ import { StandardsContent } from "./StandardsPage"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
+const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  pending: { bg: "rgba(148,163,184,0.1)", text: "#94a3b8", border: "rgba(148,163,184,0.2)" },
+  in_progress: { bg: "rgba(96,165,250,0.1)", text: "#60a5fa", border: "rgba(96,165,250,0.2)" },
+  done: { bg: "rgba(34,197,94,0.1)", text: "#22c55e", border: "rgba(34,197,94,0.2)" },
+}
+
 interface TaskBoardProps {
   open: boolean
   projectId: string
@@ -202,11 +208,7 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
     toggleStatus(task.id)
   }, [onStartTask, toggleStatus])
 
-  const statusColors: Record<string, { bg: string; text: string; border: string }> = {
-    pending: { bg: "rgba(148,163,184,0.1)", text: "#94a3b8", border: "rgba(148,163,184,0.2)" },
-    in_progress: { bg: "rgba(96,165,250,0.1)", text: "#60a5fa", border: "rgba(96,165,250,0.2)" },
-    done: { bg: "rgba(34,197,94,0.1)", text: "#22c55e", border: "rgba(34,197,94,0.2)" },
-  }
+  const statusColors = STATUS_COLORS
 
   const hasTasks = store && store.tasks.length > 0
   const doneCount = store?.tasks.filter((t) => t.status === "done").length || 0
