@@ -124,14 +124,18 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
 
   const { sheetRef, handlers: swipeHandlers } = useSwipeToDismiss({ onDismiss: onClose })
 
-  // Android back button: close preview first, then resume list, then close sheet
+  // Android back button: close sub-views first, then sheet
   useEffect(() => {
     if (!open) return
     const handler = (e: Event) => {
       e.preventDefault()
       e.stopImmediatePropagation()
-      if (previewSession) {
+      if (showBrowser) {
+        setShowBrowser(false)
+      } else if (previewSession) {
         setPreviewSession(null)
+      } else if (showAddProject) {
+        setShowAddProject(false)
       } else {
         onClose()
       }
@@ -139,7 +143,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
     // Use capture phase so this fires BEFORE MissionControl's bubble-phase handler
     document.addEventListener("app:back", handler, true)
     return () => document.removeEventListener("app:back", handler, true)
-  }, [open, previewSession, onClose])
+  }, [open, showBrowser, previewSession, showAddProject, onClose])
 
   return (
     <AnimatePresence>
