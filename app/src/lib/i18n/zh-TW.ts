@@ -829,6 +829,8 @@ export const zhTW: Record<string, string> = {
   "notification.agentDone": "Agent 已完成任務",
   "notification.agentBlocked": "Agent 需要你的協助",
   "notification.needsConfirm": "需要你的確認",
+  "notification.updateAvailable": "AgentRune 有新版本",
+  "notification.updateTap": "點擊更新",
 
   // Snapshots
   "snapshot.create": "建立快照",

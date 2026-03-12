@@ -825,6 +825,8 @@ export const en: Record<string, string> = {
   "notification.agentDone": "Agent completed task",
   "notification.agentBlocked": "Agent needs your input",
   "notification.needsConfirm": "needs your confirmation",
+  "notification.updateAvailable": "AgentRune Update Available",
+  "notification.updateTap": "Tap to update",
 
   // Snapshots
   "snapshot.create": "Create Snapshot",
