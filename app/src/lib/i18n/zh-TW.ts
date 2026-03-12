@@ -241,6 +241,9 @@ export const zhTW: Record<string, string> = {
   "mc.deny": "拒絕",
   "mc.bypassEnabled": "Bypass 已開啟 — 重新啟動中...",
   "mc.bypassDisabled": "Bypass 已關閉 — 重新啟動中...",
+  "mc.bypassConfirmTitle": "啟用 Bypass 模式？",
+  "mc.bypassConfirmDesc": "這將允許 Agent 自動執行所有操作，不會再詢問你的許可。Agent 可以自由讀寫刪除檔案、執行指令、存取網路。",
+  "mc.bypassConfirmBtn": "確認啟用",
   "mc.sendFailed": "發送失敗 — 連線中斷",
   "mc.sendFailedDetail": "訊息無法送達，正在重新連線...",
   "mc.reconnecting": "重新連線中...",
@@ -825,6 +828,7 @@ export const zhTW: Record<string, string> = {
   "settings.notificationsDesc": "Agent 完成任務或需要你的決策時推送通知",
   "notification.agentDone": "Agent 已完成任務",
   "notification.agentBlocked": "Agent 需要你的協助",
+  "notification.needsConfirm": "需要你的確認",
 
   // Snapshots
   "snapshot.create": "建立快照",

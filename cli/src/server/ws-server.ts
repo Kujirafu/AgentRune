@@ -2855,18 +2855,18 @@ export function createServer(portOverride?: number) {
                 const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
                 let cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
                 if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
+                // Bypass confirmation handled client-side — if bypass=true, user already confirmed
                 if (s.bypass) cmd += " --dangerously-skip-permissions"
                 cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, sessionProject.id).replace(/"/g, '\\"')}"`
                 setTimeout(() => {
-                  try {
-                    sessions.write(session.id, `${cmd}\r`)
-                    log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
-                  } catch (err: any) {
-                    log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
-                    // Don't crash daemon — just notify client the resume failed
-                    try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed: " + err.message })) } catch {}
-                  }
-                }, 1500)
+                    try {
+                      sessions.write(session.id, `${cmd}\r`)
+                      log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
+                    } catch (err: any) {
+                      log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
+                      try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed: " + err.message })) } catch {}
+                    }
+                  }, 1500)
               }
             }
           }
@@ -2909,6 +2909,8 @@ export function createServer(portOverride?: number) {
             }
 
             // --- Auto-start agent with settings from frontend ---
+            // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
+            // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
             const appSettings = msg.settings as Record<string, unknown> | undefined
             const agentCmd = buildAgentCommand(agentId, appSettings, sessionProject.id)
             if (agentCmd) {
@@ -3122,13 +3124,24 @@ export function createServer(portOverride?: number) {
           break
         }
 
-        case "skill_confirm":
-        case "bypass_confirm": {
+        case "skill_confirm": {
           const automationId = msg.automationId as string
           const action = (msg.action as "approve" | "approve_and_trust" | "deny") || "deny"
           if (automationId) {
             const resolved = automationManager.resolveConfirmation(automationId, action)
-            log.info(`[WS] ${msg.type}: automationId=${automationId} action=${action} resolved=${resolved}`)
+            log.info(`[WS] skill_confirm: automationId=${automationId} action=${action} resolved=${resolved}`)
+            ws.send(JSON.stringify({ type: "confirmation_ack", automationId, resolved }))
+          }
+          break
+        }
+
+        case "bypass_confirm": {
+          // Automation bypass confirmation (interactive session bypass is confirmed client-side)
+          const automationId = msg.automationId as string
+          if (automationId) {
+            const action = (msg.action as "approve" | "approve_and_trust" | "deny") || "deny"
+            const resolved = automationManager.resolveConfirmation(automationId, action)
+            log.info(`[WS] bypass_confirm: automationId=${automationId} action=${action} resolved=${resolved}`)
             ws.send(JSON.stringify({ type: "confirmation_ack", automationId, resolved }))
           }
           break

@@ -237,6 +237,9 @@ export const en: Record<string, string> = {
   "mc.deny": "Deny",
   "mc.bypassEnabled": "Bypass enabled — restarting...",
   "mc.bypassDisabled": "Bypass disabled — restarting...",
+  "mc.bypassConfirmTitle": "Enable Bypass Mode?",
+  "mc.bypassConfirmDesc": "This allows the agent to execute commands without asking for permission. The agent can read, write, and delete files, run shell commands, and access the network without your approval.",
+  "mc.bypassConfirmBtn": "Enable Bypass",
   "mc.sendFailed": "Send failed — disconnected",
   "mc.sendFailedDetail": "Message could not be sent, reconnecting...",
   "mc.reconnecting": "Reconnecting...",
@@ -821,6 +824,7 @@ export const en: Record<string, string> = {
   "settings.notificationsDesc": "Get notified when agents complete tasks or need your input",
   "notification.agentDone": "Agent completed task",
   "notification.agentBlocked": "Agent needs your input",
+  "notification.needsConfirm": "needs your confirmation",
 
   // Snapshots
   "snapshot.create": "Create Snapshot",
