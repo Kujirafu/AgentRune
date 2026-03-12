@@ -112,6 +112,7 @@ export function MissionControl({
   const [worktreeBranch, setWorktreeBranch] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const showToast = useCallback((msg: string, duration = 3000) => { setToast(msg); setTimeout(() => setToast(null), duration) }, [])
+  const [bypassConfirmPending, setBypassConfirmPending] = useState(false)
   // Track Claude's actual fast mode state (from output detection)
   const actualFastModeRef = useRef<boolean | null>(null)
   const [panel, setPanel] = useState(0) // 0=events(Live), 1=diff(Code), 2=plan
@@ -759,21 +760,40 @@ export function MissionControl({
       }
       // Bypass mode — CLI flag, restart session with new command
       if (newSettings.bypass !== prev.bypass && sessionId) {
-        showToast(
-          newSettings.bypass
-            ? (t("mc.bypassEnabled") || "Bypass enabled — restarting...")
-            : (t("mc.bypassDisabled") || "Bypass disabled — restarting..."),
-          3000,
-        )
-        // Kill current session and launch a new one with updated settings
-        onKillSession(sessionId)
-        setEvents([])
-        setTimeout(() => {
-          onLaunchSession?.(project.id, agentId)
-        }, 500)
+        if (newSettings.bypass) {
+          // Turning ON → require confirmation dialog first
+          // Revert toggle immediately; it will be set after confirmation
+          setSettings({ ...newSettings, bypass: false })
+          saveSettings(project.id, { ...newSettings, bypass: false })
+          setBypassConfirmPending(true)
+        } else {
+          // Turning OFF → execute immediately, no confirmation needed
+          showToast(t("mc.bypassDisabled") || "Bypass disabled — restarting...", 3000)
+          onKillSession(sessionId)
+          setEvents([])
+          setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+        }
       }
     }
   }, [project.id, settings, agentId, sessionId, send, showToast, t, onKillSession, onLaunchSession])
+
+  // Bypass confirmation handlers
+  const confirmBypass = useCallback(() => {
+    setBypassConfirmPending(false)
+    const newSettings = { ...settings, bypass: true }
+    setSettings(newSettings)
+    saveSettings(project.id, newSettings)
+    showToast(t("mc.bypassEnabled") || "Bypass enabled — restarting...", 3000)
+    if (sessionId) {
+      onKillSession(sessionId)
+      setEvents([])
+      setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+    }
+  }, [settings, project.id, sessionId, agentId, showToast, t, onKillSession, onLaunchSession])
+
+  const cancelBypass = useCallback(() => {
+    setBypassConfirmPending(false)
+  }, [])
 
   // Agent responses now come from server-side JSONL watcher (type: "response" events)
   // — no more client-side PTY output parsing for reply accumulation.
@@ -849,8 +869,29 @@ export function MissionControl({
       return
     }
 
-    // Task mode: prefix message so agent adds it as a task
+    // Task mode: add task directly to Plan panel's task store AND send to agent
     if (flags?.task) {
+      const taskText = text
+      // Append to AgentRune task store (Plan panel)
+      fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`)
+        .then(r => r.json())
+        .then((store: import("../types").TaskStore | null) => {
+          const existing = store?.tasks || []
+          const nextId = existing.length > 0 ? Math.max(...existing.map(t => t.id)) + 1 : 1
+          const newTask: import("../types").Task = {
+            id: nextId,
+            title: taskText.slice(0, 80),
+            description: taskText,
+            status: "pending",
+            dependsOn: [],
+          }
+          return fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tasks: [...existing, newTask] }),
+          })
+        })
+        .catch(() => {})
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
     }
     // Grab any pending image paths from successful HTTP uploads
@@ -2258,6 +2299,65 @@ return (
           </div>
         )
       })()}
+
+      {/* Bypass confirmation dialog */}
+      {bypassConfirmPending && (
+        <div
+          onClick={cancelBypass}
+          style={{
+            position: "fixed", inset: 0, zIndex: 260,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            animation: "springSlideUp 0.45s ease-out",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(90vw, 380px)", padding: 24, borderRadius: 24,
+              background: "var(--card-bg)",
+              border: "1px solid var(--glass-border)",
+              backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
+              boxShadow: "var(--glass-shadow)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FB8184" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <span style={{ fontSize: 17, fontWeight: 700, color: "var(--text-primary)" }}>
+                {t("mc.bypassConfirmTitle") || "Enable Bypass Mode?"}
+              </span>
+            </div>
+            <p style={{ fontSize: 14, lineHeight: 1.6, color: "var(--text-secondary)", margin: "0 0 20px" }}>
+              {t("mc.bypassConfirmDesc") || "This allows the agent to execute commands without asking for permission. The agent can read, write, and delete files, run shell commands, and access the network without your approval."}
+            </p>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={cancelBypass}
+                style={{
+                  flex: 1, padding: "12px 0", borderRadius: 14,
+                  background: "var(--card-bg)", border: "1px solid var(--glass-border)",
+                  color: "var(--text-primary)", fontSize: 15, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                {t("mc.cancel") || "Cancel"}
+              </button>
+              <button
+                onClick={confirmBypass}
+                style={{
+                  flex: 1, padding: "12px 0", borderRadius: 14,
+                  background: "#FB8184", border: "none",
+                  color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer",
+                }}
+              >
+                {t("mc.bypassConfirmBtn") || "Enable Bypass"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ?????? Rename dialog ?????? */}
       {renamingSession && (
