@@ -615,7 +615,15 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
       {contextMenu && createPortal(<ContextMenuOverlay actions={menuActions} pos={contextMenu} onClose={closeMenu} />, document.body)}
     </>
   )
-}
+}, (prev, next) => {
+  return prev.event.id === next.event.id
+    && prev.event.status === next.event.status
+    && prev.event.title === next.event.title
+    && prev.event.detail === next.event.detail
+    && prev.event._images === next.event._images
+    && prev.apiBase === next.apiBase
+    && prev.projectId === next.projectId
+})
 
 // \u2500\u2500\u2500 Context menu overlay (LaunchPad design language) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 

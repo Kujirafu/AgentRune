@@ -6,10 +6,10 @@ import { LocalNotifications } from "@capacitor/local-notifications"
 import { LaunchPad } from "./components/LaunchPad"
 const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
 import { MissionControl } from "./components/MissionControl"
-import { ProjectOverview } from "./components/ProjectOverview"
-import { UnifiedPanel } from "./components/UnifiedPanel"
-import { DiffPanel } from "./components/DiffPanel"
-import { ChainBuilder } from "./components/ChainBuilder"
+const ProjectOverview = lazy(() => import("./components/ProjectOverview").then(m => ({ default: m.ProjectOverview })))
+const UnifiedPanel = lazy(() => import("./components/UnifiedPanel").then(m => ({ default: m.UnifiedPanel })))
+const DiffPanel = lazy(() => import("./components/DiffPanel").then(m => ({ default: m.DiffPanel })))
+const ChainBuilder = lazy(() => import("./components/ChainBuilder").then(m => ({ default: m.ChainBuilder })))
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
@@ -1813,7 +1813,7 @@ export function App() {
             transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
-            <ChainBuilder onBack={() => setScreen("overview")} t={t} />
+            <Suspense fallback={null}><ChainBuilder onBack={() => setScreen("overview")} t={t} /></Suspense>
           </motion.div>
         ) : isSessionReady ? (
           <motion.div
@@ -1874,7 +1874,7 @@ export function App() {
                 onLaunchSession={handleLaunch}
                 onOpenBuilder={() => setScreen("builder")}
               />
-              <DiffPanel
+              <Suspense fallback={null}><DiffPanel
                 event={diffEvent}
                 allDiffEvents={allDiffEvents}
                 onClose={() => setDiffEvent(null)}
@@ -1886,7 +1886,7 @@ export function App() {
                   setTimeout(() => send({ type: "input", data: "\r" }), 30)
                 }}
                 onVoiceInput={(cb, label) => requestVoiceRef.current?.(cb, label)}
-              />
+              /></Suspense>
             </div>
           </motion.div>
         ) : (screen === "overview" || screen === "session") ? (
@@ -1898,7 +1898,7 @@ export function App() {
             transition={pageEnter}
             style={{ position: "fixed", inset: 0 }}
           >
-            <UnifiedPanel
+            <Suspense fallback={null}><UnifiedPanel
               activeSessions={activeSessions}
               sessionEvents={sessionEventsMap}
               projects={projects}
@@ -1948,7 +1948,7 @@ export function App() {
                 }
                 recheckAuth()
               }}
-            />
+            /></Suspense>
           </motion.div>
         ) : (
           <motion.div
