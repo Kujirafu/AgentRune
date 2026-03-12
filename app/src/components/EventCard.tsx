@@ -1,5 +1,5 @@
 // web/components/EventCard.tsx
-import { useState, useRef, useCallback, useEffect } from "react"
+import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -125,6 +125,22 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
     }
     return rawDetail
   })()
+
+  // Convert custom XML tags (e.g. <prd_output>) to markdown code fences
+  const renderedDetail = useMemo(() => {
+    if (!cleanDetail) return ""
+    return cleanDetail.replace(
+      /<(\w+)>\s*(\{[\s\S]*?\})\s*<\/\1>/g,
+      (_match, _tag, json) => {
+        try {
+          const formatted = JSON.stringify(JSON.parse(json), null, 2)
+          return "\n```json\n" + formatted + "\n```\n"
+        } catch {
+          return "\n```\n" + json.trim() + "\n```\n"
+        }
+      }
+    )
+  }, [cleanDetail])
 
   useEffect(() => {
     if (detailRef.current && !detailExpanded) {
@@ -449,7 +465,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                     </div>
                     {cleanDetail && (
                       <div className="ec-md">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedDetail}</ReactMarkdown>
                       </div>
                     )}
                   </div>
@@ -472,7 +488,7 @@ export function EventCard({ event, onDecision, onQuote, onSaveObsidian, onViewDi
                     .ec-md hr { border: none; border-top: 1px solid var(--glass-border); margin: 8px 0; }
                   `}</style>
                   <div className="ec-md">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedDetail}</ReactMarkdown>
                   </div>
                   </>
                 )}

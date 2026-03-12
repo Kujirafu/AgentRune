@@ -63,7 +63,7 @@ interface AutomationSheetProps {
   serverUrl: string
   onClose: () => void
   /** When provided, open directly into edit mode for this automation */
-  initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string } | null
+  initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null
 }
 
 // --- Weekday labels ---
@@ -286,6 +286,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formRunMode, setFormRunMode] = useState<"local" | "worktree">("local")
   const [formAgentId, setFormAgentId] = useState("claude")
   const [formModel, setFormModel] = useState("")
+  const [formBypass, setFormBypass] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   // Template browsing
@@ -340,6 +341,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormRunMode((initialEdit.runMode as "local" | "worktree") || "local")
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
+        setFormBypass(!!initialEdit.bypass)
         setPage("add")
       } else {
         setPage("pick")
@@ -409,6 +411,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     setFormRunMode("local")
     setFormAgentId("claude")
     setFormModel("")
+    setFormBypass(false)
     setPage("add")
   }
 
@@ -433,6 +436,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       runMode: formRunMode,
       agentId: formAgentId,
       model: formModel || undefined,
+      bypass: formBypass || undefined,
       enabled: true,
     }
 
@@ -446,6 +450,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           const updated = await res.json()
           setAutomations((prev) => prev.map((a) => a.id === editId ? updated : a))
           showToast(t("automation.updated") || "Schedule updated")
+          onClose()
+        } else {
+          console.error("[AutomationSheet] PATCH failed:", res.status, await res.text().catch(() => ""))
+          showToast(`Save failed (${res.status})`, 3000)
         }
       } else {
         const res = await fetch(`${serverUrl}/api/automations/${projectId}`, {
@@ -456,10 +464,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           const auto = await res.json()
           setAutomations((prev) => [...prev, auto])
           showToast(t("automation.created") || "Schedule created")
+          onClose()
+        } else {
+          console.error("[AutomationSheet] POST failed:", res.status, await res.text().catch(() => ""))
+          showToast(`Create failed (${res.status})`, 3000)
         }
       }
-      onClose()
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error("[AutomationSheet] fetch error:", err)
+      showToast("Network error", 3000)
+    }
     setSubmitting(false)
   }
 
@@ -932,6 +946,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               setFormRunMode(auto.runMode || "local")
                               setFormAgentId(auto.agentId || "claude")
                               setFormModel((auto as any).model || "")
+                              setFormBypass(!!(auto as any).bypass)
                               setPage("add")
                             }} style={{
                               flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
@@ -1472,6 +1487,33 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               )}
             </div>
 
+            {/* 5.5 Bypass toggle */}
+            <label style={{
+              display: "flex", alignItems: "center", gap: 8, marginTop: 4,
+              cursor: "pointer", fontSize: 13, color: "var(--text-primary)",
+            }} onClick={() => setFormBypass(!formBypass)}>
+              <div style={{
+                width: 18, height: 18, borderRadius: 4,
+                border: formBypass ? "none" : "1.5px solid var(--text-secondary)",
+                background: formBypass ? "#37ACC0" : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "all 0.15s ease",
+                flexShrink: 0,
+              }}>
+                {formBypass && (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12"/>
+                  </svg>
+                )}
+              </div>
+              <div>
+                <span style={{ fontWeight: 600 }}>{t("settings.bypass") || "Bypass Mode"}</span>
+                <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 6 }}>
+                  {t("settings.bypassDesc") || "Skip all permission confirmations"}
+                </span>
+              </div>
+            </label>
+
             {/* 6. Buttons */}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button onClick={handleSubmit} disabled={!formName.trim() || !formPrompt.trim() || submitting} style={{
@@ -1481,7 +1523,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 cursor: formName.trim() && formPrompt.trim() ? "pointer" : "default",
                 opacity: formName.trim() && formPrompt.trim() ? 1 : 0.4,
               }}>
-                {submitting ? t("automation.creating") : t("automation.create")}
+                {submitting ? (editId ? t("automation.saving") : t("automation.creating")) : (editId ? t("automation.save") : t("automation.create"))}
               </button>
               {!formTemplateId && formPrompt.trim() && formName.trim() && (
                 <button onClick={saveAsCustomTemplate} style={{

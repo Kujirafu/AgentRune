@@ -15,6 +15,7 @@ import { FileBrowser } from "./FileBrowser"
 import { FilePreview } from "./FilePreview"
 import { GitPanel } from "./GitPanel"
 import { TaskBoard } from "./TaskBoard"
+import { PlanPanel } from "./PlanPanel"
 import { PathBadge } from "./PathBadge"
 import { InsightSheet } from "./InsightSheet"
 import { isMobile } from "../lib/detect"
@@ -98,7 +99,6 @@ export function MissionControl({
   const [showBrowser, setShowBrowser] = useState(false)
   const [showInsight, setShowInsight] = useState(false)
   const [showGit, setShowGit] = useState(false)
-  const [showTasks, setShowTasks] = useState(false)
   const [previewFile, setPreviewFile] = useState<string | null>(null)
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null)
   // Multi-session activity tracking
@@ -113,7 +113,7 @@ export function MissionControl({
   const showToast = useCallback((msg: string, duration = 3000) => { setToast(msg); setTimeout(() => setToast(null), duration) }, [])
   // Track Claude's actual fast mode state (from output detection)
   const actualFastModeRef = useRef<boolean | null>(null)
-  const [panel, setPanel] = useState(0) // 0=events, 1=diff
+  const [panel, setPanel] = useState(0) // 0=events(Live), 1=diff(Code), 2=plan
   const [viewH, setViewH] = useState(window.innerHeight)
   const fullHeightRef = useRef(window.innerHeight)
   const keyboardH = Math.max(0, fullHeightRef.current - viewH)
@@ -677,7 +677,7 @@ export function MissionControl({
       // Rubber band at edges
       let offset = dx
       const p = panel
-      if ((p === 0 && dx > 0) || (p === 1 && dx < 0)) {
+      if ((p === 0 && dx > 0) || (p === 2 && dx < 0)) {
         offset = dx * 0.15
       }
       d.offset = offset
@@ -699,7 +699,7 @@ export function MissionControl({
       const triggered = Math.abs(d.offset) > threshold || (velocity > 0.5 && Math.abs(d.offset) > 60)
       let newPanel = panel
       if (triggered && d.offset > 0 && panel > 0) newPanel = panel - 1
-      else if (triggered && d.offset < 0 && panel < 1) newPanel = panel + 1
+      else if (triggered && d.offset < 0 && panel < 2) newPanel = panel + 1
 
       if (slideRef.current) {
         slideRef.current.style.transition = `transform 0.5s ${SPRING}`
@@ -1384,7 +1384,6 @@ export function MissionControl({
       if (previewImageUrl) { setPreviewImageUrl(null); e.preventDefault(); return }
       if (previewFile) { setPreviewFile(null); e.preventDefault(); return }
       if (showGit) { setShowGit(false); e.preventDefault(); return }
-      if (showTasks) { setShowTasks(false); e.preventDefault(); return }
       if (renamingSession) { setRenamingSession(null); e.preventDefault(); return }
       if (contextSession) { setContextSession(null); e.preventDefault(); return }
       if (showInsight) { setShowInsight(false); e.preventDefault(); return }
@@ -1396,7 +1395,7 @@ export function MissionControl({
     }
     document.addEventListener("app:back", handler)
     return () => document.removeEventListener("app:back", handler)
-  }, [viewMode, voicePhase, previewImageUrl, previewFile, showGit, showTasks, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
+  }, [viewMode, voicePhase, previewImageUrl, previewFile, showGit, showInsight, showBrowser, showSettings, contextSession, renamingSession, panel, goToPanel])
 
   // TerminalView (always mounted) handles attach + auto-command.
   // MissionControl just listens for WS messages ??no attach needed.
@@ -1540,29 +1539,10 @@ return (
                   </svg>
                 </button>
               )}
-              {toggleTheme && (
-                <button onClick={toggleTheme} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
-                  {theme === "dark" ? (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                    </svg>
-                  )}
-                </button>
-              )}
               {/* Git button with badge */}
               <button onClick={() => setShowGit(true)} onTouchStart={(e) => e.stopPropagation()} style={{ ...glassBtn, position: "relative" }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
-                </svg>
-              </button>
-              {/* Tasks button */}
-              <button onClick={() => setShowTasks(true)} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
                 </svg>
               </button>
               <button onClick={onOpenTerminal} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
@@ -1647,7 +1627,7 @@ return (
                 background: "var(--icon-bg)",
                 border: "none",
               }}>
-                {[t("mc.events"), "Diff"].map((label, i) => (
+                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
                   <button
                     key={i}
                     onClick={() => goToPanel(i)}
@@ -1825,7 +1805,7 @@ return (
                 background: "var(--icon-bg)",
                 border: "none",
               }}>
-                {[t("mc.events"), "Diff"].map((label, i) => (
+                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
                   <button
                     key={i}
                     onClick={() => goToPanel(i)}
@@ -1934,6 +1914,65 @@ return (
               )
             })()}
           </div>
+
+          {/* Panel 2: Plan (Tasks + Standards) */}
+          <div style={{ width: "100vw", flexShrink: 0, height: "100%", display: "flex", flexDirection: "column" }}>
+            {/* Header */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "10px 12px",
+              paddingTop: "calc(10px + env(safe-area-inset-top, 0px))",
+              background: "var(--glass-bg)",
+              backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+              borderBottom: "1px solid var(--glass-border)",
+              boxShadow: "var(--glass-shadow)",
+              flexShrink: 0, userSelect: "none",
+            }}>
+              <button onClick={onBack} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "var(--text-primary)", letterSpacing: -0.3 }}>
+                  {project.name}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", fontWeight: 500, marginTop: 1, opacity: 0.8 }}>
+                  Plan
+                </div>
+              </div>
+              {/* Header buttons */}
+              <button onClick={onOpenTerminal} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+                </svg>
+              </button>
+              <button onClick={() => setShowSettings(true)} onTouchStart={(e) => e.stopPropagation()} style={glassBtn}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Page indicator */}
+            <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 4px", flexShrink: 0 }}>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 2, padding: "3px 4px", borderRadius: 10, background: "var(--icon-bg)", border: "none" }}>
+                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
+                  <button key={i} onClick={() => goToPanel(i)} onTouchStart={(e) => e.stopPropagation()}
+                    style={{ padding: "4px 14px", borderRadius: 8, border: "none", background: i === panel ? "var(--glass-border)" : "transparent", color: i === panel ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 11, fontWeight: i === panel ? 700 : 500, cursor: "pointer", opacity: i === panel ? 1 : 0.4, transition: `all 0.3s ${SPRING}` }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Plan content: Tasks + Standards tabs */}
+            <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+              <PlanPanel projectId={project.id} send={send} />
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -1946,6 +1985,8 @@ return (
         onClose={() => setShowSettings(false)}
         send={send}
         on={on}
+        theme={document.documentElement.classList.contains("dark") ? "dark" : "light"}
+        toggleTheme={toggleTheme}
       />
 
       <InsightSheet
@@ -1981,13 +2022,6 @@ return (
           setShowGit(false)
           onLaunchSession(project.id, agentId)
         } : undefined}
-      />
-
-      <TaskBoard
-        open={showTasks}
-        projectId={project.id}
-        onClose={() => setShowTasks(false)}
-        send={send}
       />
 
       {/* Image preview overlay */}

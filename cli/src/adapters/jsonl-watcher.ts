@@ -297,7 +297,7 @@ function resultToEvents(line: JsonlLine): AgentEvent[] {
 
 /** Convert a JSONL user message to event */
 function userToEvents(line: JsonlLine): AgentEvent[] {
-  const rawContent = line.message?.content
+  const rawContent: any = line.message?.content
   const ts = line.timestamp ? new Date(line.timestamp).getTime() : Date.now()
 
   // content can be a plain string (user typed text) or an array of blocks

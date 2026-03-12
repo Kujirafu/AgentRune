@@ -440,7 +440,7 @@ export const claudeCodeAdapter: AgentAdapter = {
           || bufTail.match(/(?:requires?\s+(?:manual\s+)?approval)[^\n]{0,150}/i)
         // Also try flat version (no cursor->newline conversion) for tool signatures
         const flatBufTail = stripAnsiFlat(ctx.buffer.slice(-2000))
-        const flatMatch = !detailMatch && flatBufTail.match(/(?:Bash|Edit|Write|Read)\s*\([^\n)]{1,150}\)/i)
+        const flatMatch = !detailMatch ? flatBufTail.match(/(?:Bash|Edit|Write|Read)\s*\([^\n)]{1,150}\)/i) : null
         const rawDetail = detailMatch?.[0] || flatMatch?.[0]
         const detail = rawDetail
           ? rawDetail.replace(/\s+/g, " ").trim().slice(0, 200)

@@ -1,0 +1,31 @@
+# AgentRune
+
+> Mobile command center for AI coding agents. Control Claude Code, Aider, Codex & more from your phone.
+
+## What AgentRune Does
+- Launch and monitor AI coding agents remotely from your phone
+- Supports Claude Code, Aider, OpenAI Codex, Gemini CLI, Cline, and Cursor Agent
+- Real-time terminal output streaming over WebSocket
+- Schedule automated agent tasks with cron-style automation
+- Built-in Git panel for reviewing changes, staging, and committing
+- Voice input for hands-free agent control
+- Agents use AgentLore MCP for verified knowledge access
+
+## Who It's For
+- Developers who want to run AI agents on their PC while away from the desk
+- Teams managing multiple AI coding agents across projects
+- Anyone who wants a mobile-first interface for AI-assisted development
+
+## Tech Stack
+- Frontend: React + TypeScript + Capacitor (Android)
+- Backend: Node.js CLI server with PTY-based process management
+- Connection: WebSocket (LAN) + Cloudflare Tunnel (remote)
+
+## Install
+- Android APK: Download from GitHub Releases
+- CLI: npx agentrune start
+
+## Links
+- GitHub: https://github.com/Kujirafu/AgentRune
+- Releases: https://github.com/Kujirafu/AgentRune/releases
+- AgentLore (knowledge backend): https://agentlore.vercel.app
