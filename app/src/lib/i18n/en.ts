@@ -993,6 +993,14 @@ export const en: Record<string, string> = {
   "chain.i18n.desc": "Internationalization setup",
   "chain.perf.name": "Performance",
   "chain.perf.desc": "Performance profiling and optimization",
+  "chain.test.name": "Test Strategy",
+  "chain.test.desc": "Architecture-aware testing strategy and quality engineering",
+  "chain.step.testStrategy": "Test Model Selection",
+  "chain.step.testPlan": "Test Plan",
+  "chain.step.testCore": "Core Layer Tests",
+  "chain.step.testSupplementary": "Supplementary Tests",
+  "chain.step.testRun": "Run Tests",
+  "chain.step.testQuality": "Test Quality Review",
 
   // Chain Builder
   "builder.namePlaceholder": "Chain name...",
