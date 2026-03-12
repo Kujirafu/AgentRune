@@ -4,6 +4,8 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 
 import { join } from "node:path"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
+import { VaultSync } from "./vault-sync.js"
+import { WorktreeManager } from "./worktree-manager.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
@@ -30,6 +32,7 @@ export interface AutomationConfig {
   runMode: "local" | "worktree"
   agentId: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
+  bypass?: boolean           // --dangerously-skip-permissions (unattended mode)
   enabled: boolean
   createdAt: number
   lastRunAt?: number
@@ -103,23 +106,38 @@ export type AutomationEventCallback = (event: {
   result: AutomationResult
 }) => void
 
+// --- Rate limiting ---
+
+export interface AutomationLimits {
+  maxAutomations: number       // max concurrent automations
+  maxDailyExecutions: number   // max executions per day (across all automations)
+}
+
+export const FREE_LIMITS: AutomationLimits = { maxAutomations: 3, maxDailyExecutions: 5 }
+export const PRO_LIMITS: AutomationLimits = { maxAutomations: 50, maxDailyExecutions: 500 }
+
 export class AutomationManager {
   private automations = new Map<string, AutomationConfig>()
   private timers = new Map<string, NodeJS.Timeout>()
   private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
   private results = new Map<string, AutomationResult[]>()
+  private dailyExecCount = new Map<string, number>()  // "YYYY-MM-DD" → count
   private storageDir: string
   private ptyManager: PtyManager
   private projects: Project[]
   private onEvent?: AutomationEventCallback
+  private vaultPath?: string
+  private limits: AutomationLimits
 
   private static MAX_RESULTS_PER_AUTOMATION = 20
   private static MAX_OUTPUT_BYTES = 50_000
 
-  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback) {
+  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits }) {
     this.ptyManager = ptyManager
     this.projects = projects
     this.onEvent = onEvent
+    this.vaultPath = opts?.vaultPath
+    this.limits = opts?.limits || FREE_LIMITS
     this.storageDir = join(getConfigDir(), "automations")
     mkdirSync(this.storageDir, { recursive: true })
     this.loadFromDisk()
@@ -132,7 +150,16 @@ export class AutomationManager {
 
   // --- CRUD ---
 
-  add(config: Omit<AutomationConfig, "id" | "createdAt">): AutomationConfig {
+  /** Update rate limits (e.g. when user upgrades to pro) */
+  setLimits(limits: AutomationLimits) {
+    this.limits = limits
+  }
+
+  add(config: Omit<AutomationConfig, "id" | "createdAt">): AutomationConfig | { error: string } {
+    // Check automation count limit
+    if (this.automations.size >= this.limits.maxAutomations) {
+      return { error: `Automation limit reached (max ${this.limits.maxAutomations}). Upgrade to add more.` }
+    }
     const id = `auto_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const automation: AutomationConfig = {
       ...config,
@@ -200,7 +227,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -217,6 +244,7 @@ export class AutomationManager {
     if (updates.agentId !== undefined) auto.agentId = updates.agentId
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
+    if (updates.bypass !== undefined) auto.bypass = updates.bypass
 
     const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
     const enabledChanged = wasEnabled !== auto.enabled
@@ -306,11 +334,17 @@ export class AutomationManager {
   /** Build the agent CLI command for an automation */
   private buildAutomationCommand(auto: AutomationConfig): { agentCmd: string; promptText: string } | null {
     const rawPrompt = auto.prompt || ""
-    const promptText = wrapPromptWithLocale(rawPrompt)
+    let promptText = wrapPromptWithLocale(rawPrompt)
 
-    // If automation has a raw command (legacy), use it directly
+    // Legacy raw command field is no longer supported for direct execution (security: command injection risk).
+    // If automation only has command and no prompt, treat the command as a prompt description.
     if (auto.command && !auto.prompt) {
-      return { agentCmd: auto.command, promptText: "" }
+      promptText = wrapPromptWithLocale(auto.command)
+    }
+
+    // Inject skill instruction into prompt if specified
+    if (auto.skill) {
+      promptText = `[Important] Use the MCP skill "${auto.skill}" to accomplish this task. Call the relevant MCP tool for this skill before proceeding.\n\n${promptText}`
     }
 
     // Build agent command based on agentId
@@ -318,7 +352,8 @@ export class AutomationManager {
     switch (auto.agentId) {
       case "claude": {
         let cmd = "claude --print"
-        if (auto.model) cmd += ` --model ${auto.model}`
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) cmd += ` --model ${auto.model}`
+        if (auto.bypass) cmd += " --dangerously-skip-permissions"
         cmd += ` --append-system-prompt "${buildAgentProtocol(locale).replace(/"/g, '\\"')}"`
         // Pass prompt via -p flag with escaped content
         cmd += ` -p ${shellEscape(promptText)}`
@@ -326,22 +361,49 @@ export class AutomationManager {
       }
       case "codex": {
         let cmd = "codex --full-auto"
-        if (auto.model) cmd += ` --model ${auto.model}`
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) cmd += ` --model ${auto.model}`
         cmd += ` -q ${shellEscape(promptText)}`
         return { agentCmd: cmd, promptText: "" }
       }
       default: {
         // For other agents (aider, gemini, etc.), launch agent then send prompt
-        const agentBin = auto.agentId || "claude"
+        // Validate agentId to prevent command injection
+        const agentBin = auto.agentId && /^[a-zA-Z0-9_-]+$/.test(auto.agentId) ? auto.agentId : "claude"
         return { agentCmd: agentBin, promptText }
       }
     }
   }
 
-  /** Execute an automation: open a PTY, launch agent, collect output */
-  private async executeAutomation(id: string) {
+  /** Manually trigger an automation (ignores schedule, respects rate limits) */
+  async trigger(id: string): Promise<{ ok: boolean; error?: string }> {
     const auto = this.automations.get(id)
-    if (!auto || !auto.enabled) return
+    if (!auto) return { ok: false, error: "Automation not found" }
+
+    // Rate limit check
+    const todayKey = new Date().toISOString().slice(0, 10)
+    const todayCount = this.dailyExecCount.get(todayKey) || 0
+    if (todayCount >= this.limits.maxDailyExecutions) {
+      return { ok: false, error: `Daily execution limit reached (max ${this.limits.maxDailyExecutions}). Upgrade for more.` }
+    }
+
+    // Execute regardless of enabled state (manual trigger)
+    await this.executeAutomation(id, true)
+    return { ok: true }
+  }
+
+  /** Execute an automation: open a PTY, launch agent, collect output */
+  private async executeAutomation(id: string, manualTrigger = false) {
+    const auto = this.automations.get(id)
+    if (!auto || (!auto.enabled && !manualTrigger)) return
+
+    // Daily rate limit check
+    const todayKey = new Date().toISOString().slice(0, 10)
+    const todayCount = this.dailyExecCount.get(todayKey) || 0
+    if (todayCount >= this.limits.maxDailyExecutions) {
+      log.warn(`[Automation] Daily execution limit reached (${this.limits.maxDailyExecutions}), skipping "${auto.name}"`)
+      return
+    }
+    this.dailyExecCount.set(todayKey, todayCount + 1)
 
     const project = this.projects.find((p) => p.id === auto.projectId)
     if (!project) {
@@ -355,7 +417,27 @@ export class AutomationManager {
       return
     }
 
-    log.info(`[Automation] Executing "${auto.name}" in project "${project.name}" (agent=${auto.agentId}, model=${auto.model || "default"})`)
+    // Worktree setup — create isolated worktree if runMode === "worktree"
+    let worktree: { path: string; branch: string } | null = null
+    let worktreeManager: WorktreeManager | null = null
+    if (auto.runMode === "worktree") {
+      try {
+        worktreeManager = new WorktreeManager(project.cwd)
+        const sessionId = `automation_${id}_${Date.now()}`
+        const slug = auto.name.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 30)
+        const wt = worktreeManager.create(sessionId, slug)
+        worktree = { path: wt.path, branch: wt.branch }
+        log.info(`[Automation] Created worktree for "${auto.name}" at ${wt.path} (branch: ${wt.branch})`)
+      } catch (err) {
+        log.warn(`[Automation] Failed to create worktree for "${auto.name}": ${err}`)
+        // Fallback to local mode
+      }
+    }
+
+    // Use worktree project if available, otherwise original project
+    const execProject = worktree ? { ...project, cwd: worktree.path } : project
+
+    log.info(`[Automation] Executing "${auto.name}" in ${execProject.cwd} (agent=${auto.agentId}, model=${auto.model || "default"}, bypass=${!!auto.bypass}, worktree=${!!worktree})`)
 
     const startedAt = Date.now()
     let output = ""
@@ -365,7 +447,7 @@ export class AutomationManager {
     try {
       // Create a temporary PTY session for this automation
       const sessionId = `automation_${id}_${Date.now()}`
-      const session = this.ptyManager.create(project, "automation", sessionId)
+      const session = this.ptyManager.create(execProject, "automation", sessionId)
 
       // Collect output
       const outputChunks: string[] = []
@@ -378,6 +460,12 @@ export class AutomationManager {
 
       // Wait for shell to initialize
       await new Promise((resolve) => setTimeout(resolve, 1000))
+
+      // If worktree, cd into it first
+      if (worktree) {
+        this.ptyManager.write(sessionId, `cd ${shellEscape(worktree.path)}\n`)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
 
       // Send the agent command (e.g. "claude --print -p 'prompt'")
       this.ptyManager.write(sessionId, built.agentCmd + "\n")
@@ -474,7 +562,25 @@ export class AutomationManager {
     auto.lastRunStatus = status
     this.saveToDisk()
 
-    log.info(`[Automation] "${auto.name}" finished: ${status} (${resultEntry.finishedAt - startedAt}ms)`)
+    const durationMs = resultEntry.finishedAt - startedAt
+    log.info(`[Automation] "${auto.name}" finished: ${status} (${durationMs}ms)${worktree ? ` [worktree: ${worktree.branch}]` : ""}`)
+
+    // Write to Obsidian vault if configured
+    if (this.vaultPath) {
+      try {
+        const vault = new VaultSync({ vaultPath: this.vaultPath, projectName: project.name })
+        const durationStr = durationMs < 60000 ? `${Math.round(durationMs / 1000)}s` : `${Math.round(durationMs / 60000)}m`
+        vault.writeProgress({
+          title: `[Automation] ${auto.name}`,
+          status: status === "success" ? "done" : "blocked",
+          summary: `${status === "success" ? "Completed" : status === "timeout" ? "Timed out" : "Failed"} in ${durationStr}${worktree ? ` (branch: ${worktree.branch})` : ""}`,
+          nextSteps: status !== "success" ? ["Check automation output for details"] : [],
+          details: output.length > 2000 ? output.slice(-2000) : output,
+        })
+      } catch (err) {
+        log.warn(`[Automation] Failed to write vault record: ${err}`)
+      }
+    }
 
     // Broadcast completion event
     if (this.onEvent) {
