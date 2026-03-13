@@ -1256,6 +1256,11 @@ export function createServer(portOverride?: number) {
     }
     sessions.kill(killId)
     progressInterceptor.untrackSession(killId)
+    // Mark as closed immediately so it won't reappear as recoverable
+    closedSessionIds.add(killId)
+    persistClosedSessions()
+    // Also remove from cachedRecoverable in-memory list
+    cachedRecoverable = cachedRecoverable.filter(r => r.id !== killId)
     res.json({ ok: true })
   })
 

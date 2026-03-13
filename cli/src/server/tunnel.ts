@@ -150,13 +150,39 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
 
   let stopped = false
   let currentProc = proc
+  let restarting = false
 
   const handle: TunnelHandle = {
     url,
     stop: () => {
       stopped = true
+      if (healthCheckTimer) clearInterval(healthCheckTimer)
       try { currentProc.kill() } catch {}
     },
+  }
+
+  const doRestart = async () => {
+    if (stopped || restarting) return
+    restarting = true
+    try { currentProc.kill() } catch {}
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (stopped) return
+      try {
+        const result = await launchOnce(binPath!, localPort)
+        handle.url = result.url
+        currentProc = result.proc
+        watchExit(result.proc)
+        log.info(`Tunnel restarted: ${result.url}`)
+        if (handle.onRestart) handle.onRestart(result.url)
+        restarting = false
+        return
+      } catch (err: any) {
+        log.warn(`Tunnel restart attempt ${attempt}/3 failed: ${err.message}`)
+        if (attempt < 3) await new Promise(r => setTimeout(r, 10000))
+      }
+    }
+    log.error("Tunnel restart failed after 3 attempts")
+    restarting = false
   }
 
   // Auto-restart on exit (unless manually stopped)
@@ -164,27 +190,31 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
     p.on("exit", (code) => {
       if (stopped) return
       log.warn(`Tunnel exited (code ${code}) — restarting in 3s...`)
-      setTimeout(async () => {
-        if (stopped) return
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            const result = await launchOnce(binPath!, localPort)
-            handle.url = result.url
-            currentProc = result.proc
-            watchExit(result.proc)
-            log.info(`Tunnel restarted: ${result.url}`)
-            if (handle.onRestart) handle.onRestart(result.url)
-            return
-          } catch (err: any) {
-            log.warn(`Tunnel restart attempt ${attempt}/3 failed: ${err.message}`)
-            if (attempt < 3) await new Promise(r => setTimeout(r, 10000))
-          }
-        }
-        log.error("Tunnel restart failed after 3 attempts")
-      }, 3000)
+      setTimeout(doRestart, 3000)
     })
   }
   watchExit(proc)
+
+  // Health check function — verify tunnel URL is reachable
+  const runHealthCheck = async () => {
+    if (stopped || restarting || !handle.url) return
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 10000)
+      const res = await fetch(`${handle.url}/api/auth/check`, { signal: controller.signal })
+      clearTimeout(timeout)
+      if (res.ok) return // healthy
+      log.warn(`Tunnel health check failed: HTTP ${res.status} — restarting tunnel`)
+    } catch (err: any) {
+      log.warn(`Tunnel health check failed: ${err.message} — restarting tunnel`)
+    }
+    doRestart()
+  }
+
+  // First check after 15s — catch dead-on-arrival tunnel URLs early
+  setTimeout(runHealthCheck, 15_000)
+  // Then every 60s
+  const healthCheckTimer = setInterval(runHealthCheck, 60_000)
 
   return handle
 }

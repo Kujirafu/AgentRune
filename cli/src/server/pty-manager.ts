@@ -52,7 +52,15 @@ export class PtyManager extends EventEmitter {
       cols: 120,
       rows: 30,
       cwd: project.cwd,
-      env: (() => { const e = { ...process.env, ...extraEnv }; delete (e as any).CLAUDECODE; return e })() as Record<string, string>,
+      env: (() => {
+        const e = { ...process.env, ...extraEnv }
+        // Remove Claude Code session markers to prevent "nested session" detection
+        // when daemon is launched from within a Claude Code session.
+        // Keep ANTHROPIC_API_KEY (needed for claude --print to authenticate)
+        delete (e as any).CLAUDECODE
+        delete (e as any).CLAUDE_CODE_ENTRYPOINT
+        return e
+      })() as Record<string, string>,
     })
 
     const session: ManagedSession = {

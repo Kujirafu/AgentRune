@@ -44,9 +44,10 @@ program
 program
   .command("stop")
   .description("Stop the running daemon")
-  .action(async () => {
+  .option("-p, --port <port>", "Port number (to stop a specific daemon)")
+  .action(async (opts) => {
     const { stopCommand } = await import("./commands/stop.js")
-    await stopCommand()
+    await stopCommand(opts)
   })
 
 program

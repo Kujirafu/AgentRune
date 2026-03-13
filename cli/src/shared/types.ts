@@ -59,14 +59,46 @@ export interface SessionSummary {
   duration: number
 }
 
+export type PrdPriority = "p0" | "p1" | "p2" | "p3"
+export type PrdStatus = "active" | "done"
+
 export interface Task {
   id: number
   title: string
   description: string
-  status: "pending" | "in_progress" | "done"
+  status: "pending" | "in_progress" | "done" | "skipped"
+  priority?: PrdPriority
   dependsOn: number[]
 }
 
+export interface PrdDecision {
+  question: string
+  answer: string
+}
+
+export interface PrdApproach {
+  name: string
+  pros: string[]
+  cons: string[]
+  adopted: boolean
+  techNote?: string
+}
+
+export interface PrdItem {
+  id: string
+  title: string
+  priority: PrdPriority
+  status: PrdStatus
+  goal: string
+  decisions: PrdDecision[]
+  approaches: PrdApproach[]
+  scope: { included: string[]; excluded: string[] }
+  tasks: Task[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** @deprecated Use PrdItem instead — kept for migration */
 export interface TaskStore {
   projectId: string
   requirement: string

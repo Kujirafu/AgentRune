@@ -128,6 +128,7 @@ export function ProjectOverview({
   const [showDevices, setShowDevices] = useState(false)
   const [showAutomation, setShowAutomation] = useState(false)
   const [automationProjectId, setAutomationProjectId] = useState<string | null>(null)
+  const [editingAutomation, setEditingAutomation] = useState<{ id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null>(null)
   const [automationCounts, setAutomationCounts] = useState<Map<string, number>>(new Map())
   const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
@@ -614,7 +615,7 @@ export function ProjectOverview({
                 fontWeight: 500,
                 marginTop: 4,
               }}>
-                {projects.length} project{projects.length !== 1 ? "s" : ""} · {activeSessions.length} session{activeSessions.length !== 1 ? "s" : ""}
+                {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} · {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -728,7 +729,7 @@ export function ProjectOverview({
                       <line x1="8" y1="21" x2="16" y2="21" />
                       <line x1="12" y1="17" x2="12" y2="21" />
                     </svg>
-                    <div style={{ fontSize: 14, fontWeight: 500 }}>No projects</div>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>{t("count.noProjects")}</div>
                   </>
                 )}
                 <button
@@ -746,7 +747,7 @@ export function ProjectOverview({
                     cursor: "pointer",
                   }}
                 >
-                  Start a new session
+                  {t("overview.startNewSession")}
                 </button>
               </div>
             )}
@@ -811,7 +812,7 @@ export function ProjectOverview({
                       fontFamily: "'JetBrains Mono', monospace",
                     }}>
                       {sessionCount > 0
-                        ? `${sessionCount} session${sessionCount !== 1 ? "s" : ""}${workingCount > 0 ? ` · ${workingCount} working` : ""}`
+                        ? `${t(sessionCount !== 1 ? "count.sessions" : "count.session", { count: String(sessionCount) })}${workingCount > 0 ? ` · ${t("count.working", { count: String(workingCount) })}` : ""}`
                         : t("overview.noSessions")
                       }
                     </div>
@@ -908,7 +909,7 @@ export function ProjectOverview({
                   const sessions = selectedProjectForSessions
                     ? (sessionsByProject.get(selectedProjectForSessions) || [])
                     : []
-                  return `${sessions.length} session${sessions.length !== 1 ? "s" : ""}`
+                  return t(sessions.length !== 1 ? "count.sessions" : "count.session", { count: String(sessions.length) })
                 })()}
               </div>
             </div>
@@ -1063,7 +1064,7 @@ export function ProjectOverview({
                 {!automationsLoading && projectAutomations.map((auto) => {
                   const scheduleLabel = auto.schedule.type === "daily"
                     ? `${auto.schedule.timeOfDay || "09:00"} ${(auto.schedule.weekdays || []).map((d: number) => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(" ")}`
-                    : `Every ${auto.schedule.intervalMinutes || 30}min`
+                    : t("count.everyMinutes", { count: String(auto.schedule.intervalMinutes || 30) })
                   return (
                     <div key={auto.id} style={{
                       padding: "12px 14px", borderRadius: 14,
@@ -1101,8 +1102,20 @@ export function ProjectOverview({
                           }} />
                         </button>
 
-                        {/* Info */}
-                        <div style={{ flex: 1, minWidth: 0 }}>
+                        {/* Info — tap to edit */}
+                        <div
+                          onClick={() => {
+                            setAutomationProjectId(selectedProjectForSessions)
+                            setEditingAutomation({
+                              id: auto.id, name: auto.name, prompt: auto.prompt || "",
+                              skill: auto.skill, templateId: auto.templateId,
+                              schedule: auto.schedule, runMode: auto.runMode,
+                              agentId: auto.agentId, bypass: auto.bypass,
+                            })
+                            setShowAutomation(true)
+                          }}
+                          style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                        >
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {auto.name}
                           </div>
@@ -1110,26 +1123,6 @@ export function ProjectOverview({
                             {scheduleLabel}
                           </div>
                         </div>
-
-                        {/* Edit button */}
-                        <button
-                          onClick={() => {
-                            setAutomationProjectId(selectedProjectForSessions)
-                            setShowAutomation(true)
-                            // TODO: pass edit ID to AutomationSheet
-                          }}
-                          style={{
-                            width: 30, height: 30, borderRadius: 8,
-                            border: "1px solid var(--glass-border)", background: "transparent",
-                            color: "var(--text-secondary)", cursor: "pointer",
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                          </svg>
-                        </button>
 
                         {/* Delete button */}
                         <button
@@ -1883,7 +1876,7 @@ export function ProjectOverview({
               {actionRow({
                 icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>,
                 label: t("overview.newSession"),
-                desc: `Start a new agent session in ${proj.name}`,
+                desc: t("overview.startSessionIn", { name: proj.name }),
                 onClick: () => {
                   setSheetProjectId(proj.id)
                   setContextProjectId(null)
@@ -1894,7 +1887,7 @@ export function ProjectOverview({
               {sessions.length > 0 && actionRow({
                 icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>,
                 label: t("overview.viewPrd"),
-                desc: "View task board for this project",
+                desc: t("count.viewTaskBoard"),
                 onClick: () => {
                   setContextProjectId(null)
                   if (sessions.length > 0) onSelectSession(sessions[0].id)
@@ -1927,7 +1920,7 @@ export function ProjectOverview({
               {sessions.length > 0 && actionRow({
                 icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>,
                 label: t("overview.killAll"),
-                desc: `Terminate all ${sessions.length} session${sessions.length !== 1 ? "s" : ""}`,
+                desc: sessions.length !== 1 ? t("count.terminateAll", { count: String(sessions.length) }) : t("count.terminateSingle"),
                 color: "#ef4444",
                 onClick: () => {
                   sessions.forEach(s => onKillSession?.(s.id))
@@ -2380,7 +2373,8 @@ export function ProjectOverview({
         open={showAutomation}
         projectId={automationProjectId || ""}
         serverUrl={localStorage.getItem("agentrune_server") || ""}
-        onClose={() => setShowAutomation(false)}
+        onClose={() => { setShowAutomation(false); setEditingAutomation(null) }}
+        initialEdit={editingAutomation}
       />
 
       {/* Voice Overlay — single container, stopPropagation on interactive content */}

@@ -138,11 +138,15 @@ export interface DeviceInfo {
   lastSeen: string
 }
 
+export type PrdPriority = "p0" | "p1" | "p2" | "p3"
+export type PrdStatus = "active" | "done"
+
 export interface Task {
   id: number
   title: string
   description: string
-  status: "pending" | "in_progress" | "done"
+  status: "pending" | "in_progress" | "done" | "skipped"
+  priority?: PrdPriority
   dependsOn: number[]
 }
 
@@ -159,6 +163,34 @@ export interface PrdApproach {
   techNote?: string
 }
 
+export interface PrdItem {
+  id: string
+  title: string
+  priority: PrdPriority
+  status: PrdStatus
+  goal: string
+  decisions: PrdDecision[]
+  approaches: PrdApproach[]
+  scope: { included: string[]; excluded: string[] }
+  tasks: Task[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** Summary for list view — no full details */
+export interface PrdSummary {
+  id: string
+  title: string
+  priority: PrdPriority
+  status: PrdStatus
+  tasksDone: number
+  tasksSkipped: number
+  tasksTotal: number
+  createdAt: number
+  updatedAt: number
+}
+
+/** @deprecated Use PrdItem instead */
 export interface Prd {
   goal: string
   decisions: PrdDecision[]
@@ -166,6 +198,7 @@ export interface Prd {
   scope: { included: string[]; excluded: string[] }
 }
 
+/** @deprecated Use PrdItem instead */
 export interface TaskStore {
   projectId: string
   requirement: string

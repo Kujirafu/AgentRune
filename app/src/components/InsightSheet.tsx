@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react"
 import ReactMarkdown from "react-markdown"
 import { SpringOverlay } from "./SpringOverlay"
+import { useLocale } from "../lib/i18n"
 
 interface InsightSheetProps {
   open: boolean
@@ -12,6 +13,7 @@ interface InsightSheetProps {
 }
 
 export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: InsightSheetProps) {
+  const { t } = useLocale()
   const [markdown, setMarkdown] = useState("")
   const [title, setTitle] = useState("")
   const [sourceText, setSourceText] = useState("")
@@ -192,7 +194,7 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
               fontSize: 13,
               padding: "40px 0",
             }}>
-              No session events found. Start a session first.
+              {t("insight.noEvents")}
             </div>
           )}
           {!loading && !empty && markdown && (

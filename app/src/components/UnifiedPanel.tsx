@@ -785,7 +785,7 @@ export function UnifiedPanel({
             fontSize: 12, color: "var(--text-secondary)",
             fontWeight: 500, marginTop: 4,
           }}>
-            {projects.length} project{projects.length !== 1 ? "s" : ""} · {activeSessions.length} session{activeSessions.length !== 1 ? "s" : ""}
+            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} · {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -947,7 +947,7 @@ export function UnifiedPanel({
                       <line x1="8" y1="21" x2="16" y2="21" />
                       <line x1="12" y1="17" x2="12" y2="21" />
                     </svg>
-                    <div style={{ fontSize: 14, fontWeight: 500 }}>No projects</div>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>{t("count.noProjects")}</div>
                   </>
                 )}
                 <button
@@ -962,7 +962,7 @@ export function UnifiedPanel({
                     fontSize: 14, fontWeight: 600, cursor: "pointer",
                   }}
                 >
-                  Start a new session
+                  {t("overview.startNewSession")}
                 </button>
               </div>
             )}
@@ -1889,7 +1889,7 @@ export function UnifiedPanel({
               {actionRow({
                 icon: <PlusIcon size={18} />,
                 label: t("overview.newSession"),
-                desc: `Start a new agent session in ${proj.name}`,
+                desc: t("overview.startSessionIn", { name: proj.name }),
                 onClick: () => {
                   setSheetProjectId(proj.id)
                   setContextProjectId(null)
@@ -1956,7 +1956,7 @@ export function UnifiedPanel({
               {sessions.length > 0 && actionRow({
                 icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>,
                 label: t("overview.killAll"),
-                desc: `${sessions.length} ${sessions.length > 1 ? "sessions" : "session"}`,
+                desc: t(sessions.length !== 1 ? "count.sessions" : "count.session", { count: String(sessions.length) }),
                 color: "#ef4444",
                 onClick: () => {
                   sessions.forEach(s => onKillSession?.(s.id))
