@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from "react"
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react"
 import { createPortal } from "react-dom"
 import { Clipboard } from "@capacitor/clipboard"
 import { App as CapApp } from "@capacitor/app"
@@ -395,7 +395,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading, hasPendingImages, onOpenBuilder }: InputBarProps) {
+export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading, hasPendingImages, onOpenBuilder }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -1983,7 +1983,7 @@ export function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, a
       )}
     </div>
   )
-}
+})
 
 const toolbarBtnStyle: React.CSSProperties = {
   width: 34,

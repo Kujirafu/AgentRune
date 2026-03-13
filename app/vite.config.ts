@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      __APP_VERSION__: JSON.stringify("0.2.15"),
+      __APP_VERSION__: JSON.stringify("0.2.19"),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
     build: {
@@ -24,7 +24,8 @@ export default defineConfig(({ mode }) => {
             // Split heavy deps into separate lazy-loadable chunks
             xterm: ["@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"],
             markdown: ["react-markdown", "remark-gfm", "remark-parse", "unified"],
-            // framer-motion stays in main bundle — needed for page transitions on first paint
+            motion: ["framer-motion"],
+            qrcode: ["html5-qrcode"],
           },
         },
       },

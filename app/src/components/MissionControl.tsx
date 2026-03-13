@@ -15,7 +15,6 @@ const SettingsSheet = lazy(() => import("./SettingsSheet").then(m => ({ default:
 const FileBrowser = lazy(() => import("./FileBrowser").then(m => ({ default: m.FileBrowser })))
 const FilePreview = lazy(() => import("./FilePreview").then(m => ({ default: m.FilePreview })))
 const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPanel })))
-import { TaskBoard } from "./TaskBoard"
 import { PlanPanel } from "./PlanPanel"
 import { PathBadge } from "./PathBadge"
 const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
@@ -1066,6 +1065,11 @@ export function MissionControl({
     if (navigator.vibrate) navigator.vibrate(20)
   }, [])
 
+  // Stable callbacks for InputBar (avoid inline arrows)
+  const openInsight = useCallback(() => setShowInsight(true), [])
+  const openBrowser = useCallback(() => setShowBrowser(true), [])
+  const consumePrefill = useCallback(() => setQuotedText(""), [])
+
   // Attached files from FileBrowser — persisted across view switches
   const filesDraftKey = `mc_${project.id}_${sessionId || "default"}`
   const [attachedFiles, setAttachedFilesRaw] = useState<string[]>(() => _fileDrafts.get(filesDraftKey) || [])
@@ -1076,6 +1080,7 @@ export function MissionControl({
       return next
     })
   }, [filesDraftKey])
+  const removeFile = useCallback((path: string) => setAttachedFiles((prev: string[]) => prev.filter((f: string) => f !== path)), [setAttachedFiles])
 
   // ?????? Save to Obsidian with auto-categorization ??????
   const handleSaveObsidian = useCallback((text: string, event?: AgentEvent) => {
@@ -1690,7 +1695,7 @@ return (
                 background: "var(--icon-bg)",
                 border: "none",
               }}>
-                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
+                {[t("mc.events"), t("panel.diff"), t("panel.plan")].map((label, i) => (
                   <button
                     key={i}
                     onClick={() => goToPanel(i)}
@@ -1790,15 +1795,15 @@ return (
               onSend={handleSendCommand}
               onImagePaste={handleImagePaste}
               onVoice={mcStartVoice}
-              onInsight={() => setShowInsight(true)}
+              onInsight={openInsight}
               autoFocus={isMobile}
               slashCommands={agent?.slashCommands}
-              onBrowse={() => setShowBrowser(true)}
+              onBrowse={openBrowser}
               prefill={quotedText}
-              onPrefillConsumed={() => setQuotedText("")}
+              onPrefillConsumed={consumePrefill}
               draftKey={`mc_${project.id}_${sessionId || "default"}`}
               attachedFiles={attachedFiles}
-              onRemoveFile={(path) => setAttachedFiles((prev) => prev.filter((f) => f !== path))}
+              onRemoveFile={removeFile}
               disabled={initializing}
               disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
               isUploadingImage={isUploadingImage}
@@ -1866,7 +1871,7 @@ return (
                 background: "var(--icon-bg)",
                 border: "none",
               }}>
-                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
+                {[t("mc.events"), t("panel.diff"), t("panel.plan")].map((label, i) => (
                   <button
                     key={i}
                     onClick={() => goToPanel(i)}
@@ -2019,7 +2024,7 @@ return (
             {/* Page indicator */}
             <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 4px", flexShrink: 0 }}>
               <div style={{ display: "inline-flex", alignItems: "center", gap: 2, padding: "3px 4px", borderRadius: 10, background: "var(--icon-bg)", border: "none" }}>
-                {[t("mc.events"), "Diff", "Plan"].map((label, i) => (
+                {[t("mc.events"), t("panel.diff"), t("panel.plan")].map((label, i) => (
                   <button key={i} onClick={() => goToPanel(i)} onTouchStart={(e) => e.stopPropagation()}
                     style={{ padding: "4px 14px", borderRadius: 8, border: "none", background: i === panel ? "var(--glass-border)" : "transparent", color: i === panel ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 11, fontWeight: i === panel ? 700 : 500, cursor: "pointer", opacity: i === panel ? 1 : 0.4, transition: `all 0.3s ${SPRING}` }}>
                     {label}
