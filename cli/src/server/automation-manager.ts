@@ -41,7 +41,7 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
 }
 
 export interface AutomationResult {
@@ -629,11 +629,17 @@ export class AutomationManager {
         }
         this.ptyManager.on("exit", exitHandler)
 
-        // Idle detection: if no output for 60 seconds after shell prompt returns, consider done
-        // claude --print exits on completion; idle detection is fallback for agents that don't exit
+        // Idle detection: if no output for IDLE_MS after agent starts producing real output.
+        // Problem: prompt echo from PTY creates early "output" that triggers false idle timeout.
+        // Solution: don't start idle detection until agent actually produces real response output.
+        // Real output = anything after the prompt file content has been echoed (grace period).
         let idleTimer: NodeJS.Timeout | null = null
-        const IDLE_MS = 60_000
+        const IDLE_MS = 90_000  // 90 seconds idle = done (increased from 60s)
+        const GRACE_PERIOD_MS = 120_000  // 2 minutes grace period for agent to start responding
+        let idleActive = false
+
         const resetIdle = () => {
+          if (!idleActive) return
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
             if (!resolved) {
@@ -646,13 +652,16 @@ export class AutomationManager {
         }
 
         const idleDataHandler = (sid: string, _data: string) => {
-          if (sid === sessionId) resetIdle()
+          if (sid === sessionId && idleActive) resetIdle()
         }
         this.ptyManager.on("data", idleDataHandler)
 
-        // Start idle detection after giving agent time to start
-        // claude --print needs time to initialize and make API calls
-        setTimeout(() => resetIdle(), 15000)
+        // Start idle detection after grace period (agent needs time to load, call API, etc.)
+        // claude --print with long prompts: echo takes ~5s, API call takes 30-90s
+        setTimeout(() => {
+          idleActive = true
+          resetIdle()
+        }, GRACE_PERIOD_MS)
 
         // Hard timeout
         setTimeout(() => {
