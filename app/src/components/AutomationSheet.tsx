@@ -311,7 +311,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
   // Toast
   const [toast, setToast] = useState<string | null>(null)
-  const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2500) }
+  const showToast = (msg: string, duration = 2500) => { setToast(msg); setTimeout(() => setToast(null), duration) }
 
   // Prompt keyword match suggestions
   const promptMatches = matchTemplates(formPrompt)
@@ -1005,8 +1005,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           ) : (
                             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                               {results.slice(-5).reverse().map((r) => {
-                                const lines = (r.output || "").trim().split("\n")
-                                const summary = lines.length > 3 ? lines.slice(0, 3).join("\n") + `\n... (${lines.length} lines)` : r.output
+                                const displayText = r.summary || r.output || ""
+                                const statusLabel = r.status === "success" ? "Success"
+                                  : r.status === "timeout" ? "Timeout"
+                                  : r.status === "blocked_by_risk" ? "Blocked"
+                                  : r.status === "skipped_no_confirmation" ? "Skipped"
+                                  : "Failed"
+                                const statusColor = r.status === "success" ? "#22c55e"
+                                  : r.status === "timeout" ? "#f59e0b"
+                                  : r.status === "skipped_no_confirmation" ? "#94a3b8"
+                                  : "#ef4444"
                                 return (
                                   <div key={r.id} style={{
                                     padding: "10px 12px", borderRadius: 10,
@@ -1015,25 +1023,23 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                         <StatusDot status={r.status} />
-                                        <span style={{
-                                          fontSize: 11, fontWeight: 600,
-                                          color: r.status === "success" ? "#22c55e" : r.status === "timeout" ? "#f59e0b" : "#ef4444",
-                                        }}>
-                                          {r.status === "success" ? "Success" : r.status === "timeout" ? "Timeout" : "Failed"}
+                                        <span style={{ fontSize: 11, fontWeight: 600, color: statusColor }}>
+                                          {statusLabel}
                                         </span>
                                       </div>
                                       <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
                                         {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} · {formatDuration(r.finishedAt - r.startedAt)}
                                       </div>
                                     </div>
-                                    {r.output && (
+                                    {displayText && (
                                       <div style={{
-                                        fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
-                                        color: "var(--text-secondary)", maxHeight: 100, overflowY: "auto",
-                                        whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.4,
-                                        background: "rgba(0,0,0,0.15)", padding: "6px 8px", borderRadius: 6,
+                                        fontSize: 12, lineHeight: 1.5,
+                                        color: "var(--text-secondary)",
+                                        whiteSpace: "pre-wrap", wordBreak: "break-word",
+                                        maxHeight: 120, overflowY: "auto",
+                                        background: "rgba(0,0,0,0.1)", padding: "8px 10px", borderRadius: 8,
                                       }}>
-                                        {summary}
+                                        {displayText}
                                       </div>
                                     )}
                                   </div>

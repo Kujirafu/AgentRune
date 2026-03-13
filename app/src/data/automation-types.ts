@@ -44,7 +44,8 @@ export interface AutomationResult {
   finishedAt: number
   exitCode: number | null
   output: string
-  status: "success" | "failed" | "timeout"
+  summary?: string  // human-readable summary of what the agent actually did
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
 }
 
 export interface AutomationTemplate {
