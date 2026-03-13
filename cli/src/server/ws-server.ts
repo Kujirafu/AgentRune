@@ -478,6 +478,7 @@ export function createServer(portOverride?: number) {
   // Heartbeat: ping clients every 20s
   const wsAlive = new WeakMap<WebSocket, boolean>()
   const heartbeatInterval = setInterval(() => {
+    if (wss.clients.size === 0) return
     for (const ws of wss.clients) {
       if (wsAlive.get(ws) === false) {
         ws.terminate()
@@ -491,6 +492,7 @@ export function createServer(portOverride?: number) {
 
   // Periodic idle check — inject report_progress prompts for idle agents
   const idleCheckInterval = setInterval(() => {
+    if (clientSessions.size === 0) return
     for (const [, sid] of clientSessions) {
       const engine = sessionEngines.get(sid)
       const isIdle = engine?.isIdle() ?? false

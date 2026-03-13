@@ -339,7 +339,7 @@ export class JsonlWatcher {
   private watcher: ReturnType<typeof watch> | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private scanTimer: ReturnType<typeof setInterval> | null = null
-  private callback: JsonlEventCallback
+  private callback: JsonlEventCallback | null
   private lastCheck = 0
   private seenIds = new Set<string>()  // dedup tool_use IDs
   private pendingEventIds: string[] = []  // in_progress event IDs waiting for completion
@@ -355,25 +355,21 @@ export class JsonlWatcher {
     this.startTime = Date.now()
     this.targetSessionId = targetSessionId
     this.skipReplay = skipReplay
+    this.existingFileMtimes = new Map()
 
-    // If targeting a specific session, skip existingFileMtimes — go straight to that file
-    if (targetSessionId) {
-      this.existingFileMtimes = new Map()
-      return
-    }
-
-    // Snapshot existing JSONL files + their mtimes so we can detect resumed ones
-    this.existingFileMtimes = new Map<string, number>()
-    try {
-      for (const f of readdirSync(this.projectDir)) {
-        if (f.endsWith(".jsonl") && !f.includes("subagent")) {
-          const full = join(this.projectDir, f)
-          try {
-            this.existingFileMtimes.set(full, statSync(full).mtimeMs)
-          } catch {}
+    // Sync snapshot only when not targeting a specific session
+    if (!targetSessionId) {
+      try {
+        for (const f of readdirSync(this.projectDir)) {
+          if (f.endsWith(".jsonl") && !f.includes("subagent")) {
+            const full = join(this.projectDir, f)
+            try {
+              this.existingFileMtimes.set(full, statSync(full).mtimeMs)
+            } catch {}
+          }
         }
-      }
-    } catch { /* dir may not exist yet */ }
+      } catch { /* dir may not exist yet */ }
+    }
   }
 
   start(): void {
@@ -396,6 +392,7 @@ export class JsonlWatcher {
     if (this.watcher) { this.watcher.close(); this.watcher = null }
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
     if (this.scanTimer) { clearInterval(this.scanTimer); this.scanTimer = null }
+    this.callback = null  // prevent stale callbacks after stop
   }
 
   private findAndWatch(): void {
@@ -536,7 +533,7 @@ export class JsonlWatcher {
       for (const e of recent) typeCounts[e.type] = (typeCounts[e.type] || 0) + 1
       console.log(`[JsonlWatcher] replayRecent: ${lines.length} lines → ${allEvents.length} total events → emitting ${recent.length} (types: ${JSON.stringify(typeCounts)})`)
       if (recent.length > 0) {
-        this.callback(recent)
+        this.callback?.(recent)
       }
     } catch (err) {
       console.log(`[JsonlWatcher] replayRecent ERROR: ${err instanceof Error ? err.message : err}`)
@@ -645,11 +642,21 @@ export class JsonlWatcher {
 
     if (allEvents.length > 0) {
       console.log(`[JsonlWatcher] readNewLines: ${lines.length} lines → ${allEvents.length} events (types: ${allEvents.map(e => e.type).join(",")})`)
-      this.callback(allEvents)
+      this.callback?.(allEvents)
     }
   }
 
   /** Force re-scan (e.g. after /resume selects a new session) */
+  /** Force replay of JSONL history — used when persisted events are empty on resume */
+  forceReplay(): void {
+    if (!this.jsonlPath) {
+      console.log(`[JsonlWatcher] forceReplay: no jsonlPath yet, skipping`)
+      return
+    }
+    console.log(`[JsonlWatcher] forceReplay: replaying ${this.jsonlPath}`)
+    this.replayRecent(this.jsonlPath)
+  }
+
   rescan(): void {
     // Clear lock and filters — after /resume we need to find ANY active JSONL
     this.existingFileMtimes.clear()
