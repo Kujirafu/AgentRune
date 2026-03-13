@@ -6,6 +6,10 @@ dist-server/
 *.log
 .DS_Store
 
+# APK files (only public/agentrune.apk goes into releases)
+*.apk
+!public/agentrune.apk
+
 # Android build outputs
 android/app/build/
 app/android/build/
@@ -16,6 +20,9 @@ app/android/local.properties
 
 # Internal context
 .agentrune/
+
+# Claude Code settings (may contain tokens)
+.claude/
 
 # IDE
 .idea/

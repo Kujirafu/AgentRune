@@ -9,6 +9,11 @@ import { log } from "../shared/logger.js"
 
 /** Check if a port is in use, and kill the occupying process if requested */
 async function ensurePortFree(port: number): Promise<void> {
+  // Validate port is a safe integer in valid range
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid port number: ${port}`)
+  }
+
   const inUse = await new Promise<boolean>((resolve) => {
     const sock = createConnection({ port, host: "127.0.0.1" })
     sock.once("connect", () => { sock.destroy(); resolve(true) })
@@ -19,9 +24,10 @@ async function ensurePortFree(port: number): Promise<void> {
   if (!inUse) return
 
   log.warn(`Port ${port} is in use — killing old process...`)
-  // On Windows, find PID using netstat
+  const portStr = String(port)
+  // On Windows, find PID using netstat (safe: port validated as integer above)
   try {
-    const out = execSync(`netstat -ano | findstr :${port} | findstr LISTEN`, { encoding: "utf-8" })
+    const out = execSync(`netstat -ano | findstr :${portStr} | findstr LISTEN`, { encoding: "utf-8" })
     const match = out.match(/LISTENING\s+(\d+)/)
     if (match) {
       const pid = parseInt(match[1])
@@ -33,7 +39,7 @@ async function ensurePortFree(port: number): Promise<void> {
   } catch {
     // netstat might not find it, try POSIX approach
     try {
-      execSync(`kill $(lsof -t -i:${port}) 2>/dev/null || true`, { encoding: "utf-8" })
+      execSync(`kill $(lsof -t -i:${portStr}) 2>/dev/null || true`, { encoding: "utf-8" })
       await new Promise(r => setTimeout(r, 1000))
     } catch {}
   }
@@ -54,7 +60,7 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
   await ensurePortFree(port)
 
   // Clean up stale PID file
-  const pidFile = getPidFile()
+  const pidFile = getPidFile(port)
   if (existsSync(pidFile)) {
     try {
       const oldPid = parseInt(readFileSync(pidFile, "utf-8").trim())
@@ -67,9 +73,12 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
   const logFile = join(getConfigDir(), "daemon.log")
   const logFd = openSync(logFile, "a")
 
-  // Resolve bin.ts from this file's location — process.argv is unreliable with npx tsx
+  // Resolve entry point from this file's location
+  // In compiled mode (dist/), use bin.js; in dev mode (tsx), use bin.ts
   const __filename = fileURLToPath(import.meta.url)
-  const binScript = join(__filename, "..", "..", "bin.ts")
+  const distBin = join(__filename, "..", "bin.js")
+  const srcBin = join(__filename, "..", "..", "bin.ts")
+  const binScript = existsSync(distBin) ? distBin : srcBin
   // Only propagate --import flag (e.g. tsx/esm), not -e or script content
   const loaderArgs: string[] = []
   for (let i = 0; i < process.execArgv.length; i++) {

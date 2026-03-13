@@ -4,7 +4,7 @@ import express from "express"
 import { createServer as createHttpServer } from "node:http"
 import { WebSocketServer, WebSocket } from "ws"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFile, unlinkSync, openSync, readSync, closeSync } from "node:fs"
-import { join, basename, dirname, isAbsolute, resolve, normalize } from "node:path"
+import { join, basename, dirname, isAbsolute, resolve, normalize, sep } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { execFileSync, spawn as childSpawn } from "node:child_process"
 import { randomInt } from "node:crypto"
@@ -22,7 +22,7 @@ import { loadConfig, getConfigDir } from "../shared/config.js"
 import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
-import { AutomationManager } from "./automation-manager.js"
+import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
@@ -398,6 +398,7 @@ export function createServer(portOverride?: number) {
     res.header("X-Frame-Options", "DENY")
     res.header("X-XSS-Protection", "1; mode=block")
     res.header("Referrer-Policy", "no-referrer")
+    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
     next()
   })
 
@@ -747,7 +748,7 @@ export function createServer(portOverride?: number) {
     for (const ws of wss.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload)
     }
-  }, { vaultPath: cfg.vaultPath })
+  }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS })
 
   // --- Auth endpoints ---
 
@@ -767,9 +768,14 @@ export function createServer(portOverride?: number) {
     generatePairingCode()
   }
 
-  // --- Daemon info endpoint (no auth required) ---
+  // --- Daemon info endpoint (localhost only, no auth required) ---
   // Used by sibling daemon and app failback to discover tunnel URLs
-  app.get("/api/daemon-info", (_req, res) => {
+  app.get("/api/daemon-info", (req, res) => {
+    // Restrict to localhost — this endpoint exposes tunnel URLs and should not be reachable via tunnel
+    const remoteIp = req.socket.remoteAddress || ""
+    if (!remoteIp.includes("127.0.0.1") && !remoteIp.includes("::1") && remoteIp !== "::ffff:127.0.0.1") {
+      return res.status(403).json({ error: "Forbidden" })
+    }
     res.json({
       port: PORT,
       role: PORT === 3457 ? "dev" : "release",
@@ -1346,29 +1352,22 @@ export function createServer(portOverride?: number) {
     if (typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "Missing text" })
     }
-    // Temporarily set API keys for this request only, then restore
-    const savedEnv: Record<string, string | undefined> = {}
+    // Filter and pass API keys directly (no process.env mutation — prevents race conditions)
+    const filteredKeys: Record<string, string> = {}
     if (apiKeys && typeof apiKeys === "object") {
       for (const [k, v] of Object.entries(apiKeys)) {
         if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
-          savedEnv[k] = process.env[k]
-          process.env[k] = v
+          filteredKeys[k] = v
         }
       }
     }
     try {
       const { cleanupVoiceText } = await import("./voice-cleanup.js")
-      const result = await cleanupVoiceText(text, agentId || "claude")
+      const result = await cleanupVoiceText(text, agentId || "claude", filteredKeys)
       res.json(result)
     } catch (e: any) {
       log.error(`Voice cleanup error: ${e.message}`)
       res.status(500).json({ error: "Voice cleanup failed" })
-    } finally {
-      // Restore original env values
-      for (const [k, orig] of Object.entries(savedEnv)) {
-        if (orig === undefined) delete process.env[k]
-        else process.env[k] = orig
-      }
     }
   })
 
@@ -1409,33 +1408,25 @@ export function createServer(portOverride?: number) {
         // Optionally run LLM cleanup on the result
         const agentId = req.headers["x-agent-id"] as string || "claude"
         let cleaned = rawText
-        const savedEnv2: Record<string, string | undefined> = {}
         if (rawText.trim()) {
           try {
             const { cleanupVoiceText } = await import("./voice-cleanup.js")
-            const apiKeys: Record<string, string> = {}
+            // Pass API keys directly (no process.env mutation — prevents race conditions)
+            const filteredKeys2: Record<string, string> = {}
             const rawKeys = req.headers["x-api-keys"] as string
-            if (rawKeys) try { Object.assign(apiKeys, JSON.parse(rawKeys)) } catch {}
-            // Temporarily set API keys for this request only
-            for (const [k, v] of Object.entries(apiKeys)) {
-              if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
-                savedEnv2[k] = process.env[k]
-                process.env[k] = v
-              }
+            if (rawKeys) {
+              try {
+                const parsed = JSON.parse(rawKeys)
+                for (const [k, v] of Object.entries(parsed)) {
+                  if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
+                    filteredKeys2[k] = v
+                  }
+                }
+              } catch {}
             }
-            const cleanup = await cleanupVoiceText(rawText, agentId)
+            const cleanup = await cleanupVoiceText(rawText, agentId, filteredKeys2)
             cleaned = cleanup.cleaned
-            // Restore env
-            for (const [k2, orig2] of Object.entries(savedEnv2)) {
-              if (orig2 === undefined) delete process.env[k2]
-              else process.env[k2] = orig2
-            }
           } catch (e: any) {
-            // Restore env even on error
-            for (const [k2, orig2] of Object.entries(savedEnv2)) {
-              if (orig2 === undefined) delete process.env[k2]
-              else process.env[k2] = orig2
-            }
             log.warn(`Voice cleanup after transcribe failed: ${e.message}`)
           }
         }
@@ -1503,17 +1494,27 @@ export function createServer(portOverride?: number) {
   })
 
   // --- Path validation: restrict file access to project directories ---
-  function isPathInProject(filePath: string): boolean {
+  /** Check if a resolved path is within a directory (handles prefix attacks like /project vs /project2) */
+  function isWithinDir(filePath: string, dir: string): boolean {
     const resolved = normalize(resolve(filePath))
-    return projects.some(p => resolved.startsWith(normalize(resolve(p.cwd))))
+    const dirResolved = normalize(resolve(dir))
+    return resolved === dirResolved || resolved.startsWith(dirResolved + sep)
+  }
+
+  function isPathInProject(filePath: string): boolean {
+    return projects.some(p => isWithinDir(filePath, p.cwd))
   }
 
   // --- File browser ---
 
   app.get("/api/browse", (req, res) => {
-    // Browse is used to select folders when adding NEW projects — must allow any path.
-    // Only lists directory names (no file content), so no security risk.
-    const dirPath = (req.query.path as string) || process.env.HOME || process.env.USERPROFILE || "."
+    // Browse is used to select folders when adding NEW projects.
+    // Restricted to user's home directory tree to prevent full filesystem enumeration.
+    const userHome = process.env.HOME || process.env.USERPROFILE || "."
+    const dirPath = (req.query.path as string) || userHome
+    if (!isWithinDir(dirPath, userHome)) {
+      return res.status(403).json({ error: "Access denied: path outside home directory" })
+    }
 
     if (!existsSync(dirPath)) {
       return res.status(404).json({ error: "Path not found" })
@@ -1616,6 +1617,11 @@ export function createServer(portOverride?: number) {
     const file = req.query.file as string
     const project = projects.find((p) => p.id === projectId)
     if (!project || !file) return res.status(400).json({ error: "Missing project or file" })
+    // Path traversal protection: ensure file stays within project directory
+    const fullPath = normalize(resolve(project.cwd, file))
+    if (!isWithinDir(fullPath, project.cwd)) {
+      return res.status(403).json({ error: "Access denied: path outside project" })
+    }
 
     try {
       let before = ""
@@ -1623,7 +1629,6 @@ export function createServer(portOverride?: number) {
       try {
         before = execFileSync("git", ["show", `HEAD:${file}`], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       } catch { /* new file, no HEAD version */ }
-      const fullPath = join(project.cwd, file)
       if (existsSync(fullPath)) {
         after = readFileSync(fullPath, "utf-8")
       }
@@ -1641,6 +1646,10 @@ export function createServer(portOverride?: number) {
     const file = req.query.file as string
     const project = projects.find((p) => p.id === projectId)
     if (!project || !file) return res.status(400).json({ error: "Missing project or file" })
+    // Path traversal protection
+    if (!isWithinDir(resolve(project.cwd, file), project.cwd)) {
+      return res.status(403).json({ error: "Access denied: path outside project" })
+    }
 
     try {
       // Get unified diff (staged + unstaged)
@@ -1716,6 +1725,10 @@ export function createServer(portOverride?: number) {
     const { project: projectId, filePath, hunks } = req.body as { project: string; filePath: string; hunks?: number[] }
     const project = projects.find((p) => p.id === projectId)
     if (!project || !filePath) return res.status(400).json({ error: "Missing project or filePath" })
+    // Path traversal protection
+    if (!isWithinDir(resolve(project.cwd, filePath), project.cwd)) {
+      return res.status(403).json({ error: "Access denied: path outside project" })
+    }
 
     try {
       if (!hunks || hunks.length === 0) {
@@ -1781,6 +1794,10 @@ export function createServer(portOverride?: number) {
     const { project: projectId, filePath, hunks } = req.body as { project: string; filePath: string; hunks?: number[] }
     const project = projects.find((p) => p.id === projectId)
     if (!project || !filePath) return res.status(400).json({ error: "Missing project or filePath" })
+    // Path traversal protection
+    if (!isWithinDir(resolve(project.cwd, filePath), project.cwd)) {
+      return res.status(403).json({ error: "Access denied: path outside project" })
+    }
 
     try {
       if (!hunks || hunks.length === 0) {
@@ -1851,6 +1868,10 @@ export function createServer(portOverride?: number) {
     try {
       if (files && Array.isArray(files) && files.length > 0) {
         for (const f of files) {
+          // Path traversal protection
+          if (!isWithinDir(resolve(project.cwd, f), project.cwd)) {
+            return res.status(403).json({ error: "Access denied: path outside project" })
+          }
           execFileSync("git", ["add", f], { cwd: project.cwd, timeout: 5000 })
         }
       } else {
@@ -2691,6 +2712,17 @@ export function createServer(portOverride?: number) {
     res.json(results)
   })
 
+  app.get("/api/automations/:projectId/:id/scan-conflicts", (req, res) => {
+    const level = req.query.level as string | undefined
+    const validLevels = ["strict", "moderate", "permissive", "none"]
+    if (level && !validLevels.includes(level)) {
+      return res.status(400).json({ error: `Invalid level. Must be one of: ${validLevels.join(", ")}` })
+    }
+    const result = automationManager.scanConflicts(req.params.id, level as any)
+    if (!result) return res.status(404).json({ error: "Automation not found or has no prompt" })
+    res.json(result)
+  })
+
   app.post("/api/automations/:projectId/:id/trigger", async (req, res) => {
     try {
       const result = await automationManager.trigger(req.params.id)
@@ -2827,7 +2859,7 @@ export function createServer(portOverride?: number) {
     }
 
     // Send daemon role info + current tunnel URL so app can update its stored URL
-    // Also send AgentLore registration token so app can refresh URL when disconnected
+    // NOTE: Do NOT send refreshToken — app should use its own phoneToken for AgentLore API calls
     const daemonRole = PORT === 3457 ? "dev" : "release"
     const currentTunnelUrl = (globalThis as any).__agentrune_tunnel_url__ || undefined
     const agentloreCfg = config.agentlore
@@ -2836,7 +2868,7 @@ export function createServer(portOverride?: number) {
       role: daemonRole,
       port: PORT,
       tunnelUrl: currentTunnelUrl,
-      refreshToken: agentloreCfg?.token || undefined,
+      daemonDeviceId: agentloreCfg?.deviceId || undefined,
     }))
 
     ws.on("message", (raw) => {
