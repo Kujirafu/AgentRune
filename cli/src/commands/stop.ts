@@ -3,8 +3,9 @@ import { readFileSync, unlinkSync, existsSync } from "node:fs"
 import { getPidFile } from "../shared/config.js"
 import { log } from "../shared/logger.js"
 
-export async function stopCommand() {
-  const pidFile = getPidFile()
+export async function stopCommand(opts?: { port?: string }) {
+  const port = opts?.port ? parseInt(opts.port) : undefined
+  const pidFile = getPidFile(port)
   if (!existsSync(pidFile)) {
     log.warn("No daemon running (PID file not found)")
     return

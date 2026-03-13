@@ -287,6 +287,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formAgentId, setFormAgentId] = useState("claude")
   const [formModel, setFormModel] = useState("")
   const [formBypass, setFormBypass] = useState(false)
+  const [formSandboxLevel, setFormSandboxLevel] = useState<"strict" | "moderate" | "permissive" | "none">("strict")
+  const [scanResult, setScanResult] = useState<{ blockedCount: number; conflicts: { detectedKey: string; categoryKey: string; blocked: boolean }[]; summaryKey: string; summaryParams: Record<string, string | number> } | null>(null)
+  const [scanning, setScanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   // Template browsing
@@ -328,6 +331,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
   useEffect(() => {
     if (open) {
+      fetchAutomations()
       if (initialEdit) {
         setEditId(initialEdit.id)
         setFormName(initialEdit.name)
@@ -342,6 +346,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
         setFormBypass(!!initialEdit.bypass)
+        setFormSandboxLevel((initialEdit as any).sandboxLevel || "strict")
+        setScanResult(null)
         setPage("add")
       } else {
         setPage("pick")
@@ -376,6 +382,34 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       })
       setAutomations((prev) => prev.map((a) => a.id === id ? { ...a, enabled } : a))
     } catch { /* ignore */ }
+  }
+
+  const [triggeringId, setTriggeringId] = useState<string | null>(null)
+  const handleTrigger = async (id: string) => {
+    setTriggeringId(id)
+    try {
+      const res = await fetch(`${serverUrl}/api/automations/${projectId}/${id}/trigger`, { method: "POST" })
+      if (res.ok) {
+        showToast(t("automation.triggered") || "Triggered")
+      } else {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || "Trigger failed")
+      }
+    } catch { showToast("Trigger failed") }
+    finally { setTriggeringId(null) }
+  }
+
+  // Scan prompt for sandbox conflicts
+  const handleScan = async (autoId: string, level: string) => {
+    setScanning(true)
+    try {
+      const res = await fetch(`${serverUrl}/api/automations/${projectId}/${autoId}/scan-conflicts?level=${level}`)
+      if (res.ok) {
+        const data = await res.json()
+        setScanResult(data)
+      }
+    } catch { /* ignore */ }
+    setScanning(false)
   }
 
   const handleDelete = async (id: string) => {
@@ -437,6 +471,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       agentId: formAgentId,
       model: formModel || undefined,
       bypass: formBypass || undefined,
+      sandboxLevel: formSandboxLevel,
       enabled: true,
     }
 
@@ -953,8 +988,18 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             )}
                           </div>
 
-                          {/* Action buttons: Edit + Delete */}
+                          {/* Action buttons: Test + Edit + Delete */}
                           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                            <button onClick={(e) => { e.stopPropagation(); handleTrigger(auto.id) }} disabled={triggeringId === auto.id} style={{
+                              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                              padding: "8px 16px", borderRadius: 10,
+                              border: "1px solid rgba(55,172,192,0.3)", background: "rgba(55,172,192,0.08)",
+                              color: "#37ACC0", fontSize: 12, fontWeight: 600, cursor: triggeringId === auto.id ? "default" : "pointer",
+                              opacity: triggeringId === auto.id ? 0.5 : 1,
+                            }}>
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                              {triggeringId === auto.id ? "..." : (t("automation.trigger") || "Trigger")}
+                            </button>
                             <button onClick={(e) => {
                               e.stopPropagation()
                               setEditId(auto.id)
@@ -1212,8 +1257,32 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>
-                {t("automation.newAutomation")}
+                {editId ? (t("automation.editAutomation") || "Edit Automation") : t("automation.newAutomation")}
               </div>
+              {(() => {
+                // Show trigger button if editing an existing automation (via editId or name match)
+                const triggerId = editId || automations.find(a => a.name === formName)?.id
+                if (!triggerId) return null
+                return (
+                  <button
+                    onClick={() => handleTrigger(triggerId)}
+                    disabled={triggeringId === triggerId}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "6px 14px", borderRadius: 20,
+                      border: "none", background: "rgba(55,172,192,0.12)",
+                      color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                      cursor: triggeringId === triggerId ? "default" : "pointer",
+                      opacity: triggeringId === triggerId ? 0.5 : 1,
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    {triggeringId === triggerId ? "..." : (t("automation.trigger") || "Run")}
+                  </button>
+                )
+              })()}
             </div>
 
             {/* 1. Name */}
@@ -1542,6 +1611,69 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 </span>
               </div>
             </label>
+
+            {/* 5.6 Sandbox Level */}
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6, fontWeight: 600 }}>
+                {t("sandbox.level") || "Sandbox Level"}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {(["strict", "moderate", "permissive", "none"] as const).map((level) => {
+                  const active = formSandboxLevel === level
+                  const colors: Record<string, string> = { strict: "#ef4444", moderate: "#f59e0b", permissive: "#22c55e", none: "#94a3b8" }
+                  return (
+                    <button key={level} onClick={() => {
+                      setFormSandboxLevel(level)
+                      setScanResult(null)
+                      // Auto-scan if editing existing automation
+                      if (editId) handleScan(editId, level)
+                    }} style={{
+                      flex: 1, padding: "6px 8px", borderRadius: 8,
+                      border: active ? `1.5px solid ${colors[level]}` : "1px solid var(--glass-border)",
+                      background: active ? `${colors[level]}15` : "transparent",
+                      color: active ? colors[level] : "var(--text-secondary)",
+                      fontSize: 11, fontWeight: 600, cursor: "pointer",
+                    }}>
+                      {t(`sandbox.level.${level}`) || level}
+                    </button>
+                  )
+                })}
+              </div>
+              {/* Scan button for new automations */}
+              {!editId && formPrompt.trim() && (
+                <button onClick={() => {
+                  // For new automations, we can't call scan-conflicts (no ID yet)
+                  // Show a hint instead
+                  showToast(t("sandbox.saveFirst") || "Save first, then scan")
+                }} style={{
+                  marginTop: 6, padding: "4px 10px", borderRadius: 6,
+                  border: "1px solid var(--glass-border)", background: "transparent",
+                  color: "var(--text-secondary)", fontSize: 10, cursor: "pointer",
+                }}>
+                  {t("sandbox.scanHint") || "Save first to scan conflicts"}
+                </button>
+              )}
+              {/* Scan results */}
+              {scanning && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>{t("sandbox.scanning") || "Scanning..."}</div>}
+              {scanResult && !scanning && (
+                <div style={{
+                  marginTop: 8, padding: "8px 10px", borderRadius: 8,
+                  background: scanResult.blockedCount > 0 ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
+                  border: `1px solid ${scanResult.blockedCount > 0 ? "rgba(239,68,68,0.2)" : "rgba(34,197,94,0.2)"}`,
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: scanResult.blockedCount > 0 ? "#ef4444" : "#22c55e", marginBottom: 4 }}>
+                    {scanResult.blockedCount > 0
+                      ? (t("sandbox.conflictsFound", { count: String(scanResult.blockedCount) }) || `${scanResult.blockedCount} conflicts found`)
+                      : (t("sandbox.noConflicts") || "No conflicts")}
+                  </div>
+                  {scanResult.conflicts.filter(c => c.blocked).slice(0, 5).map((c, i) => (
+                    <div key={i} style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 2 }}>
+                      • {t(c.detectedKey) || c.detectedKey} ({t(c.categoryKey) || c.categoryKey})
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* 6. Buttons */}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>

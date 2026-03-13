@@ -1,12 +1,13 @@
 // server/automation-manager.ts
 // Manages scheduled automations — runs agent commands on intervals/cron/events
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream } from "node:fs"
 import { join } from "node:path"
+import { spawn, type ChildProcess } from "node:child_process"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
 import { VaultSync } from "./vault-sync.js"
 import { WorktreeManager } from "./worktree-manager.js"
-import { type SkillManifest, createDefaultManifest, buildSandboxInstructions } from "./skill-manifest.js"
+import { type SkillManifest, createDefaultManifest, createManifestForLevel, buildSandboxInstructions, scanPromptForConflicts, type PromptScanResult } from "./skill-manifest.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
@@ -24,6 +25,8 @@ export interface AutomationSchedule {
   intervalMinutes?: number  // (interval mode)
 }
 
+export type SandboxLevel = "strict" | "moderate" | "permissive" | "none"
+
 export interface AutomationConfig {
   id: string
   projectId: string
@@ -37,6 +40,7 @@ export interface AutomationConfig {
   agentId: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
+  sandboxLevel?: SandboxLevel  // "strict" (default) | "moderate" | "permissive" | "none"
   manifest?: SkillManifest   // resource permissions declared by this skill
   enabled: boolean
   createdAt: number
@@ -123,13 +127,15 @@ export interface AutomationLimits {
   maxDailyExecutions: number   // max executions per day (across all automations)
 }
 
-export const FREE_LIMITS: AutomationLimits = { maxAutomations: 3, maxDailyExecutions: 5 }
+export const FREE_LIMITS: AutomationLimits = { maxAutomations: 3, maxDailyExecutions: 50 }
 export const PRO_LIMITS: AutomationLimits = { maxAutomations: 50, maxDailyExecutions: 500 }
+export const ADMIN_LIMITS: AutomationLimits = { maxAutomations: Infinity, maxDailyExecutions: Infinity }
 
 export class AutomationManager {
   private automations = new Map<string, AutomationConfig>()
   private timers = new Map<string, NodeJS.Timeout>()
   private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
+  private runningProcesses = new Map<string, ChildProcess>()  // for killing running automations
   private results = new Map<string, AutomationResult[]>()
   private running = new Set<string>()  // prevent duplicate concurrent executions
   private dailyExecCount = new Map<string, number>()  // "YYYY-MM-DD" → count
@@ -255,7 +261,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "sandboxLevel" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -273,6 +279,7 @@ export class AutomationManager {
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
+    if (updates.sandboxLevel !== undefined) auto.sandboxLevel = updates.sandboxLevel
     if (updates.manifest !== undefined) auto.manifest = updates.manifest
 
     const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
@@ -292,6 +299,16 @@ export class AutomationManager {
     return this.results.get(id) || []
   }
 
+  /** Scan an automation's prompt for sandbox conflicts */
+  scanConflicts(id: string, overrideLevel?: SandboxLevel): PromptScanResult | null {
+    const auto = this.automations.get(id)
+    if (!auto) return null
+    const promptText = auto.prompt || auto.command || ""
+    if (!promptText) return null
+    const level = overrideLevel || auto.sandboxLevel || "strict"
+    return scanPromptForConflicts(promptText, level)
+  }
+
   // --- Scheduling ---
 
   private startSchedule(auto: AutomationConfig) {
@@ -302,6 +319,13 @@ export class AutomationManager {
       log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
       this.nextRunAtMap.set(auto.id, Date.now() + ms)
       const timer = setInterval(() => {
+        // Re-check enabled state — defends against stale timers surviving a toggle-off
+        const current = this.automations.get(auto.id)
+        if (!current?.enabled) {
+          log.info(`[Automation] "${auto.name}" disabled, stopping stale interval`)
+          this.stopSchedule(auto.id)
+          return
+        }
         this.nextRunAtMap.set(auto.id, Date.now() + ms)
         this.executeAutomation(auto.id)
       }, ms)
@@ -360,16 +384,14 @@ export class AutomationManager {
     this.nextRunAtMap.delete(id)
   }
 
-  /** Build the agent CLI command for an automation.
-   *  Prompt is written to a temp file and piped via stdin to avoid shell escaping issues.
-   *  PowerShell doesn't support bash $'...' syntax, and long prompts break command-line args.
+  /** Build the agent command args + prompt file for an automation.
+   *  Prompt is written to a temp file and piped via stdin (child_process.spawn).
    */
-  private buildAutomationCommand(auto: AutomationConfig): { agentCmd: string; promptText: string; promptFilePath?: string } | null {
+  private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string } | null {
     const rawPrompt = auto.prompt || ""
     let promptText = wrapPromptWithLocale(rawPrompt)
 
     // Legacy raw command field is no longer supported for direct execution (security: command injection risk).
-    // If automation only has command and no prompt, treat the command as a prompt description.
     if (auto.command && !auto.prompt) {
       promptText = wrapPromptWithLocale(auto.command)
     }
@@ -379,51 +401,51 @@ export class AutomationManager {
       promptText = `[Important] Use the MCP skill "${auto.skill}" to accomplish this task. Call the relevant MCP tool for this skill before proceeding.\n\n${promptText}`
     }
 
-    // Inject sandbox instructions if manifest exists
-    const manifest = auto.manifest || createDefaultManifest(auto.templateId || auto.id)
-    const project = this.projects.find(p => p.id === auto.projectId)
-    if (project) {
-      const sandboxBlock = buildSandboxInstructions(manifest, project.cwd)
-      promptText = `${sandboxBlock}\n\n${promptText}`
+    // Inject sandbox instructions based on sandboxLevel
+    const sandboxLevel = auto.sandboxLevel || "strict"
+    if (sandboxLevel !== "none") {
+      const manifest = auto.manifest || createManifestForLevel(auto.templateId || auto.id, sandboxLevel)
+      const project = this.projects.find(p => p.id === auto.projectId)
+      if (project) {
+        const sandboxBlock = buildSandboxInstructions(manifest, project.cwd)
+        promptText = `${sandboxBlock}\n\n${promptText}`
+      }
     }
 
-    // Write prompt to file (avoids shell escaping issues on all platforms)
-    const promptFilePath = writePromptFile(this.storageDir, auto.id, promptText)
-
-    // Build agent command based on agentId
+    // Write prompt (with agent protocol) to file
     const locale = getSystemLocale()
-    const isWindows = process.platform === "win32"
-    // Shell-safe way to pipe file content into command
-    const catCmd = isWindows ? `Get-Content -Raw "${promptFilePath}" |` : `cat "${promptFilePath}" |`
+    const agentProtocol = buildAgentProtocol(locale)
+    const fullPrompt = `[System Instructions]\n${agentProtocol}\n\n[User Prompt]\n${promptText}`
+    const promptFilePath = writePromptFile(this.storageDir, auto.id, fullPrompt)
 
     switch (auto.agentId) {
       case "claude": {
-        let cmd = "claude --print"
-        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) cmd += ` --model ${auto.model}`
-        if (auto.bypass) cmd += " --dangerously-skip-permissions"
-        // Escape double quotes in system prompt for shell
-        const sysPrompt = buildAgentProtocol(locale).replace(/"/g, isWindows ? '`"' : '\\"')
-        cmd += ` --append-system-prompt "${sysPrompt}"`
-        // Pipe prompt from file instead of passing via -p flag
-        return { agentCmd: `${catCmd} ${cmd}`, promptText: "", promptFilePath }
+        // claude --print reads from stdin, outputs to stdout — perfect for spawn + pipe
+        const args = ["--print"]
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
+        if (auto.bypass) args.push("--dangerously-skip-permissions")
+        return { bin: "claude", args, promptFilePath }
       }
       case "codex": {
-        let cmd = "codex --full-auto"
-        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) cmd += ` --model ${auto.model}`
-        // Codex uses -q flag; pipe not supported, so read file content as arg
-        // For codex, use PowerShell variable substitution
-        if (isWindows) {
-          return { agentCmd: `$p = Get-Content -Raw "${promptFilePath}"; ${cmd} -q $p`, promptText: "", promptFilePath }
-        } else {
-          return { agentCmd: `${cmd} -q "$(cat "${promptFilePath}")"`, promptText: "", promptFilePath }
-        }
+        const args = ["--full-auto", "-q", `Read and follow all instructions in ${promptFilePath}`]
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
+        return { bin: "codex", args, promptFilePath }
       }
       default: {
-        // For other agents (aider, gemini, etc.), launch agent then send prompt via PTY
         const agentBin = auto.agentId && /^[a-zA-Z0-9_-]+$/.test(auto.agentId) ? auto.agentId : "claude"
-        return { agentCmd: agentBin, promptText, promptFilePath }
+        return { bin: agentBin, args: ["--print"], promptFilePath }
       }
     }
+  }
+
+  /** Kill a running automation process */
+  killAutomation(id: string): boolean {
+    const proc = this.runningProcesses.get(id)
+    if (!proc || proc.killed) return false
+    proc.kill("SIGTERM")
+    // Force kill after 5s if still running
+    setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL") }, 5000)
+    return true
   }
 
   /** Manually trigger an automation (ignores schedule, respects rate limits) */
@@ -518,17 +540,7 @@ export class AutomationManager {
       }
     }
 
-    // ── Security gate: bypass always needs fresh confirmation ──
-    if (auto.bypass && this.onEvent) {
-      log.info(`[Automation] Requesting bypass confirmation for "${auto.name}"`)
-      this.onEvent({ type: "bypass_confirmation_required", automationId: id, automationName: auto.name })
-
-      const bypassAction = await this.waitForConfirmation(id)
-      if (bypassAction === "deny") {
-        log.info(`[Automation] User denied bypass for "${auto.name}", running without bypass`)
-        auto.bypass = false  // run without bypass this time (don't persist)
-      }
-    }
+    // bypass=true means user explicitly wants unattended execution — no confirmation needed
 
     const built = this.buildAutomationCommand(auto)
     if (!built) {
@@ -565,15 +577,13 @@ export class AutomationManager {
 
     try {
       // Create a temporary PTY session for this automation
-      const sessionId = `automation_${id}_${Date.now()}`
-      const session = this.ptyManager.create(execProject, "automation", sessionId)
-
       // Runtime behavior monitor
-      const manifest = auto.manifest || createDefaultManifest(auto.templateId || auto.id)
+      const level = auto.sandboxLevel || "strict"
+      const manifest = auto.manifest || createManifestForLevel(auto.templateId || auto.id, level)
       const monitor = new SkillMonitor({
         manifest,
         projectCwd: execProject.cwd,
-        autoHalt: riskReport.score >= 30,  // auto-halt only for medium+ risk skills
+        autoHalt: riskReport.score >= 30,
         onViolation: (v) => {
           if (this.onEvent) {
             this.onEvent({
@@ -585,119 +595,87 @@ export class AutomationManager {
         },
         onHalt: (reason) => {
           log.warn(`[Automation] Monitor halted "${auto.name}": ${reason}`)
-          this.ptyManager.kill(sessionId)
+          const proc = this.runningProcesses.get(id)
+          if (proc && !proc.killed) proc.kill("SIGTERM")
         },
       })
 
-      // Collect output (capped at 100KB to prevent memory leaks)
-      const outputChunks: string[] = []
-      let outputBytes = 0
-      const MAX_OUTPUT_CAPTURE = 100_000
-      const dataHandler = (sid: string, data: string) => {
-        if (sid === sessionId) {
-          if (outputBytes < MAX_OUTPUT_CAPTURE) {
-            outputChunks.push(data)
-            outputBytes += data.length
-          }
-          monitor.processOutput(data)
-        }
-      }
-      this.ptyManager.on("data", dataHandler)
-
-      // Wait for shell to initialize
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-
-      // If worktree, cd into it first
-      if (worktree) {
-        const cdPath = worktree.path.replace(/\\/g, "/")
-        const cdCmd = process.platform === "win32" ? `cd "${worktree.path}"` : `cd "${cdPath}"`
-        this.ptyManager.write(sessionId, cdCmd + "\n")
-        await new Promise((resolve) => setTimeout(resolve, 500))
-      }
-
-      // Send the agent command
-      // For piped commands (cat file | claude --print), the full command is in agentCmd
-      this.ptyManager.write(sessionId, built.agentCmd + "\n")
-
-      // If agent needs interactive prompt (non-print mode), send it after agent starts
-      if (built.promptText) {
-        await new Promise((resolve) => setTimeout(resolve, 3000))
-        this.ptyManager.write(sessionId, built.promptText + "\n")
-      }
-
-      // Wait for agent to finish (with timeout)
-      // Agent tasks like Moltbook posting can take a while — allow 10 minutes
+      // Spawn agent process directly — no PTY, clean stdin/stdout pipe
       const TIMEOUT_MS = 10 * 60 * 1000
-      const result = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve) => {
+      const env = { ...process.env }
+      // Remove Claude Code session markers to prevent "nested session" detection
+      delete (env as any).CLAUDECODE
+      delete (env as any).CLAUDE_CODE_ENTRYPOINT
+
+      const result = await new Promise<{ exitCode: number | null; timedOut: boolean; output: string }>((resolve) => {
         let resolved = false
+        const outputChunks: string[] = []
+        let outputBytes = 0
+        const MAX_OUTPUT_CAPTURE = 100_000
 
-        const exitHandler = (sid: string) => {
-          if (sid === sessionId && !resolved) {
+        const proc = spawn(built.bin, built.args, {
+          cwd: worktree?.path || execProject.cwd,
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        })
+
+        this.runningProcesses.set(id, proc)
+
+        // Pipe prompt file content to stdin
+        const promptStream = createReadStream(built.promptFilePath, { encoding: "utf-8" })
+        promptStream.pipe(proc.stdin)
+        promptStream.on("error", () => { try { proc.stdin.end() } catch {} })
+
+        // Collect stdout
+        proc.stdout.on("data", (data: Buffer) => {
+          const text = data.toString()
+          if (outputBytes < MAX_OUTPUT_CAPTURE) {
+            outputChunks.push(text)
+            outputBytes += text.length
+          }
+          monitor.processOutput(text)
+        })
+
+        // Collect stderr (merge into output)
+        proc.stderr.on("data", (data: Buffer) => {
+          const text = data.toString()
+          if (outputBytes < MAX_OUTPUT_CAPTURE) {
+            outputChunks.push(text)
+            outputBytes += text.length
+          }
+        })
+
+        proc.on("close", (code) => {
+          if (!resolved) {
             resolved = true
-            resolve({ exitCode: 0, timedOut: false })
+            this.runningProcesses.delete(id)
+            resolve({ exitCode: code, timedOut: false, output: outputChunks.join("") })
           }
-        }
-        this.ptyManager.on("exit", exitHandler)
+        })
 
-        // Idle detection: detects when the agent command has finished by looking
-        // for a shell prompt return after the command output.
-        // claude --print: NO output during API call (can be 30-120s), then burst of output, then shell prompt.
-        // Previous approach (90s idle after 120s grace) killed the process during API wait.
-        // New approach: look for shell prompt pattern in output after grace period = command done.
-        let idleTimer: NodeJS.Timeout | null = null
-        const IDLE_MS = 30_000  // 30s idle after we see the shell prompt return = definitely done
-        const GRACE_PERIOD_MS = 30_000  // 30s grace before even looking (shell init + command echo)
-        let idleActive = false
-        let sawAgentOutput = false  // true once we see real output (not just prompt echo)
-        const SHELL_PROMPT_RE = /^PS [A-Z]:\\|^\$ |^% |^> $|^❯ /m
-
-        const resetIdle = () => {
-          if (idleTimer) clearTimeout(idleTimer)
-          idleTimer = setTimeout(() => {
-            if (!resolved) {
-              resolved = true
-              this.ptyManager.removeListener("exit", exitHandler)
-              this.ptyManager.kill(sessionId)
-              resolve({ exitCode: 0, timedOut: false })
-            }
-          }, IDLE_MS)
-        }
-
-        const idleDataHandler = (sid: string, data: string) => {
-          if (sid !== sessionId || !idleActive) return
-          // Strip ANSI for pattern matching
-          const cleanData = data.replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "")
-          // Once we see agent output (non-prompt, non-echo), mark it
-          if (!sawAgentOutput && cleanData.length > 10 && !SHELL_PROMPT_RE.test(cleanData) && !cleanData.includes("Get-Content") && !cleanData.includes("claude")) {
-            sawAgentOutput = true
+        proc.on("error", (err) => {
+          if (!resolved) {
+            resolved = true
+            this.runningProcesses.delete(id)
+            resolve({ exitCode: 1, timedOut: false, output: `Spawn error: ${err.message}` })
           }
-          // After agent produced output, if we see shell prompt return = command finished
-          if (sawAgentOutput && SHELL_PROMPT_RE.test(cleanData)) {
-            resetIdle()
-          }
-        }
-        this.ptyManager.on("data", idleDataHandler)
-
-        // Start watching for shell prompt after grace period
-        setTimeout(() => {
-          idleActive = true
-        }, GRACE_PERIOD_MS)
+        })
 
         // Hard timeout
         setTimeout(() => {
           if (!resolved) {
             resolved = true
-            this.ptyManager.removeListener("exit", exitHandler)
-            this.ptyManager.removeListener("data", idleDataHandler)
-            this.ptyManager.kill(sessionId)
-            resolve({ exitCode: null, timedOut: true })
+            this.runningProcesses.delete(id)
+            if (!proc.killed) proc.kill("SIGTERM")
+            setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL") }, 5000)
+            resolve({ exitCode: null, timedOut: true, output: outputChunks.join("") })
           }
         }, TIMEOUT_MS)
       })
 
-      this.ptyManager.removeListener("data", dataHandler)
       monitor.flush()
-      output = outputChunks.join("")
+      output = result.output
       if (output.length > AutomationManager.MAX_OUTPUT_BYTES) {
         output = output.slice(-AutomationManager.MAX_OUTPUT_BYTES)
       }
@@ -770,8 +748,29 @@ export class AutomationManager {
   }
 
   private saveToDisk() {
-    const data = [...this.automations.values()]
-    writeFileSync(this.getAutomationsFile(), JSON.stringify(data, null, 2))
+    // Read-modify-write: merge in-memory state with on-disk state to avoid
+    // stale writes overriding changes made by other code paths (e.g. toggle off
+    // from the app being overwritten by a daemon saveToDisk with old enabled=true).
+    const filePath = this.getAutomationsFile()
+    let diskMap = new Map<string, AutomationConfig>()
+    try {
+      if (existsSync(filePath)) {
+        const diskData: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
+        for (const a of diskData) diskMap.set(a.id, a)
+      }
+    } catch { /* ignore parse errors, overwrite */ }
+
+    // In-memory is authoritative for all fields of automations we know about
+    for (const [id, auto] of this.automations) {
+      diskMap.set(id, auto)
+    }
+
+    // Remove automations that were deleted in memory but still on disk
+    for (const id of diskMap.keys()) {
+      if (!this.automations.has(id)) diskMap.delete(id)
+    }
+
+    writeFileSync(filePath, JSON.stringify([...diskMap.values()], null, 2))
   }
 
   private saveResultsToDisk(automationId: string) {
@@ -816,14 +815,15 @@ export class AutomationManager {
     try {
       if (!rawOutput) return status === "success" ? "Completed (no output)" : `${status} (no output)`
 
-      // Strip ANSI escape codes (CSI, OSC, private modes, DEC sequences)
+      // Strip ALL ANSI/VT100 escape sequences with a comprehensive regex
+      // Covers: CSI (incl. private modes like ?25h), OSC, Fe (single-char), charset, control chars
       const clean = rawOutput
-        .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, "")  // CSI sequences including ?-prefixed
-        .replace(/\x1b\[[0-9;]*[hlm]/g, "")            // mode set/reset, SGR
-        .replace(/\x1b\][^\x07]*\x07/g, "")            // OSC sequences
-        .replace(/\x1b[()][0-9A-B]/g, "")              // charset selection
-        .replace(/\x1b[78DEHM]/g, "")                  // single-char escape sequences
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")       // CSI: ESC [ <params> <intermediate> <final> (covers ALL CSI including ?-prefixed)
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")  // OSC: ESC ] ... (BEL or ST)
+        .replace(/\x1b[@-Z\\-_]/g, "")                  // Fe: ESC + single char (RIS, IND, NEL, etc.)
+        .replace(/\x1b[()][0-9A-B]/g, "")              // charset selection (SCS)
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "") // remaining control chars (keep \n \r \t)
+        .replace(/___AGENTRUNE_DONE___/g, "")           // strip done marker from summary
 
       // Split into lines, skip empty
       const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
@@ -835,10 +835,17 @@ export class AutomationManager {
         // Shell prompts
         if (/^[$#>❯%]\s*$/.test(line)) return false
         if (/^(PS )?[A-Z]:\\/.test(line)) return false  // PowerShell prompt
+        // PowerShell welcome message (contains garbled Big5/CP950 chars)
+        if (line.includes("Windows PowerShell")) return false
+        if (line.includes("Microsoft Corporation")) return false
+        if (line.includes("aka.ms/PSWindows")) return false
+        if (line.includes("PowerShell")) return false
         if (/^\w+@\w+/.test(line) && line.includes("$")) return false  // bash prompt
         // Command echo (the piped command itself)
         if (line.includes("cat ") && line.includes("| claude")) return false
         if (line.includes("Get-Content") && line.includes("claude")) return false
+        // Done marker
+        if (line.includes("___AGENTRUNE_DONE___")) return false
         // Spinner/progress characters
         if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏─│┌┐└┘├┤┬┴┼]+$/.test(line)) return false
         // Pure control/escape artifacts

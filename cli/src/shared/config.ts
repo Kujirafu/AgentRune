@@ -62,6 +62,7 @@ export function saveConfig(config: Config): void {
   writeFileSync(path, JSON.stringify(config, null, 2))
 }
 
-export function getPidFile(): string {
-  return join(getConfigDir(), "daemon.pid")
+export function getPidFile(port?: number): string {
+  const suffix = port && port !== 3456 ? `-${port}` : ""
+  return join(getConfigDir(), `daemon${suffix}.pid`)
 }

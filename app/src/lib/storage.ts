@@ -124,6 +124,50 @@ export function setSkippedVersion(version: string | null) {
   }
 }
 
+// Track when a new version was first detected (for delayed notification)
+export function getUpdateDetectedAt(): { version: string; at: number } | null {
+  const raw = localStorage.getItem("agentrune_update_detected")
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+export function setUpdateDetectedAt(version: string, at: number) {
+  localStorage.setItem("agentrune_update_detected", JSON.stringify({ version, at }))
+}
+
+export function clearUpdateDetected() {
+  localStorage.removeItem("agentrune_update_detected")
+}
+
+// Track whether the update notification has already been sent (avoid repeat)
+export function getUpdateNotified(): string | null {
+  return localStorage.getItem("agentrune_update_notified")
+}
+
+export function setUpdateNotified(version: string) {
+  localStorage.setItem("agentrune_update_notified", version)
+}
+
+// Killed sessions — local cache so sessions don't reappear if server kill fails
+const KILLED_KEY = "agentrune_killed_sessions"
+const MAX_KILLED = 200  // prevent unbounded growth
+
+export function getKilledSessionIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(KILLED_KEY)
+    return raw ? new Set(JSON.parse(raw)) : new Set()
+  } catch { return new Set() }
+}
+
+export function addKilledSessionId(id: string) {
+  const killed = getKilledSessionIds()
+  killed.add(id)
+  // Trim to max size (keep newest by converting to array, slicing tail)
+  const arr = [...killed]
+  if (arr.length > MAX_KILLED) arr.splice(0, arr.length - MAX_KILLED)
+  localStorage.setItem(KILLED_KEY, JSON.stringify(arr))
+}
+
 // API Keys — stored in localStorage, synced to server vault on save
 export interface ApiKeyEntry {
   envVar: string

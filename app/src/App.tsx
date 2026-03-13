@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
-import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified } from "./lib/storage"
+import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified, getKilledSessionIds, addKilledSessionId } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { LaunchPad } from "./components/LaunchPad"
 const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
@@ -1433,14 +1433,17 @@ export function App() {
       .then((r) => r.json())
       .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string }[] | unknown) => {
         if (!Array.isArray(data)) return
-        const sessions = data.map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string; claudeSessionId?: string }) => ({
-          id: s.id,
-          projectId: s.projectId,
-          agentId: s.agentId,
-          worktreeBranch: s.worktreeBranch || null,
-          status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
-          claudeSessionId: s.claudeSessionId,
-        }))
+        const localKilled = getKilledSessionIds()
+        const sessions = data
+          .filter((s: any) => !localKilled.has(s.id))
+          .map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string; claudeSessionId?: string }) => ({
+            id: s.id,
+            projectId: s.projectId,
+            agentId: s.agentId,
+            worktreeBranch: s.worktreeBranch || null,
+            status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
+            claudeSessionId: s.claudeSessionId,
+          }))
         setActiveSessions(sessions)
         // Seed sessionEventsMap with lastEventTitle from server so summaries show immediately
         setSessionEventsMap(prev => {
@@ -1466,7 +1469,7 @@ export function App() {
       .catch(() => { })
   }, [isAuthed, serverUrl, wsConnected])
 
-  // Also reload projects whenever WS reconnects (catches tunnel URL changes)
+  // Also reload projects + sessions whenever WS reconnects (catches tunnel URL changes + kill state sync)
   useEffect(() => {
     if (!isAuthed) return
     return on("__ws_open__", () => {
@@ -1482,6 +1485,22 @@ export function App() {
           } else if (data.length > 0 && !selectedProject) {
             setSelectedProject(data[0].id)
           }
+        })
+        .catch(() => { })
+      // Reload sessions so killed sessions don't reappear
+      fetch(`${base}/api/sessions`)
+        .then((r) => r.json())
+        .then((data: unknown) => {
+          if (!Array.isArray(data)) return
+          const localKilled = getKilledSessionIds()
+          setActiveSessions((data as any[]).filter((s: any) => !localKilled.has(s.id)).map((s: any) => ({
+            id: s.id,
+            projectId: s.projectId,
+            agentId: s.agentId,
+            worktreeBranch: s.worktreeBranch || null,
+            status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
+            claudeSessionId: s.claudeSessionId,
+          })))
         })
         .catch(() => { })
     })
@@ -1894,10 +1913,12 @@ export function App() {
 
   // Kill handler — kills a specific session
   const handleKill = async (sessionId: string) => {
+    // Persist locally first so session won't reappear even if server call fails
+    addKilledSessionId(sessionId)
+    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId))
     try {
       await fetch(`${getApiBase()}/api/sessions/${sessionId}/kill`, { method: "POST" })
     } catch { }
-    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId))
   }
 
   // New project handler

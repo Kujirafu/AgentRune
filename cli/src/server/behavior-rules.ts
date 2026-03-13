@@ -130,6 +130,42 @@ export function getRulesPath(projectCwd: string): string {
   return join(projectCwd, ".agentrune", "rules.md")
 }
 
+/** PRD API section content for rules.md */
+export function getPrdApiSection(localPort: number = 3457, projectId?: string): string {
+  const safeProjectId = projectId ? projectId.replace(/[^a-zA-Z0-9_-]/g, "_") : "<projectId>"
+  return `
+## PRD API
+
+AgentRune daemon exposes a local REST API for managing PRDs (Product Requirement Documents).
+
+**List active PRDs:**
+\`\`\`
+curl http://localhost:${localPort}/api/prd/${safeProjectId}
+\`\`\`
+
+**Read a specific PRD:**
+\`\`\`
+curl http://localhost:${localPort}/api/prd/${safeProjectId}/<prdId>
+\`\`\`
+
+**Update task status:**
+\`\`\`
+curl -X PATCH http://localhost:${localPort}/api/prd/${safeProjectId}/<prdId>/tasks/<taskId> \\
+  -H 'Content-Type: application/json' \\
+  -d '{"status":"done"}'
+\`\`\`
+
+**Add a new task:**
+\`\`\`
+curl -X POST http://localhost:${localPort}/api/prd/${safeProjectId}/<prdId>/tasks \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"..."}'
+\`\`\`
+
+Only read PRDs relevant to your current task.
+`
+}
+
 /** Ensure .agentrune/rules.md exists. If not, create it with default rules. */
 export function ensureRulesFile(projectCwd: string, opts?: BehaviorRulesOptions): void {
   const rulesPath = getRulesPath(projectCwd)
@@ -137,6 +173,15 @@ export function ensureRulesFile(projectCwd: string, opts?: BehaviorRulesOptions)
   const dir = join(projectCwd, ".agentrune")
   mkdirSync(dir, { recursive: true })
   writeFileSync(rulesPath, getDefaultRules(opts), "utf-8")
+}
+
+/** Ensure the PRD API section exists in rules.md. Appends it if missing. */
+export function ensurePrdApiSection(projectCwd: string, localPort: number = 3457, projectId?: string): void {
+  const rulesPath = getRulesPath(projectCwd)
+  if (!existsSync(rulesPath)) return
+  const content = readFileSync(rulesPath, "utf-8")
+  if (content.includes("## PRD API")) return
+  writeFileSync(rulesPath, content.trimEnd() + "\n" + getPrdApiSection(localPort, projectId), "utf-8")
 }
 
 /** Get the agentlore.md memory file path for a project */

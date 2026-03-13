@@ -5,6 +5,7 @@ import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { ProgressCard } from "./ProgressCard"
 import { NewSessionSheet } from "./NewSessionSheet"
+import { useLocale } from "../lib/i18n"
 
 interface SessionOverviewProps {
   activeSessions: AppSession[]
@@ -57,6 +58,7 @@ export function SessionOverview({
   theme,
   toggleTheme,
 }: SessionOverviewProps) {
+  const { t } = useLocale()
   const [now, setNow] = useState(Date.now())
   const [showNewSheet, setShowNewSheet] = useState(false)
 
@@ -188,7 +190,7 @@ export function SessionOverview({
                 cursor: "pointer",
               }}
             >
-              Start a new session
+              {t("overview.startNewSession")}
             </button>
           </div>
         )}
