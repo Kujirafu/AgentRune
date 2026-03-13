@@ -131,6 +131,7 @@ export class AutomationManager {
   private timers = new Map<string, NodeJS.Timeout>()
   private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
   private results = new Map<string, AutomationResult[]>()
+  private running = new Set<string>()  // prevent duplicate concurrent executions
   private dailyExecCount = new Map<string, number>()  // "YYYY-MM-DD" → count
   private storageDir: string
   private ptyManager: PtyManager
@@ -447,6 +448,14 @@ export class AutomationManager {
     const auto = this.automations.get(id)
     if (!auto || (!auto.enabled && !manualTrigger)) return
 
+    // Prevent duplicate concurrent execution
+    if (this.running.has(id)) {
+      log.info(`[Automation] "${auto.name}" already running, skipping`)
+      return
+    }
+    this.running.add(id)
+
+    try {
     // Daily rate limit check
     const todayKey = new Date().toISOString().slice(0, 10)
     const todayCount = this.dailyExecCount.get(todayKey) || 0
@@ -630,17 +639,19 @@ export class AutomationManager {
         }
         this.ptyManager.on("exit", exitHandler)
 
-        // Idle detection: if no output for IDLE_MS after agent starts producing real output.
-        // Problem: prompt echo from PTY creates early "output" that triggers false idle timeout.
-        // Solution: don't start idle detection until agent actually produces real response output.
-        // Real output = anything after the prompt file content has been echoed (grace period).
+        // Idle detection: detects when the agent command has finished by looking
+        // for a shell prompt return after the command output.
+        // claude --print: NO output during API call (can be 30-120s), then burst of output, then shell prompt.
+        // Previous approach (90s idle after 120s grace) killed the process during API wait.
+        // New approach: look for shell prompt pattern in output after grace period = command done.
         let idleTimer: NodeJS.Timeout | null = null
-        const IDLE_MS = 90_000  // 90 seconds idle = done (increased from 60s)
-        const GRACE_PERIOD_MS = 120_000  // 2 minutes grace period for agent to start responding
+        const IDLE_MS = 30_000  // 30s idle after we see the shell prompt return = definitely done
+        const GRACE_PERIOD_MS = 30_000  // 30s grace before even looking (shell init + command echo)
         let idleActive = false
+        let sawAgentOutput = false  // true once we see real output (not just prompt echo)
+        const SHELL_PROMPT_RE = /^PS [A-Z]:\\|^\$ |^% |^> $|^❯ /m
 
         const resetIdle = () => {
-          if (!idleActive) return
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
             if (!resolved) {
@@ -652,16 +663,24 @@ export class AutomationManager {
           }, IDLE_MS)
         }
 
-        const idleDataHandler = (sid: string, _data: string) => {
-          if (sid === sessionId && idleActive) resetIdle()
+        const idleDataHandler = (sid: string, data: string) => {
+          if (sid !== sessionId || !idleActive) return
+          // Strip ANSI for pattern matching
+          const cleanData = data.replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "")
+          // Once we see agent output (non-prompt, non-echo), mark it
+          if (!sawAgentOutput && cleanData.length > 10 && !SHELL_PROMPT_RE.test(cleanData) && !cleanData.includes("Get-Content") && !cleanData.includes("claude")) {
+            sawAgentOutput = true
+          }
+          // After agent produced output, if we see shell prompt return = command finished
+          if (sawAgentOutput && SHELL_PROMPT_RE.test(cleanData)) {
+            resetIdle()
+          }
         }
         this.ptyManager.on("data", idleDataHandler)
 
-        // Start idle detection after grace period (agent needs time to load, call API, etc.)
-        // claude --print with long prompts: echo takes ~5s, API call takes 30-90s
+        // Start watching for shell prompt after grace period
         setTimeout(() => {
           idleActive = true
-          resetIdle()
         }, GRACE_PERIOD_MS)
 
         // Hard timeout
@@ -735,6 +754,9 @@ export class AutomationManager {
     if (this.onEvent) {
       this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
     }
+    } finally {
+      this.running.delete(id)
+    }
   }
 
   // --- Persistence ---
@@ -794,8 +816,14 @@ export class AutomationManager {
     try {
       if (!rawOutput) return status === "success" ? "Completed (no output)" : `${status} (no output)`
 
-      // Strip ANSI escape codes
-      const clean = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "")
+      // Strip ANSI escape codes (CSI, OSC, private modes, DEC sequences)
+      const clean = rawOutput
+        .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, "")  // CSI sequences including ?-prefixed
+        .replace(/\x1b\[[0-9;]*[hlm]/g, "")            // mode set/reset, SGR
+        .replace(/\x1b\][^\x07]*\x07/g, "")            // OSC sequences
+        .replace(/\x1b[()][0-9A-B]/g, "")              // charset selection
+        .replace(/\x1b[78DEHM]/g, "")                  // single-char escape sequences
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "") // remaining control chars (keep \n \r \t)
 
       // Split into lines, skip empty
       const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
