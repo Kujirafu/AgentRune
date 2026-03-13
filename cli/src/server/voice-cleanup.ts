@@ -145,8 +145,9 @@ PROVIDERS.aider = PROVIDERS.codex
 PROVIDERS.cline = PROVIDERS.codex
 PROVIDERS.openclaw = PROVIDERS.codex
 
-function findApiKey(envKeys: string[]): string | null {
+function findApiKey(envKeys: string[], overrides?: Record<string, string>): string | null {
   for (const key of envKeys) {
+    if (overrides?.[key]) return overrides[key]
     if (process.env[key]) return process.env[key]!
   }
   return null
@@ -193,7 +194,7 @@ function isConversationalResponse(original: string, cleaned: string): boolean {
   return false
 }
 
-export async function cleanupVoiceText(text: string, agentId: string): Promise<CleanupResult> {
+export async function cleanupVoiceText(text: string, agentId: string, apiKeyOverrides?: Record<string, string>): Promise<CleanupResult> {
   const trimmed = text.trim()
   if (!trimmed) return { original: text, cleaned: "", model: "none" }
 
@@ -212,7 +213,7 @@ export async function cleanupVoiceText(text: string, agentId: string): Promise<C
   // 1. Try env var API keys — agent's preferred provider first
   const preferred = PROVIDERS[agentId]
   if (preferred) {
-    const key = findApiKey(preferred.envKeys)
+    const key = findApiKey(preferred.envKeys, apiKeyOverrides)
     if (key) {
       try {
         const result = await preferred.call(key, trimmed)
@@ -230,7 +231,7 @@ export async function cleanupVoiceText(text: string, agentId: string): Promise<C
   for (const id of fallbackOrder) {
     if (id === canonicalProvider) continue
     const provider = PROVIDERS[id]
-    const key = findApiKey(provider.envKeys)
+    const key = findApiKey(provider.envKeys, apiKeyOverrides)
     if (key) {
       try {
         const result = await provider.call(key, trimmed)

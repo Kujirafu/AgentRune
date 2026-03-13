@@ -2,10 +2,13 @@
 import type { AgentAdapter } from "./types.js"
 import type { AgentEvent, ParseContext } from "../shared/types.js"
 import { makeEventId } from "./types.js"
-import { appendFileSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
+import { appendFile } from "node:fs/promises"
 import { join, isAbsolute } from "node:path"
-const DBG_PATH = "C:\\Users\\agres\\Documents\\Test\\AgentRune-New\\debug.log"
-function dbg(msg: string) { try { appendFileSync(DBG_PATH, `${new Date().toISOString()} ${msg}\n`) } catch (e: any) { console.error(`[dbg-fail] ${e?.message}`) } }
+import { homedir } from "node:os"
+const DBG_ENABLED = process.env.AGENTRUNE_DEBUG === "1"
+const DBG_PATH = join(homedir(), ".agentrune", "debug.log")
+function dbg(msg: string) { if (!DBG_ENABLED) return; appendFile(DBG_PATH, `${new Date().toISOString()} ${msg}\n`).catch(() => {}) }
 
 /** Strip ANSI escape codes for pattern matching (cursor positioning -> newline) */
 function stripAnsi(s: string): string {
