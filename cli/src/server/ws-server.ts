@@ -24,12 +24,12 @@ import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager } from "./automation-manager.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
-import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, getRulesPath } from "./behavior-rules.js"
+import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { log } from "../shared/logger.js"
-import type { AgentEvent, TaskStore, Project } from "../shared/types.js"
+import type { AgentEvent, TaskStore, PrdItem, PrdPriority, Project } from "../shared/types.js"
 
 // --- Terminal Web UI (desktop sync) ---
 function getTerminalHtml(): string {
@@ -151,15 +151,31 @@ function getLocalIp(): string {
 
 // --- Agent command builder ---
 
-function buildAgentProtocol(locale?: string, projectId?: string): string {
+function buildAgentProtocol(locale?: string, projectId?: string, localPort: number = 3457): string {
   // Sanitize locale to prevent shell injection via double-quoted strings
   const safeLocale = locale ? locale.replace(/[^a-zA-Z0-9_-]/g, "") : ""
   const langHint = safeLocale ? ` Respond in the user's language (${safeLocale}).` : ""
-  // PRD path hint — tell agent where to find project PRD & tasks
+  // PRD hint — tell agent how to list and interact with PRDs
   const safeProjectId = projectId ? projectId.replace(/[^a-zA-Z0-9_-]/g, "_") : ""
-  const prdHint = safeProjectId
-    ? ` PRD: Read ~/.agentrune/tasks/${safeProjectId}.json for the project PRD (goal, decisions, approaches, scope) and task list. Follow the PRD goals and complete tasks according to their status. When you finish a task, update its status to done by POSTing to the daemon API.`
-    : ""
+  let prdHint = ""
+  if (safeProjectId) {
+    // Count active PRDs to give agent context
+    const prdDir = join(homedir(), ".agentrune", "prd", safeProjectId)
+    let activeCount = 0
+    try {
+      const files = readdirSync(prdDir).filter(f => f.endsWith(".json"))
+      for (const f of files) {
+        try {
+          const p = JSON.parse(readFileSync(join(prdDir, f), "utf-8"))
+          if (p.status === "active") activeCount++
+        } catch {}
+      }
+    } catch {}
+    if (activeCount > 0) {
+      // Only a short hint here — full API details are in .agentrune/rules.md ## PRD API
+      prdHint = ` PRD: This project has ${activeCount} active PRD(s). See .agentrune/rules.md for PRD API details.`
+    }
+  }
   return [
     "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
     `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
@@ -168,14 +184,14 @@ function buildAgentProtocol(locale?: string, projectId?: string): string {
   ].join(" ")
 }
 
-function buildAgentCommand(agentId: string, settings?: Record<string, unknown>, projectId?: string): string | null {
+function buildAgentCommand(agentId: string, settings?: Record<string, unknown>, projectId?: string, port: number = 3457): string | null {
   const s = settings || {}
   switch (agentId) {
     case "claude": {
       let cmd = "claude"
       if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
       if (s.bypass) cmd += " --dangerously-skip-permissions"
-      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId).replace(/"/g, '\\"')}"`
+      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, port).replace(/"/g, '\\"')}"`
       return cmd
     }
     case "codex":
@@ -276,8 +292,44 @@ function loadProjectEvents(projectId: string): AgentEvent[] {
 
 // --- AgentLore heartbeat ---
 
+// Cached sibling daemon info — updated by probeSiblingDaemon, exposed via /api/daemon-info
+let cachedSiblingInfo: { tunnelUrl: string; role: string; port: number } | null = null
+
+async function probeSiblingDaemon(myPort: number): Promise<string | undefined> {
+  const otherPort = myPort === 3457 ? 3456 : 3457
+  try {
+    const r = await fetch(`http://127.0.0.1:${otherPort}/api/daemon-info`, { signal: AbortSignal.timeout(2000) })
+    if (r.ok) {
+      const info = await r.json()
+      if (info.tunnelUrl) {
+        log.dim(`Sibling daemon (port ${otherPort}) tunnel: ${info.tunnelUrl}`)
+        cachedSiblingInfo = { tunnelUrl: info.tunnelUrl, role: info.role, port: otherPort }
+        return info.tunnelUrl as string
+      }
+    }
+  } catch {
+    cachedSiblingInfo = null // sibling offline
+  }
+  return undefined
+}
+
 async function agentloreHeartbeat(token: string, deviceId: string, port: number, cloudToken?: string, tunnelUrl?: string) {
   try {
+    // Probe sibling daemon for fallback URL
+    const siblingTunnelUrl = await probeSiblingDaemon(port)
+    const myRole = port === 3457 ? "dev" : "release"
+
+    // Priority rule: dev is always primary, release is always fallback.
+    // When release detects dev is alive, it sets dev's URL as primary tunnelUrl
+    // so AgentLore always points the app to dev first.
+    let primaryUrl = tunnelUrl
+    let fallbackUrl = siblingTunnelUrl
+    if (myRole === "release" && siblingTunnelUrl) {
+      // Dev is alive — put dev as primary, myself as fallback
+      primaryUrl = siblingTunnelUrl
+      fallbackUrl = tunnelUrl
+    }
+
     const res = await fetch("https://agentlore.vercel.app/api/agentrune/register", {
       method: "POST",
       headers: {
@@ -291,11 +343,12 @@ async function agentloreHeartbeat(token: string, deviceId: string, port: number,
         platform: process.platform,
         protocol: "http",
         cloudSessionToken: cloudToken || undefined,
-        tunnelUrl: tunnelUrl || undefined,
+        tunnelUrl: primaryUrl || undefined,
+        fallbackTunnelUrl: fallbackUrl || undefined,
       }),
     })
     if (res.ok) {
-      log.info("AgentLore heartbeat OK (port " + port + (tunnelUrl ? `, tunnel: ${tunnelUrl}` : "") + ")")
+      log.info("AgentLore heartbeat OK (port " + port + `, primary: ${primaryUrl}` + (fallbackUrl ? `, fallback: ${fallbackUrl}` : "") + ")")
     } else {
       const body = await res.text().catch(() => "")
       log.warn("AgentLore heartbeat failed: " + res.status + " " + body.substring(0, 100))
@@ -713,6 +766,17 @@ export function createServer(portOverride?: number) {
   if (!hasPairedDevices()) {
     generatePairingCode()
   }
+
+  // --- Daemon info endpoint (no auth required) ---
+  // Used by sibling daemon and app failback to discover tunnel URLs
+  app.get("/api/daemon-info", (_req, res) => {
+    res.json({
+      port: PORT,
+      role: PORT === 3457 ? "dev" : "release",
+      tunnelUrl: (globalThis as any).__agentrune_tunnel_url__ || null,
+      sibling: cachedSiblingInfo,
+    })
+  })
 
   app.get("/api/auth/check", (req, res) => {
     const deviceId = req.query.deviceId as string | undefined
@@ -1898,7 +1962,189 @@ export function createServer(portOverride?: number) {
     }
   })
 
-  // --- Tasks endpoints ---
+  // --- PRD endpoints (multi-PRD per project) ---
+
+  const PRD_BASE = join(homedir(), ".agentrune", "prd")
+  try { mkdirSync(PRD_BASE, { recursive: true }) } catch { /* ok */ }
+
+  const safePid = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_")
+
+  /** Get PRD directory for a project, auto-migrate old TaskStore format */
+  function getPrdDir(projectId: string): string {
+    const dir = join(PRD_BASE, safePid(projectId))
+    try { mkdirSync(dir, { recursive: true }) } catch { /* ok */ }
+    // Migrate old TaskStore → PrdItem (one-time)
+    const oldPath = join(homedir(), ".agentrune", "tasks", `${safePid(projectId)}.json`)
+    if (existsSync(oldPath)) {
+      try {
+        const old = JSON.parse(readFileSync(oldPath, "utf-8"))
+        if (old.prd || old.tasks?.length) {
+          const prdId = `prd_${old.createdAt || Date.now()}`
+          const migrated: PrdItem = {
+            id: prdId,
+            title: old.prd?.goal || old.requirement || "Migrated PRD",
+            priority: "p1",
+            status: old.tasks?.every((t: any) => t.status === "done" || t.status === "skipped") ? "done" : "active",
+            goal: old.prd?.goal || old.requirement || "",
+            decisions: old.prd?.decisions || [],
+            approaches: old.prd?.approaches || [],
+            scope: old.prd?.scope || { included: [], excluded: [] },
+            tasks: (old.tasks || []).map((t: any) => ({ ...t, priority: undefined })),
+            createdAt: old.createdAt || Date.now(),
+            updatedAt: old.updatedAt || Date.now(),
+          }
+          writeFileSync(join(dir, `${prdId}.json`), JSON.stringify(migrated, null, 2))
+        }
+        // Remove old file after successful migration
+        unlinkSync(oldPath)
+        log.info(`[PRD] Migrated old TaskStore → ${dir}`)
+      } catch (err: any) {
+        log.warn(`[PRD] Migration failed: ${err.message}`)
+      }
+    }
+    return dir
+  }
+
+  function readPrd(filePath: string): PrdItem | null {
+    try { return JSON.parse(readFileSync(filePath, "utf-8")) } catch { return null }
+  }
+
+  function checkAutoComplete(prd: PrdItem): boolean {
+    if (prd.status === "done" || prd.tasks.length === 0) return false
+    const allDone = prd.tasks.every(t => t.status === "done" || t.status === "skipped")
+    if (allDone) {
+      prd.status = "done"
+      prd.updatedAt = Date.now()
+      return true
+    }
+    return false
+  }
+
+  // List all PRDs for a project (summaries)
+  app.get("/api/prd/:projectId", (req, res) => {
+    const dir = getPrdDir(req.params.projectId)
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith(".json")).sort()
+      const summaries = files.map(f => {
+        const prd = readPrd(join(dir, f))
+        if (!prd) return null
+        return {
+          id: prd.id,
+          title: prd.title,
+          priority: prd.priority,
+          status: prd.status,
+          tasksDone: prd.tasks.filter(t => t.status === "done").length,
+          tasksSkipped: prd.tasks.filter(t => t.status === "skipped").length,
+          tasksTotal: prd.tasks.length,
+          createdAt: prd.createdAt,
+          updatedAt: prd.updatedAt,
+        }
+      }).filter(Boolean)
+      // Sort: active before done, then by priority (p0 first), then by updatedAt desc
+      summaries.sort((a: any, b: any) => {
+        if (a.status !== b.status) return a.status === "active" ? -1 : 1
+        if (a.priority !== b.priority) return a.priority < b.priority ? -1 : 1
+        return b.updatedAt - a.updatedAt
+      })
+      res.json(summaries)
+    } catch {
+      res.json([])
+    }
+  })
+
+  // Get full PRD detail
+  app.get("/api/prd/:projectId/:prdId", (req, res) => {
+    const prd = readPrd(join(getPrdDir(req.params.projectId), `${safePid(req.params.prdId)}.json`))
+    if (!prd) return res.status(404).json({ error: "PRD not found" })
+    res.json(prd)
+  })
+
+  // Create new PRD
+  app.post("/api/prd/:projectId", (req, res) => {
+    const { title, priority, goal, decisions, approaches, scope, tasks } = req.body
+    if (!title && !goal) return res.status(400).json({ error: "title or goal is required" })
+    const prdId = `prd_${Date.now()}`
+    const prd: PrdItem = {
+      id: prdId,
+      title: title || goal || "",
+      priority: priority || "p1",
+      status: "active",
+      goal: goal || title || "",
+      decisions: decisions || [],
+      approaches: approaches || [],
+      scope: scope || { included: [], excluded: [] },
+      tasks: (tasks || []).map((t: any, i: number) => ({
+        id: t.id || i + 1,
+        title: t.title || "",
+        description: t.description || "",
+        status: t.status || "pending",
+        priority: t.priority,
+        dependsOn: t.dependsOn || [],
+      })),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    const dir = getPrdDir(req.params.projectId)
+    writeFileSync(join(dir, `${prdId}.json`), JSON.stringify(prd, null, 2))
+    res.json(prd)
+  })
+
+  // Update PRD metadata (priority, status, title)
+  app.patch("/api/prd/:projectId/:prdId", (req, res) => {
+    const filePath = join(getPrdDir(req.params.projectId), `${safePid(req.params.prdId)}.json`)
+    const prd = readPrd(filePath)
+    if (!prd) return res.status(404).json({ error: "PRD not found" })
+    if (req.body.priority) prd.priority = req.body.priority
+    if (req.body.status) prd.status = req.body.status
+    if (req.body.title) prd.title = req.body.title
+    if (req.body.goal) prd.goal = req.body.goal
+    prd.updatedAt = Date.now()
+    writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    res.json(prd)
+  })
+
+  // Add task to a PRD
+  app.post("/api/prd/:projectId/:prdId/tasks", (req, res) => {
+    const filePath = join(getPrdDir(req.params.projectId), `${safePid(req.params.prdId)}.json`)
+    const prd = readPrd(filePath)
+    if (!prd) return res.status(404).json({ error: "PRD not found" })
+    const { title, description, priority, dependsOn } = req.body
+    if (!title) return res.status(400).json({ error: "title is required" })
+    const maxId = prd.tasks.reduce((m, t) => Math.max(m, t.id), 0)
+    const task = { id: maxId + 1, title, description: description || "", status: "pending" as const, priority: priority as PrdPriority | undefined, dependsOn: dependsOn || [] }
+    prd.tasks.push(task)
+    prd.updatedAt = Date.now()
+    writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    res.json(task)
+  })
+
+  // Update task in a PRD (with auto-complete check)
+  app.patch("/api/prd/:projectId/:prdId/tasks/:taskId", (req, res) => {
+    const filePath = join(getPrdDir(req.params.projectId), `${safePid(req.params.prdId)}.json`)
+    const prd = readPrd(filePath)
+    if (!prd) return res.status(404).json({ error: "PRD not found" })
+    const taskId = parseInt(req.params.taskId)
+    const task = prd.tasks.find(t => t.id === taskId)
+    if (!task) return res.status(404).json({ error: "Task not found" })
+    if (req.body.status) task.status = req.body.status
+    if (req.body.title) task.title = req.body.title
+    if (req.body.description !== undefined) task.description = req.body.description
+    if (req.body.priority !== undefined) task.priority = req.body.priority
+    prd.updatedAt = Date.now()
+    const autoCompleted = checkAutoComplete(prd)
+    writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    res.json({ task, prdAutoCompleted: autoCompleted })
+  })
+
+  // Delete a PRD
+  app.delete("/api/prd/:projectId/:prdId", (req, res) => {
+    const filePath = join(getPrdDir(req.params.projectId), `${safePid(req.params.prdId)}.json`)
+    if (!existsSync(filePath)) return res.status(404).json({ error: "PRD not found" })
+    try { unlinkSync(filePath) } catch {}
+    res.json({ ok: true })
+  })
+
+  // --- Legacy Tasks endpoints (backward compat, redirects to PRD) ---
 
   const TASKS_DIR = join(homedir(), ".agentrune", "tasks")
   try { mkdirSync(TASKS_DIR, { recursive: true }) } catch { /* ok */ }
@@ -1916,7 +2162,6 @@ export function createServer(portOverride?: number) {
   app.post("/api/tasks/:projectId", (req, res) => {
     const { requirement, tasks, prd } = req.body
     const filePath = join(TASKS_DIR, `${req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
-    // Merge with existing store to avoid overwriting prd/tasks when only one is sent
     let existing: TaskStore | null = null
     try { existing = existsSync(filePath) ? JSON.parse(readFileSync(filePath, "utf-8")) : null } catch {}
     const store: TaskStore = {
@@ -1940,6 +2185,8 @@ export function createServer(portOverride?: number) {
       const task = store.tasks.find((t) => t.id === taskId)
       if (!task) return res.status(404).json({ error: "Task not found" })
       if (req.body.status) task.status = req.body.status
+      if (req.body.title) task.title = req.body.title
+      if (req.body.description !== undefined) task.description = req.body.description
       store.updatedAt = Date.now()
       writeFileSync(path, JSON.stringify(store, null, 2))
       res.json(task)
@@ -2538,6 +2785,15 @@ export function createServer(portOverride?: number) {
   const resumeCursorOffset = new Map<string, number>()
   const resumeDecisionDone = new Set<string>() // Sessions where user already chose a resume option
 
+  // --- Agent crash detection ---
+  // Tracks sessions where the agent process exited back to shell prompt.
+  // Key = sessionId, Value = { detectedAt, agentId, notified }
+  const crashedSessions = new Map<string, { detectedAt: number; agentId: string; notified: boolean }>()
+  // Pending crash detection (debounce — first shell prompt sighting, needs confirmation)
+  const crashPending = new Map<string, number>()
+  // Store launch settings per session so we can restart with the same config
+  const sessionLaunchSettings = new Map<string, { agentId: string; settings: Record<string, unknown>; projectId: string }>()
+
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
@@ -2569,6 +2825,19 @@ export function createServer(portOverride?: number) {
         return
       }
     }
+
+    // Send daemon role info + current tunnel URL so app can update its stored URL
+    // Also send AgentLore registration token so app can refresh URL when disconnected
+    const daemonRole = PORT === 3457 ? "dev" : "release"
+    const currentTunnelUrl = (globalThis as any).__agentrune_tunnel_url__ || undefined
+    const agentloreCfg = config.agentlore
+    ws.send(JSON.stringify({
+      type: "daemon_info",
+      role: daemonRole,
+      port: PORT,
+      tunnelUrl: currentTunnelUrl,
+      refreshToken: agentloreCfg?.token || undefined,
+    }))
 
     ws.on("message", (raw) => {
       let msg: { type: string; [key: string]: unknown }
@@ -2702,7 +2971,7 @@ export function createServer(portOverride?: number) {
                 type: "session_activity",
                 sessionId: sid,
                 eventTitle: lastEvent.title,
-                agentStatus: lastEvent.status === "waiting" ? "waiting" : "working",
+                agentStatus: lastEvent.status === "waiting" ? "waiting" : lastEvent.status === "completed" ? "idle" : "working",
               })
               // Only broadcast activity to clients that are connected (scoped)
               for (const [client, csid] of clientSessions) {
@@ -2838,6 +3107,12 @@ export function createServer(portOverride?: number) {
           // MissionControl re-attach on WS reconnect does NOT set isAgentResume, preventing
           // multiple Claude instances from launching simultaneously and crashing the daemon.
           // Safety: 10s cooldown between resume operations to prevent resource exhaustion.
+          // Store launch settings for crash recovery (recoverable sessions too)
+          if (agentId !== "terminal") {
+            const recoverySettings = msg.settings as Record<string, unknown> | undefined
+            sessionLaunchSettings.set(session.id, { agentId, settings: { ...recoverySettings }, projectId: sessionProject.id })
+          }
+
           const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
           if (isRecoverable) {
             const now = Date.now()
@@ -2857,7 +3132,7 @@ export function createServer(portOverride?: number) {
                 if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
                 // Bypass confirmation handled client-side — if bypass=true, user already confirmed
                 if (s.bypass) cmd += " --dangerously-skip-permissions"
-                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, sessionProject.id).replace(/"/g, '\\"')}"`
+                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, sessionProject.id, PORT).replace(/"/g, '\\"')}"`
                 setTimeout(() => {
                     try {
                       sessions.write(session.id, `${cmd}\r`)
@@ -2912,7 +3187,9 @@ export function createServer(portOverride?: number) {
             // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
             // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
             const appSettings = msg.settings as Record<string, unknown> | undefined
-            const agentCmd = buildAgentCommand(agentId, appSettings, sessionProject.id)
+            // Store launch settings for crash recovery / restart
+            sessionLaunchSettings.set(session.id, { agentId, settings: { ...appSettings }, projectId: sessionProject.id })
+            const agentCmd = buildAgentCommand(agentId, appSettings, sessionProject.id, PORT)
             if (agentCmd) {
               setTimeout(() => {
                 sessions.write(session.id, `${agentCmd}\r`)
@@ -2920,8 +3197,9 @@ export function createServer(portOverride?: number) {
               }, 1500)
             }
 
-            // --- Ensure rules.md exists, generate standards prompt, then inject ---
+            // --- Ensure rules.md exists (+ PRD API section if needed), then inject ---
             ensureRulesFile(sessionProject.cwd)
+            ensurePrdApiSection(sessionProject.cwd, PORT, sessionProject.id)
             const rulesPath = getRulesPath(sessionProject.cwd)
             const memoryPath = getMemoryPath(sessionProject.cwd)
             const hasRules = existsSync(rulesPath)
@@ -3035,6 +3313,91 @@ export function createServer(portOverride?: number) {
           if (sessionId) {
             let inputStr = msg.data as string
             const inlineImages = msg.images as string[] | undefined
+
+            // ─── Agent crash: handle special actions ───
+            if (inputStr.startsWith("__restart_agent__")) {
+              const crashInfo = crashedSessions.get(sessionId)
+              if (crashInfo) {
+                crashedSessions.delete(sessionId)
+                // Parse agentId from suffix: __restart_agent__claude → "claude"
+                const restartAgentId = inputStr.replace("__restart_agent__", "").trim() || null
+                const launchInfo = sessionLaunchSettings.get(sessionId)
+                // Use explicitly selected agent, fall back to saved launch settings, then default to "claude"
+                const agentId = restartAgentId || launchInfo?.agentId || "claude"
+                const settings = launchInfo?.settings || {}
+                const projectId = launchInfo?.projectId
+
+                // Try to resume with --resume if we have a Claude session ID
+                let cmd: string | null = null
+                if (agentId === "claude") {
+                  const claudeId = sessionClaudeMap.get(sessionId)?.claudeSessionId
+                  const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
+                  const s = settings
+                  cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
+                  if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
+                  if (s.bypass) cmd += " --dangerously-skip-permissions"
+                  cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, PORT).replace(/"/g, '\\"')}"`
+                } else {
+                  cmd = buildAgentCommand(agentId, settings, projectId, PORT)
+                }
+                const agentCmd = cmd
+                if (agentCmd) {
+                  sessions.write(sessionId, `${agentCmd}\r`)
+                  log.info(`[CRASH-RESTART] Restarting ${agentId} in session ${sessionId.slice(0, 8)}: ${agentCmd}`)
+                  // Update launch settings to reflect the new agent choice
+                  if (launchInfo) {
+                    sessionLaunchSettings.set(sessionId, { ...launchInfo, agentId })
+                  }
+                  const restartEvent: AgentEvent = {
+                    id: `restart_${Date.now()}`,
+                    timestamp: Date.now(),
+                    type: "info",
+                    status: "in_progress",
+                    title: `Restarting ${agentId}...`,
+                  }
+                  ws.send(JSON.stringify({ type: "event", event: restartEvent }))
+                } else {
+                  log.warn(`[CRASH-RESTART] Unknown agent "${agentId}" for session ${sessionId.slice(0, 8)}`)
+                  ws.send(JSON.stringify({ type: "session_error", sessionId, error: `Unknown agent: ${agentId}. Please start a new session.` }))
+                }
+              }
+              break
+            }
+            if (inputStr.startsWith("__close_session__")) {
+              crashedSessions.delete(sessionId)
+              sessions.kill(sessionId)
+              break
+            }
+            if (inputStr.startsWith("__dismiss_crash__")) {
+              crashedSessions.delete(sessionId)
+              break
+            }
+
+            // ─── Agent crash: block normal input if agent is dead ───
+            if (crashedSessions.has(sessionId)) {
+              log.warn(`[CRASH-BLOCK] Blocking input to crashed session ${sessionId.slice(0, 8)} — agent not running`)
+              const blockEvent: AgentEvent = {
+                id: `crash_block_${Date.now()}`,
+                timestamp: Date.now(),
+                type: "decision_request",
+                status: "waiting",
+                title: "Agent is not running",
+                detail: "The agent has exited. Restart it or close this session.",
+                decision: {
+                  options: [
+                    { label: "Restart Claude",  input: "__restart_agent__claude",  style: "primary" as const },
+                    { label: "Restart Codex",   input: "__restart_agent__codex",   style: "default" as const },
+                    { label: "Restart Gemini",  input: "__restart_agent__gemini",  style: "default" as const },
+                    { label: "Restart Aider",   input: "__restart_agent__aider",   style: "default" as const },
+                    { label: "Restart Cursor",  input: "__restart_agent__cursor",  style: "default" as const },
+                    { label: "Close session",   input: "__close_session__",        style: "danger" as const },
+                    { label: "Ignore (send to shell)", input: "__dismiss_crash__", style: "default" as const },
+                  ],
+                },
+              }
+              ws.send(JSON.stringify({ type: "event", event: blockEvent }))
+              break
+            }
 
             // If images are attached, save to disk and append paths to input text
             if (inlineImages && inlineImages.length > 0) {
@@ -3763,34 +4126,111 @@ export function createServer(portOverride?: number) {
     }
 
     // ─── PRD auto-detection ───
-    // When agent outputs <prd_output>...</prd_output>, parse and save to task store
+    // When agent outputs <prd_output>...</prd_output>, parse and save as PrdItem
     for (const evt of events) {
       const text = evt.detail || evt.title || ""
       const prdMatch = text.match(/<prd_output>([\s\S]*?)<\/prd_output>/)
       if (prdMatch) {
         try {
-          const prd = JSON.parse(prdMatch[1].trim())
+          const parsed = JSON.parse(prdMatch[1].trim())
           const sess = sessions.get(sessionId)
           if (sess) {
-            const tasksDir = join(homedir(), ".agentrune", "tasks")
-            const taskPath = join(tasksDir, `${sess.project.id.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
-            let store: any = { projectId: sess.project.id, requirement: "", tasks: [], createdAt: Date.now(), updatedAt: Date.now() }
-            try { store = JSON.parse(readFileSync(taskPath, "utf-8")) } catch { /* new store */ }
-            store.prd = { goal: prd.goal || "", decisions: prd.decisions || [], approaches: prd.approaches || [], scope: prd.scope || { included: [], excluded: [] } }
-            if (prd.tasks?.length) {
-              store.tasks = prd.tasks.map((t: any, i: number) => ({ id: t.id || i + 1, title: t.title || "", description: t.description || "", status: "pending", dependsOn: t.dependsOn || [] }))
+            const projectId = sess.project.id.replace(/[^a-zA-Z0-9_-]/g, "_")
+            const prdDir = join(homedir(), ".agentrune", "prd", projectId)
+            try { mkdirSync(prdDir, { recursive: true }) } catch { /* ok */ }
+            const prdId = `prd_${Date.now()}`
+            const newPrd: PrdItem = {
+              id: prdId,
+              title: parsed.goal || "New PRD",
+              priority: (parsed.priority as PrdPriority) || "p1",
+              status: "active",
+              goal: parsed.goal || "",
+              decisions: parsed.decisions || [],
+              approaches: parsed.approaches || [],
+              scope: parsed.scope || { included: [], excluded: [] },
+              tasks: (parsed.tasks || []).map((t: any, i: number) => ({
+                id: t.id || i + 1,
+                title: t.title || "",
+                description: t.description || "",
+                status: "pending" as const,
+                priority: t.priority as PrdPriority | undefined,
+                dependsOn: t.dependsOn || [],
+              })),
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
             }
-            store.requirement = prd.goal || store.requirement
-            store.updatedAt = Date.now()
-            try { mkdirSync(tasksDir, { recursive: true }) } catch { /* ok */ }
-            writeFileSync(taskPath, JSON.stringify(store, null, 2))
-            // Notify all clients that PRD was generated
-            const prdNotif = JSON.stringify({ type: "prd_generated", projectId: sess.project.id })
+            writeFileSync(join(prdDir, `${prdId}.json`), JSON.stringify(newPrd, null, 2))
+            log.info(`[PRD] Auto-detected and saved: ${prdId} — "${newPrd.title}"`)
+            // Notify all clients
+            const prdNotif = JSON.stringify({ type: "prd_generated", projectId: sess.project.id, prdId })
             for (const [client] of clientSessions) {
               if (client.readyState === WebSocket.OPEN) client.send(prdNotif)
             }
           }
         } catch { /* invalid JSON, skip */ }
+      }
+    }
+
+    // ─── Agent crash detection ───
+    // Detect when the agent process exited and the PTY fell back to a shell prompt.
+    // This prevents user messages from being sent to PowerShell/bash instead of the agent.
+    {
+      const currentSession = sessions.get(sessionId)
+      const sessionAgentId = currentSession?.agentId
+      if (sessionAgentId && sessionAgentId !== "terminal" && !crashedSessions.has(sessionId)) {
+        const stripped = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+        // Check for shell prompt patterns — only match the last non-empty line to avoid false positives
+        const lastLine = stripped.split("\n").filter(Boolean).pop()?.trim() || ""
+        const isShellPrompt = /^PS\s+[A-Z]:\\[^>]*>\s*$/.test(lastLine)                          // PowerShell
+          || /^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[:\s].*\$\s*$/.test(lastLine)                     // bash user@host:~$
+          || /^bash-\d+.*[$#]\s*$/.test(lastLine)                                                 // bash version prompt
+        // Only trigger if session has been alive >10s (avoid false positive during startup)
+        // AND agent was actively running (JSONL watcher created, or scrollback shows agent banner)
+        const sessionAge = Date.now() - (currentSession?.createdAt || Date.now())
+        const agentWasRunning = sessionJsonlWatchers.has(sessionId) || sessionAge > 15000
+        // Also check for error patterns that indicate the user's message went to the shell
+        const hasShellError = /CommandNotFoundException|command not found|not recognized as|is not recognized/i.test(stripped)
+
+        if (agentWasRunning && (hasShellError || isShellPrompt)) {
+          // Debounce: require shell prompt to appear in 2 consecutive checks (3s window)
+          // But if we see a shell error (CommandNotFoundException), trigger immediately
+          const pendingTime = crashPending.get(sessionId)
+          if (hasShellError || (pendingTime && Date.now() - pendingTime < 3000)) {
+            crashedSessions.set(sessionId, { detectedAt: Date.now(), agentId: sessionAgentId, notified: false })
+            crashPending.delete(sessionId)
+            log.warn(`[CRASH-DETECT] Agent "${sessionAgentId}" exited in session ${sessionId.slice(0, 8)}`)
+
+            // Emit crash event to clients
+            const agentLabel = sessionAgentId.charAt(0).toUpperCase() + sessionAgentId.slice(1)
+            const crashEvent: AgentEvent = {
+              id: `crash_${sessionId}_${Date.now()}`,
+              timestamp: Date.now(),
+              type: "decision_request",
+              status: "waiting",
+              title: `${agentLabel} has exited`,
+              detail: `Agent process is no longer running. Your messages will go to the shell instead of the agent.`,
+              decision: {
+                options: [
+                  { label: "Restart Claude",  input: "__restart_agent__claude",  style: "primary" as const },
+                  { label: "Restart Codex",   input: "__restart_agent__codex",   style: "default" as const },
+                  { label: "Restart Gemini",  input: "__restart_agent__gemini",  style: "default" as const },
+                  { label: "Restart Aider",   input: "__restart_agent__aider",   style: "default" as const },
+                  { label: "Restart Cursor",  input: "__restart_agent__cursor",  style: "default" as const },
+                  { label: "Close session",   input: "__close_session__",        style: "danger" as const },
+                  { label: "Ignore",          input: "__dismiss_crash__",        style: "default" as const },
+                ],
+              },
+            }
+            events.push(crashEvent)
+            crashedSessions.get(sessionId)!.notified = true
+          } else if (!pendingTime) {
+            // First detection — start debounce
+            crashPending.set(sessionId, Date.now())
+          }
+        } else {
+          // Agent is alive — clear any pending crash detection
+          crashPending.delete(sessionId)
+        }
       }
     }
 
@@ -3834,7 +4274,7 @@ export function createServer(portOverride?: number) {
         type: "session_activity",
         sessionId,
         eventTitle: lastEvent.title,
-        agentStatus: lastEvent.status === "waiting" ? "waiting" : "working",
+        agentStatus: lastEvent.status === "waiting" ? "waiting" : lastEvent.status === "completed" ? "idle" : "working",
       })
       for (const [client] of clientSessions) {
         if (client.readyState === WebSocket.OPEN) {
@@ -3857,6 +4297,9 @@ export function createServer(portOverride?: number) {
     resumeCursorOffset.delete(sessionId)
     resumeDecisionDone.delete(sessionId)
     authDedup.delete(sessionId)
+    crashedSessions.delete(sessionId)
+    crashPending.delete(sessionId)
+    sessionLaunchSettings.delete(sessionId)
 
     // Mark session as closed (persisted to disk) so it won't appear as recoverable.
     // Only sessions active when daemon crashed (not in this list) are recoverable.
@@ -3882,14 +4325,18 @@ export function createServer(portOverride?: number) {
     // Start Cloudflare Tunnel for remote access
     // Use object so heartbeat closure always reads latest URL
     const tunnelState = { url: undefined as string | undefined }
+    // Expose tunnel URL globally for /api/daemon-info endpoint
+    const updateGlobalTunnelUrl = (url?: string) => { (globalThis as any).__agentrune_tunnel_url__ = url || null }
     try {
       const { startTunnel } = await import("./tunnel.js")
       const tunnel = await startTunnel(PORT)
       tunnelState.url = tunnel.url
+      updateGlobalTunnelUrl(tunnel.url)
       log.info(`Remote access: ${tunnelState.url}`)
       // Auto-update AgentLore when tunnel restarts with new URL
       tunnel.onRestart = (newUrl: string) => {
         tunnelState.url = newUrl
+        updateGlobalTunnelUrl(newUrl)
         log.info(`Tunnel URL changed: ${newUrl}`)
         // Push new URL to AgentLore immediately
         const agentloreConfig = config.agentlore

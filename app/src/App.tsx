@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
-import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion } from "./lib/storage"
+import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { LaunchPad } from "./components/LaunchPad"
 const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
@@ -139,6 +139,39 @@ function useAuth(serverReady: boolean) {
         setStatus("need-auth")
       }
     } catch {
+      // Connection failed — try refreshing tunnel URL before giving up
+      if (isCapacitor()) {
+        try {
+          const device = await refreshTunnelUrl()
+          if (device?.url) {
+            localStorage.setItem("agentrune_server", device.url)
+            // Retry auth with new URL
+            const retryRes = await fetch(`${device.url}/api/auth/check?deviceId=${localStorage.getItem("agentrune_device_id") || ""}`)
+            const retryData = await retryRes.json()
+            setMode(retryData.mode)
+            if (retryData.mode === "none") {
+              setSessionToken("__open__")
+              setStatus("authenticated")
+              return
+            }
+            const savedDeviceId = localStorage.getItem("agentrune_device_id")
+            const savedToken = localStorage.getItem("agentrune_device_token")
+            if (savedDeviceId && savedToken) {
+              const vRes = await fetch(`${device.url}/api/auth/device`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ deviceId: savedDeviceId, token: savedToken }),
+              })
+              if (vRes.ok) {
+                const vData = await vRes.json()
+                setSessionToken(vData.sessionToken)
+                setStatus("authenticated")
+                return
+              }
+            }
+          }
+        } catch { /* refresh also failed */ }
+      }
       setError("Cannot connect to server")
       setStatus("need-auth")
     }
@@ -199,9 +232,10 @@ function useAuth(serverReady: boolean) {
 }
 
 // ─── Auto-refresh tunnel URL from AgentLore ─────────────────────
-/** Returns { url, sessionToken } if an ONLINE device is found, null otherwise */
-async function refreshTunnelUrl(): Promise<{ url: string; sessionToken?: string } | null> {
-  const token = localStorage.getItem("agentrune_phone_token")
+/** Returns { url, fallbackUrl?, sessionToken } if an ONLINE device is found, null otherwise */
+async function refreshTunnelUrl(): Promise<{ url: string; fallbackUrl?: string; sessionToken?: string } | null> {
+  // Try phone token first, then daemon refresh token as fallback
+  const token = localStorage.getItem("agentrune_phone_token") || localStorage.getItem("agentrune_refresh_token")
   if (!token) return null
   try {
     const res = await fetch("https://agentlore.vercel.app/api/agentrune/devices", {
@@ -218,7 +252,13 @@ async function refreshTunnelUrl(): Promise<{ url: string; sessionToken?: string 
         console.log(`[WS] Tunnel URL refreshed: ${oldUrl} → ${newUrl}`)
         localStorage.setItem("agentrune_server", newUrl)
       }
-      return { url: newUrl, sessionToken: online.cloudSessionToken }
+      // Store fallback URL for daemon failover
+      const fallbackUrl = online.fallbackTunnelUrl || undefined
+      if (fallbackUrl) {
+        localStorage.setItem("agentrune_fallback_server", fallbackUrl)
+        console.log(`[WS] Fallback URL: ${fallbackUrl}`)
+      }
+      return { url: newUrl, fallbackUrl, sessionToken: online.cloudSessionToken }
     }
   } catch {}
   return null
@@ -235,14 +275,20 @@ function useWs() {
   const connectingRef = useRef(false)
   // Exponential backoff for reconnect: resets on successful open
   const backoffRef = useRef(300)
+  // Track consecutive failures for failover decision
+  const failCountRef = useRef(0)
   const [wsConnected, setWsConnected] = useState(false)
   // Client-side heartbeat: ping every 15s, expect pong within 5s
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pongTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Failback timer: when connected to release daemon, periodically check if dev is back
+  const failbackRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const stopHeartbeat = useCallback(() => {
     if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
     if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null }
+    if (failbackRef.current) { clearInterval(failbackRef.current); failbackRef.current = null }
   }, [])
 
   const doConnect = useCallback((sessionToken: string) => {
@@ -261,6 +307,7 @@ function useWs() {
     ws.onopen = () => {
       connectingRef.current = false
       backoffRef.current = 300 // Reset backoff on successful connect
+      failCountRef.current = 0 // Reset fail counter
       setWsConnected(true)
       const handlers = handlersRef.current.get("__ws_open__")
       if (handlers) for (const h of handlers) h({})
@@ -282,6 +329,34 @@ function useWs() {
           try { ws.close() } catch {}
         }
       }, 15000)
+
+      // Failback: when connected to release daemon, ask it for dev daemon's current tunnel URL every 5s
+      // Release daemon caches sibling info from heartbeat probes
+      if (isCapacitor()) {
+        failbackRef.current = setInterval(async () => {
+          const role = localStorage.getItem("agentrune_daemon_role")
+          if (role !== "release") return
+          const releaseUrl = localStorage.getItem("agentrune_server") || ""
+          if (!releaseUrl) return
+          try {
+            // Step 1: Ask release daemon for dev daemon's latest tunnel URL
+            const r = await fetch(`${releaseUrl}/api/daemon-info`, { signal: AbortSignal.timeout(3000) })
+            const info = await r.json()
+            const devUrl = info?.sibling?.tunnelUrl
+            if (!devUrl || info?.sibling?.role !== "dev") return
+            // Step 2: Probe dev daemon to confirm it's alive
+            const r2 = await fetch(`${devUrl}/api/daemon-info`, { signal: AbortSignal.timeout(3000) })
+            const devInfo = await r2.json()
+            if (devInfo?.role !== "dev") return
+            // Dev is alive — switch back
+            console.log(`[WS] Dev daemon is back — switching to: ${devUrl}`)
+            localStorage.setItem("agentrune_server", devUrl)
+            localStorage.setItem("agentrune_fallback_server", releaseUrl)
+            stopHeartbeat()
+            try { ws.close() } catch {}
+          } catch { /* dev still down */ }
+        }, 5000)
+      }
     }
 
     ws.onmessage = (e) => {
@@ -295,6 +370,17 @@ function useWs() {
       if (msg.type === "token_refresh" && msg.sessionToken) {
         tokenRef.current = msg.sessionToken as string
       }
+      // Track which daemon we're connected to (dev vs release)
+      // Also store tunnel URL and refresh token so we can reconnect after daemon restart
+      if (msg.type === "daemon_info" && msg.role) {
+        localStorage.setItem("agentrune_daemon_role", msg.role as string)
+        if (msg.tunnelUrl) {
+          localStorage.setItem("agentrune_server", msg.tunnelUrl as string)
+        }
+        if (msg.refreshToken) {
+          localStorage.setItem("agentrune_refresh_token", msg.refreshToken as string)
+        }
+      }
       const handlers = handlersRef.current.get(msg.type)
       if (handlers) for (const h of handlers) h(msg)
     }
@@ -303,15 +389,33 @@ function useWs() {
       connectingRef.current = false
       setWsConnected(false)
       stopHeartbeat()
+      failCountRef.current++
       const handlers = handlersRef.current.get("__ws_close__")
       if (handlers) for (const h of handlers) h({})
       // Auto-reconnect with exponential backoff (300ms → 600ms → 1200ms → max 5s)
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
       const delay = backoffRef.current
       backoffRef.current = Math.min(delay * 2, 5000)
+      const fails = failCountRef.current
 
-      // After 3+ failures (backoff >= 2400ms), refresh tunnel URL from AgentLore
-      if (delay >= 2400 && isCapacitor()) {
+      // After 10+ consecutive failures (~15s downtime), try switching to fallback daemon
+      if (fails >= 10 && isCapacitor()) {
+        const fallback = localStorage.getItem("agentrune_fallback_server")
+        if (fallback) {
+          console.log(`[WS] ${fails} failures — switching to fallback daemon: ${fallback}`)
+          const current = localStorage.getItem("agentrune_server") || ""
+          localStorage.setItem("agentrune_server", fallback)
+          if (current) localStorage.setItem("agentrune_fallback_server", current)
+          backoffRef.current = 300 // Reset backoff for new daemon
+          failCountRef.current = 0
+          reconnectTimerRef.current = setTimeout(() => doConnect(tokenRef.current), 500)
+          return
+        }
+      }
+
+      // After 2+ failures, refresh tunnel URL from AgentLore
+      // Quick refresh ensures app reconnects fast when daemon restarts with new tunnel
+      if (fails >= 2 && isCapacitor()) {
         refreshTunnelUrl().then((device) => {
           // Update token if AgentLore returned a fresh cloudSessionToken
           if (device?.sessionToken) {
@@ -1235,6 +1339,8 @@ export function App() {
   const { connect, send, on, wsConnected } = useWs()
 
   // ─── Auto Update Check ─────────────────────────────────────────
+  // Flow: detect new release → record timestamp → 12h later push notification
+  const UPDATE_NOTIFY_DELAY = 12 * 60 * 60 * 1000 // 12 hours after first detection
   useEffect(() => {
     const runCheck = async () => {
       if (!getAutoUpdateEnabled()) return
@@ -1244,11 +1350,39 @@ export function App() {
       setLastUpdateCheck(now)
       const info = await checkForUpdate()
       if (info) {
+        // Dispatch in-app banner (SettingsSheet)
         window.dispatchEvent(new CustomEvent("updateAvailable", { detail: info }))
+
+        // Track first detection time for delayed notification
+        const detected = getUpdateDetectedAt()
+        if (!detected || detected.version !== info.version) {
+          // New version detected for the first time — start the 12h timer
+          setUpdateDetectedAt(info.version, now)
+        } else {
+          // Same version already detected — check if 12h has passed
+          const elapsed = now - detected.at
+          const alreadyNotified = getUpdateNotified()
+          if (elapsed >= UPDATE_NOTIFY_DELAY && alreadyNotified !== info.version) {
+            // 12h passed, send push notification
+            setUpdateNotified(info.version)
+            if (isCapacitor() && getNotificationsEnabled()) {
+              LocalNotifications.schedule({
+                notifications: [{
+                  id: now,
+                  title: t("notification.updateAvailable"),
+                  body: `v${info.version} — ${t("notification.updateTap")}`,
+                  smallIcon: "ic_launcher",
+                }],
+              }).catch(() => {})
+            }
+          }
+        }
       }
     }
     // Check on mount (after short delay to not block startup)
     const timeout = setTimeout(runCheck, 3000)
+    // Also re-check periodically while app is open (every 6h)
+    const interval = setInterval(runCheck, UPDATE_CHECK_INTERVAL)
     // Listen for manual check requests (from Settings toggle)
     const handler = () => {
       setLastUpdateCheck(0) // reset to force check
@@ -1257,9 +1391,10 @@ export function App() {
     window.addEventListener("checkForUpdate", handler)
     return () => {
       clearTimeout(timeout)
+      clearInterval(interval)
       window.removeEventListener("checkForUpdate", handler)
     }
-  }, [])
+  }, [t])
 
   // Cloud mode without a server URL = browsing LaunchPad (Quick Connect list)
   // Cloud mode WITH cloudSessionToken = pre-authorized, skip local auth
@@ -1416,7 +1551,7 @@ export function App() {
     return () => window.removeEventListener("keepAwakeChanged", handler)
   }, [])
 
-  // Smart Notifications — fire local notification when agent is done/blocked and app is in background
+  // Smart Notifications — fire local notification when agent needs input or completes, app in background
   useEffect(() => {
     if (!isCapacitor()) return
     // Request permission on first enable
@@ -1425,31 +1560,38 @@ export function App() {
     }
     window.addEventListener("notificationsChanged", onEnable)
 
-    const unsub = on("agent_events", (msg) => {
+    // Track last notification time per session to avoid spamming (throttle 30s)
+    const lastNotifTime = new Map<string, number>()
+
+    const unsub = on("session_activity", (msg) => {
       if (!getNotificationsEnabled()) return
       if (document.visibilityState === "visible") return // Only notify in background
-      const events = msg.events as Array<{ type: string; title?: string; summary?: string }> | undefined
-      if (!events) return
-      for (const evt of events) {
-        if (evt.type === "progress_report") {
-          const summary = evt.summary || evt.title || ""
-          const status = (evt as any).status
-          if (status === "done" || status === "blocked") {
-            LocalNotifications.schedule({
-              notifications: [{
-                id: Date.now(),
-                title: status === "blocked" ? "Agent needs your input" : "Agent completed task",
-                body: summary.slice(0, 200),
-                smallIcon: "ic_launcher",
-              }],
-            }).catch(() => {})
-          }
-        }
+      const sid = msg.sessionId as string
+      const eventTitle = msg.eventTitle as string
+      const agentStatus = msg.agentStatus as string
+      if (!sid) return
+
+      // Throttle: max 1 notification per session per 30s
+      const now = Date.now()
+      const lastTime = lastNotifTime.get(sid) || 0
+      if (now - lastTime < 30_000) return
+
+      // Decision request — agent needs user confirmation (like LINE notification)
+      if (agentStatus === "waiting") {
+        lastNotifTime.set(sid, now)
+        LocalNotifications.schedule({
+          notifications: [{
+            id: now,
+            title: t("notification.agentBlocked"),
+            body: eventTitle ? eventTitle.slice(0, 200) : t("notification.needsConfirm"),
+            smallIcon: "ic_launcher",
+          }],
+        }).catch(() => {})
       }
     })
 
     return () => { unsub(); window.removeEventListener("notificationsChanged", onEnable) }
-  }, [on])
+  }, [on, t])
 
   // Automation completion notifications
   useEffect(() => {
