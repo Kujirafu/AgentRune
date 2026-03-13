@@ -1118,4 +1118,12 @@ export const en: Record<string, string> = {
   "overview.startNewSession": "Start a new session",
   "overview.startSessionIn": "Start a new agent session in {name}",
   "insight.noEvents": "No session events found. Start a session first.",
+
+  // Panels
+  "panel.diff": "Diff",
+  "panel.plan": "Plan",
+
+  // Missing keys
+  "input.uploading": "Uploading...",
+  "prd.progress": "Progress",
 }

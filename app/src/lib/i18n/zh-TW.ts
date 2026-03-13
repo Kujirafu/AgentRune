@@ -1122,4 +1122,12 @@ export const zhTW: Record<string, string> = {
   "overview.startNewSession": "開始新的工作階段",
   "overview.startSessionIn": "在 {name} 中開始新的 agent 工作階段",
   "insight.noEvents": "找不到工作階段事件，請先啟動一個工作階段。",
+
+  // 面板
+  "panel.diff": "差異",
+  "panel.plan": "計畫",
+
+  // 缺漏補齊
+  "input.uploading": "上傳中...",
+  "prd.progress": "進度",
 }
