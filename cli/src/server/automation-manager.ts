@@ -51,6 +51,7 @@ export interface AutomationResult {
   finishedAt: number
   exitCode: number | null
   output: string
+  summary?: string
   status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
   riskReport?: SkillRiskReport
 }
@@ -699,6 +700,7 @@ export class AutomationManager {
       finishedAt: Date.now(),
       exitCode,
       output,
+      summary: AutomationManager.extractSummary(output, status),
       status,
     }
 
@@ -782,6 +784,54 @@ export class AutomationManager {
       log.info(`[Automation] Loaded ${data.length} automations from disk`)
     } catch (err) {
       log.warn(`[Automation] Failed to load automations: ${err}`)
+    }
+  }
+
+  // --- Output summary ---
+
+  /** Extract a human-readable summary from raw PTY output */
+  static extractSummary(rawOutput: string, status: string): string {
+    try {
+      if (!rawOutput) return status === "success" ? "Completed (no output)" : `${status} (no output)`
+
+      // Strip ANSI escape codes
+      const clean = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "")
+
+      // Split into lines, skip empty
+      const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+
+      // Filter out noise: prompt echo, shell prompts, progress spinners, control chars
+      const meaningful = lines.filter(line => {
+        if (line.length < 3) return false
+        if (line.length > 500) return false  // likely binary or long echo
+        // Shell prompts
+        if (/^[$#>❯%]\s*$/.test(line)) return false
+        if (/^(PS )?[A-Z]:\\/.test(line)) return false  // PowerShell prompt
+        if (/^\w+@\w+/.test(line) && line.includes("$")) return false  // bash prompt
+        // Command echo (the piped command itself)
+        if (line.includes("cat ") && line.includes("| claude")) return false
+        if (line.includes("Get-Content") && line.includes("claude")) return false
+        // Spinner/progress characters
+        if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏─│┌┐└┘├┤┬┴┼]+$/.test(line)) return false
+        // Pure control/escape artifacts
+        if (/^\[[\d;]*[a-zA-Z]/.test(line)) return false
+        return true
+      })
+
+      if (meaningful.length === 0) {
+        return status === "timeout" ? "Timed out (no meaningful output)"
+          : status === "success" ? "Completed (only prompt echo)"
+          : `${status}`
+      }
+
+      // Take last 8 meaningful lines as summary (agent's final output is most important)
+      const tail = meaningful.slice(-8)
+      const summary = tail.join("\n")
+
+      // Truncate if too long
+      return summary.length > 600 ? summary.slice(-600) + "..." : summary
+    } catch {
+      return status
     }
   }
 
