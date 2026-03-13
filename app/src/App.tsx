@@ -234,11 +234,14 @@ function useAuth(serverReady: boolean) {
 // ─── Auto-refresh tunnel URL from AgentLore ─────────────────────
 /** Returns { url, fallbackUrl?, sessionToken } if an ONLINE device is found, null otherwise */
 async function refreshTunnelUrl(): Promise<{ url: string; fallbackUrl?: string; sessionToken?: string } | null> {
-  // Try phone token first, then daemon refresh token as fallback
-  const token = localStorage.getItem("agentrune_phone_token") || localStorage.getItem("agentrune_refresh_token")
+  // Use phone token only (daemon refresh token was removed for security — daemon credentials should not be on client)
+  const token = localStorage.getItem("agentrune_phone_token")
   if (!token) return null
   try {
-    const res = await fetch("https://agentlore.vercel.app/api/agentrune/devices", {
+    // Include daemon's deviceId when using daemon refresh token (needed for linkRequest lookup)
+    const daemonDeviceId = localStorage.getItem("agentrune_daemon_device_id") || ""
+    const params = daemonDeviceId ? `?deviceId=${encodeURIComponent(daemonDeviceId)}` : ""
+    const res = await fetch(`https://agentlore.vercel.app/api/agentrune/devices${params}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!res.ok) return null
@@ -377,8 +380,10 @@ function useWs() {
         if (msg.tunnelUrl) {
           localStorage.setItem("agentrune_server", msg.tunnelUrl as string)
         }
-        if (msg.refreshToken) {
-          localStorage.setItem("agentrune_refresh_token", msg.refreshToken as string)
+        // Clean up stale refreshToken from older versions (daemon no longer sends it)
+        localStorage.removeItem("agentrune_refresh_token")
+        if (msg.daemonDeviceId) {
+          localStorage.setItem("agentrune_daemon_device_id", msg.daemonDeviceId as string)
         }
       }
       const handlers = handlersRef.current.get(msg.type)

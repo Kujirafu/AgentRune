@@ -773,7 +773,8 @@ export function createServer(portOverride?: number) {
   app.get("/api/daemon-info", (req, res) => {
     // Restrict to localhost — this endpoint exposes tunnel URLs and should not be reachable via tunnel
     const remoteIp = req.socket.remoteAddress || ""
-    if (!remoteIp.includes("127.0.0.1") && !remoteIp.includes("::1") && remoteIp !== "::ffff:127.0.0.1") {
+    const isLocalhost = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1"
+    if (!isLocalhost) {
       return res.status(403).json({ error: "Forbidden" })
     }
     res.json({
@@ -1494,10 +1495,15 @@ export function createServer(portOverride?: number) {
   })
 
   // --- Path validation: restrict file access to project directories ---
-  /** Check if a resolved path is within a directory (handles prefix attacks like /project vs /project2) */
+  /** Check if a resolved path is within a directory (handles prefix attacks and Windows case-insensitivity) */
   function isWithinDir(filePath: string, dir: string): boolean {
-    const resolved = normalize(resolve(filePath))
-    const dirResolved = normalize(resolve(dir))
+    let resolved = normalize(resolve(filePath))
+    let dirResolved = normalize(resolve(dir))
+    // Windows paths are case-insensitive
+    if (process.platform === "win32") {
+      resolved = resolved.toLowerCase()
+      dirResolved = dirResolved.toLowerCase()
+    }
     return resolved === dirResolved || resolved.startsWith(dirResolved + sep)
   }
 
@@ -1511,7 +1517,8 @@ export function createServer(portOverride?: number) {
     // Browse is used to select folders when adding NEW projects.
     // Restricted to user's home directory tree to prevent full filesystem enumeration.
     const userHome = process.env.HOME || process.env.USERPROFILE || "."
-    const dirPath = (req.query.path as string) || userHome
+    const rawPath = (req.query.path as string) || userHome
+    const dirPath = normalize(resolve(rawPath))
     if (!isWithinDir(dirPath, userHome)) {
       return res.status(403).json({ error: "Access denied: path outside home directory" })
     }
