@@ -74,13 +74,23 @@ for i in $(seq 1 20); do
   HEALTH=$(curl -s --max-time 2 http://localhost:$PORT/api/auth/check 2>/dev/null || true)
   if echo "$HEALTH" | grep -q "mode"; then
     echo "[safe-restart] Daemon healthy on port $PORT"
-    # Wait for tunnel
+    # Wait for tunnel + automations to load
     sleep 10
     TUNNEL=$(grep "Tunnel ready" "$LOG_FILE" 2>/dev/null | tail -1 | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' || true)
     if [ -n "$TUNNEL" ]; then
       echo "[safe-restart] Tunnel: $TUNNEL"
     else
       echo "[safe-restart] Warning: no tunnel URL detected (may still be starting)"
+    fi
+    # Check automations loaded
+    AUTO_COUNT=$(grep -o 'Loaded [0-9]* automations' "$LOG_FILE" 2>/dev/null | tail -1 || true)
+    if [ -n "$AUTO_COUNT" ]; then
+      echo "[safe-restart] Automations: $AUTO_COUNT"
+    fi
+    # Check heartbeat
+    HEARTBEAT=$(grep "heartbeat OK" "$LOG_FILE" 2>/dev/null | tail -1 || true)
+    if [ -n "$HEARTBEAT" ]; then
+      echo "[safe-restart] AgentLore heartbeat OK"
     fi
     echo "[safe-restart] Done"
     exit 0
