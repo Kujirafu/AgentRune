@@ -26,6 +26,58 @@ export interface AutomationSchedule {
   intervalMinutes?: number  // (interval mode)
 }
 
+// --- Crew system ---
+
+export interface CrewPersona {
+  tone: string       // 說話風格
+  focus: string      // 關注重點
+  style: string      // 工作風格
+}
+
+export interface CrewRole {
+  id: string
+  nameKey: string              // i18n key: "crew.role.pm"
+  prompt: string               // 任務指令
+  persona: CrewPersona
+  icon: string                 // Lucide icon name: "target", "code"
+  color: string                // 角色代表色
+  skillChainSlug?: string      // 可選掛載 skills chain
+  skillChainWorkflow?: string  // 序列化的技能鏈步驟（前端生成，CLI 注入 prompt）
+  phase: number                // 執行階段，同 phase 並行
+  estimatedTokens?: number     // 預估 token 用量
+}
+
+export interface CrewConfig {
+  roles: CrewRole[]
+  tokenBudget: number           // 熔斷閾值（總 token 上限）
+  targetBranch?: string         // trial 分支名稱（空 = 不切分支）
+  phaseDelayMinutes?: number    // 階段間延遲（預設 0）
+}
+
+export interface CrewRoleResult {
+  roleId: string
+  roleName: string
+  icon: string
+  color: string
+  phase: number
+  status: "completed" | "failed" | "skipped" | "circuit_broken"
+  tokensUsed: number
+  durationMs: number
+  outputSummary: string
+  outputFull?: string
+}
+
+export interface CrewExecutionReport {
+  automationId: string
+  startedAt: number
+  completedAt: number
+  status: "completed" | "failed" | "circuit_broken"
+  totalTokensUsed: number
+  tokenBudget: number
+  targetBranch?: string
+  phases: { phase: number; roles: CrewRoleResult[] }[]
+}
+
 export interface AutomationConfig {
   id: string
   projectId: string
@@ -58,7 +110,10 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken"
+
+  // Crew execution
+  crew?: CrewConfig
 }
 
 export interface AutomationResult {
@@ -69,7 +124,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string  // human-readable summary of what the agent actually did
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken"
 }
 
 export interface AutomationTemplate {
@@ -80,7 +135,10 @@ export interface AutomationTemplate {
   prompt: string
   skill?: string
 
-  category: "builtin" | "community" | "custom"
+  category: "builtin" | "community" | "custom" | "crew"
+
+  // Crew config (only for crew templates)
+  crew?: CrewConfig
 
   authorId?: string
   visibility: "private" | "public"
@@ -90,5 +148,6 @@ export interface AutomationTemplate {
 
   tags?: string[]
   group?: string
+  subgroup?: string
   createdAt: number
 }

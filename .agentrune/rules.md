@@ -87,3 +87,58 @@
 
 ## 跨 Session 協作
 - 收到 [來自其他 Session] 開頭的訊息 → 回答後 report_progress，summary 開頭標記 [回覆]
+
+## PRD API
+
+AgentRune daemon 提供本機 REST API 來管理 PRD（產品需求文件）。
+**收到功能需求時，必須用這個 API 建立 PRD，不要只在聊天裡輸出 JSON。**
+
+**建立新 PRD（必須用這個！）：**
+```
+curl -X POST http://localhost:<PORT>/api/prd/<projectId> \
+  -H 'Content-Type: application/json' \
+  -d @<json-file>
+```
+
+JSON 結構：
+```json
+{
+  "title": "PRD 標題",
+  "goal": "一句話描述目標",
+  "priority": "p0",
+  "decisions": [{"question": "問題", "answer": "回答"}],
+  "approaches": [{"name": "方案", "pros": ["優點"], "cons": ["缺點"], "adopted": true}],
+  "scope": {"included": ["要做的"], "excluded": ["不做的"]},
+  "tasks": [{"title": "任務1"}, {"title": "任務2"}]
+}
+```
+
+注意：JSON 含中文時用檔案傳送（`-d @file.json`），不要用 heredoc 避免編碼問題。
+
+**列出所有 PRD：**
+```
+curl http://localhost:<PORT>/api/prd/<projectId>
+```
+
+**讀取單一 PRD：**
+```
+curl http://localhost:<PORT>/api/prd/<projectId>/<prdId>
+```
+
+**更新 task 狀態（實作過程中持續更新）：**
+```
+curl -X PATCH http://localhost:<PORT>/api/prd/<projectId>/<prdId>/tasks/<taskId> \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"done"}'
+```
+
+**新增 task：**
+```
+curl -X POST http://localhost:<PORT>/api/prd/<projectId>/<prdId>/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"..."}'
+```
+
+- `<PORT>` 是 daemon port（dev: 3457, release: 3456）
+- `<projectId>` 從 `GET /api/projects` 取得
+- 只讀取跟當前任務相關的 PRD

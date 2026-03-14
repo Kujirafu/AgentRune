@@ -12,6 +12,44 @@ import { log } from "../shared/logger.js"
 
 const BIN_DIR = join(homedir(), ".agentrune", "bin")
 
+// Rate limit tracking — shared across restart attempts
+let rateLimitedUntil = 0
+
+/**
+ * Check Cloudflare Quick Tunnel API for rate limiting.
+ * Returns seconds to wait (0 if not rate limited).
+ */
+export async function checkCloudflareRateLimit(): Promise<number> {
+  // If we already know we're rate limited, return remaining time
+  const now = Date.now()
+  if (rateLimitedUntil > now) {
+    return Math.ceil((rateLimitedUntil - now) / 1000)
+  }
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 5000)
+    const res = await fetch("https://api.trycloudflare.com/tunnel", {
+      method: "HEAD",
+      signal: controller.signal,
+    })
+    clearTimeout(timeout)
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("retry-after")
+      const seconds = retryAfter ? parseInt(retryAfter, 10) : 300
+      const wait = isNaN(seconds) ? 300 : seconds
+      rateLimitedUntil = Date.now() + wait * 1000
+      log.warn(`Cloudflare rate limited — Retry-After: ${wait}s`)
+      return wait
+    }
+    // Not rate limited — clear any stale state
+    rateLimitedUntil = 0
+    return 0
+  } catch {
+    // Can't reach API — don't block, let cloudflared try
+    return 0
+  }
+}
+
 function getCloudflaredInfo(): { url: string; binName: string } {
   const os = platform()
   const a = arch()
@@ -167,6 +205,13 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
     try { currentProc.kill() } catch {}
     for (let attempt = 1; attempt <= 3; attempt++) {
       if (stopped) return
+      // Check rate limit before each attempt
+      const waitSeconds = await checkCloudflareRateLimit()
+      if (waitSeconds > 0) {
+        log.dim(`Cloudflare rate limited, waiting ${waitSeconds}s before attempt ${attempt}...`)
+        await new Promise(r => setTimeout(r, waitSeconds * 1000))
+        if (stopped) return
+      }
       try {
         const result = await launchOnce(binPath!, localPort)
         handle.url = result.url
@@ -178,6 +223,11 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
         return
       } catch (err: any) {
         log.warn(`Tunnel restart attempt ${attempt}/3 failed: ${err.message}`)
+        // Parse cloudflared stderr for rate limit hints
+        const retryMatch = err.message?.match(/retry.after[:\s]*(\d+)/i)
+        if (retryMatch) {
+          rateLimitedUntil = Date.now() + parseInt(retryMatch[1], 10) * 1000
+        }
         if (attempt < 3) await new Promise(r => setTimeout(r, 10000))
       }
     }
@@ -198,6 +248,11 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
   // Health check function — verify tunnel URL is reachable
   const runHealthCheck = async () => {
     if (stopped || restarting || !handle.url) return
+    // Skip health check if rate limited — don't trigger restart that will also be blocked
+    if (rateLimitedUntil > Date.now()) {
+      log.dim(`Skipping health check — Cloudflare rate limited for ${Math.ceil((rateLimitedUntil - Date.now()) / 1000)}s`)
+      return
+    }
     try {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 10000)

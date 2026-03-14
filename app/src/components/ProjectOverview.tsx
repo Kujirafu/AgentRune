@@ -5,9 +5,69 @@ import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
 import { AutomationSheet } from "./AutomationSheet"
-import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS } from "../data/builtin-templates"
+import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS, SUBGROUP_LABELS } from "../data/builtin-templates"
+import { CHAIN_TEMPLATES, BUILTIN_CREWS } from "../data/builtin-crews"
 import type { AutomationTemplate } from "../data/automation-types"
+import type { ChainDepth } from "../lib/skillChains"
+import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
+import { ChainBuilder } from "./ChainBuilder"
+
+// --- Crew role icons (Lucide SVG, white on colored circle) ---
+const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
+const CREW_ROLE_ICONS: Record<string, React.ReactNode> = {
+  target: <svg {..._s}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>,
+  code: <svg {..._s}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>,
+  "shield-check": <svg {..._s}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>,
+  wrench: <svg {..._s}><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>,
+  megaphone: <svg {..._s}><path d="M3 11l18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 11-5.8-1.6"/></svg>,
+  "trending-up": <svg {..._s}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+  rocket: <svg {..._s}><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 00-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 012-3.95A12.88 12.88 0 0122 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 01-4 2z"/></svg>,
+  "shield-alert": <svg {..._s}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  bug: <svg {..._s}><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M2 10h4"/><path d="M18 10h4"/><path d="M2 14h4"/><path d="M18 14h4"/><path d="M6 6l-2-2"/><path d="M18 6l2-2"/></svg>,
+  brain: <svg {..._s}><path d="M9.5 2A2.5 2.5 0 0112 4.5v15a2.5 2.5 0 01-4.96.44A2.5 2.5 0 012 17.5v0A2.5 2.5 0 014.5 15 2.5 2.5 0 012 12.5v0A2.5 2.5 0 014.5 10a2.5 2.5 0 01-2-4A2.5 2.5 0 019.5 2z"/><path d="M14.5 2A2.5 2.5 0 0012 4.5v15a2.5 2.5 0 004.96.44A2.5 2.5 0 0022 17.5v0a2.5 2.5 0 00-2.5-2.5A2.5 2.5 0 0022 12.5v0a2.5 2.5 0 00-2.5-2.5 2.5 2.5 0 002-4A2.5 2.5 0 0014.5 2z"/></svg>,
+  search: <svg {..._s}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
+  "check-circle": <svg {..._s}><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+  lightbulb: <svg {..._s}><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z"/></svg>,
+  boxes: <svg {..._s}><path d="M2.97 12.92A2 2 0 002 14.63v3.24a2 2 0 001.02 1.75l3.5 1.99a2 2 0 001.96.01l3.5-1.97a2 2 0 001.02-1.75v-3.24a2 2 0 00-.97-1.71L7.58 11a2 2 0 00-2.05.01z"/></svg>,
+  "test-tubes": <svg {..._s}><path d="M9 2v17.5A2.5 2.5 0 0011.5 22v0a2.5 2.5 0 002.5-2.5V2"/><path d="M20 2v17.5a2.5 2.5 0 01-2.5 2.5v0a2.5 2.5 0 01-2.5-2.5V2"/></svg>,
+  "pen-tool": <svg {..._s}><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>,
+  "layout-list": <svg {..._s}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
+  "file-text": <svg {..._s}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>,
+  lock: <svg {..._s}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>,
+  scale: <svg {..._s}><line x1="12" y1="3" x2="12" y2="21"/><path d="M4 8l4 6H0L4 8z"/><path d="M20 8l4 6h-8l4-6z"/><line x1="4" y1="3" x2="20" y2="3"/></svg>,
+  "clipboard-list": <svg {..._s}><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>,
+}
+function getCrewRoleIcon(iconName: string) {
+  return CREW_ROLE_ICONS[iconName] || <svg {..._s}><circle cx="12" cy="12" r="10"/></svg>
+}
+
+const BUILTIN_TPL_ICON: Record<string, { icon: string; color: string }> = {
+  scan_commits: { icon: "search", color: "#37ACC0" },
+  release_notes: { icon: "clipboard-list", color: "#347792" },
+  standup: { icon: "lightbulb", color: "#f59e0b" },
+  pr_review: { icon: "search", color: "#347792" },
+  ci_failures: { icon: "wrench", color: "#f59e0b" },
+  test_coverage: { icon: "test-tubes", color: "#3b82f6" },
+  dep_check: { icon: "boxes", color: "#a78bfa" },
+  security_scan: { icon: "shield-check", color: "#ef4444" },
+  env_audit: { icon: "lock", color: "#ef4444" },
+  dead_code: { icon: "pen-tool", color: "#3b82f6" },
+  todo_sweep: { icon: "clipboard-list", color: "#f59e0b" },
+  type_safety: { icon: "lock", color: "#3b82f6" },
+  weekly_summary: { icon: "file-text", color: "#347792" },
+  changelog: { icon: "pen-tool", color: "#347792" },
+  api_docs: { icon: "code", color: "#37ACC0" },
+  onboarding_doc: { icon: "file-text", color: "#22c55e" },
+  perf_audit: { icon: "trending-up", color: "#a78bfa" },
+  bundle_size: { icon: "boxes", color: "#a78bfa" },
+  error_digest: { icon: "shield-alert", color: "#FB8184" },
+  db_migration: { icon: "boxes", color: "#FB8184" },
+  skill_suggest: { icon: "target", color: "#37ACC0" },
+  agentlore_sync: { icon: "brain", color: "#37ACC0" },
+  agentlore_skill_audit: { icon: "wrench", color: "#37ACC0" },
+  release_check: { icon: "check-circle", color: "#22c55e" },
+}
 
 const AGENTLORE_DEVICES_URL = "https://agentlore.vercel.app/api/agentrune/devices"
 
@@ -142,11 +202,41 @@ export function ProjectOverview({
   const { t, locale } = useLocale()
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
   const tplName = (tmpl: AutomationTemplate) => {
+    // Chain templates: id = "chain_{slug}", i18n = "chain.{slug}.name"
+    if (tmpl.id.startsWith("chain_")) {
+      const slug = tmpl.id.replace("chain_", "")
+      const ck = `chain.${slug}.name`
+      const ct = t(ck)
+      return ct !== ck ? ct : slug
+    }
+    // Crew templates: id = "crew_{key}", i18n = "crew.preset.{key}"
+    if (tmpl.category === "crew") {
+      const pk = tmpl.id.replace("crew_", "")
+      const ck = `crew.preset.${pk}`
+      const ct = t(ck)
+      return ct !== ck ? ct : tmpl.name
+    }
     const key = tmpl.id.replace("builtin_", "")
     const translated = t(`tpl.${key}`)
     return translated !== `tpl.${key}` ? translated : tmpl.name
   }
   const tplDesc = (tmpl: AutomationTemplate) => {
+    if (tmpl.id.startsWith("chain_")) {
+      const slug = tmpl.id.replace("chain_", "")
+      const ck = `chain.${slug}.desc`
+      const ct = t(ck)
+      if (ct !== ck) {
+        const tokens = tmpl.crew?.tokenBudget
+        return tokens ? `${ct} · ${tokens.toLocaleString()} tokens` : ct
+      }
+      return tmpl.description
+    }
+    if (tmpl.category === "crew") {
+      const pk = tmpl.id.replace("crew_", "")
+      const ck = `crew.preset.${pk}.desc`
+      const ct = t(ck)
+      return ct !== ck ? ct : tmpl.description
+    }
     const key = tmpl.id.replace("builtin_", "")
     const translated = t(`tpl.${key}.desc`)
     return translated !== `tpl.${key}.desc` ? translated : tmpl.description
@@ -157,6 +247,8 @@ export function ProjectOverview({
   const [expandedTemplateId, setExpandedTemplateId] = useState<string | null>(null)
   const [tplSearch, setTplSearch] = useState("")
   const [tplGroup, setTplGroup] = useState<string | null>(null)
+  const [chainDepths, setChainDepths] = useState<Record<string, ChainDepth>>({})
+  const [chainEditSlug, setChainEditSlug] = useState<string | null>(null)
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const longPressFired = useRef(false)
 
@@ -1219,14 +1311,15 @@ export function ProjectOverview({
                       color: tplGroup === g.key ? "#37ACC0" : "var(--text-secondary)",
                       fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                     }}>
-                      {t(`tplGroup.${g.key}`) !== `tplGroup.${g.key}` ? t(`tplGroup.${g.key}`) : g.label}
+                      {t(g.label)}
                     </button>
                   ))}
                 </div>
 
                 {/* Template list — filtered */}
                 {(() => {
-                  const filtered = BUILTIN_TEMPLATES.filter((tmpl) => {
+                  const allTemplates = [...BUILTIN_TEMPLATES, ...BUILTIN_CREWS, ...CHAIN_TEMPLATES]
+                  const filtered = allTemplates.filter((tmpl) => {
                     if (tplGroup && tmpl.group !== tplGroup) return false
                     if (tplSearch) {
                       const q = tplSearch.toLowerCase()
@@ -1240,13 +1333,20 @@ export function ProjectOverview({
                   const renderCard = (tmpl: AutomationTemplate) => {
                     const isPinned = pinnedTemplateIds.includes(tmpl.id)
                     const isExpanded = expandedTemplateId === tmpl.id
+                    const roles = tmpl.crew?.roles || []
+                    const isCrew = tmpl.category === "crew" && roles.length > 0
+                    const isChain = tmpl.id.startsWith("chain_")
+                    const chainSlug = isChain ? tmpl.id.replace("chain_", "") : roles[0]?.skillChainSlug
+                    const chain = chainSlug ? BUILTIN_CHAINS.find(c => c.slug === chainSlug) : null
+                    const depth = chainDepths[tmpl.id] || chain?.defaultDepth || "standard"
+
                     return (
                       <div key={tmpl.id}>
                         <button
                           onClick={() => setExpandedTemplateId(isExpanded ? null : tmpl.id)}
                           style={{
                             width: "100%", textAlign: "left",
-                            display: "flex", alignItems: "center", gap: 12,
+                            display: "flex", alignItems: "center", gap: 10,
                             padding: "12px 14px", borderRadius: isExpanded ? "14px 14px 0 0" : 14,
                             border: isPinned ? "1px solid rgba(55,172,192,0.25)" : "1px solid var(--glass-border)",
                             borderBottom: isExpanded ? "none" : undefined,
@@ -1255,10 +1355,65 @@ export function ProjectOverview({
                             cursor: "pointer",
                           }}
                         >
-                          <div style={{ fontSize: 22, flexShrink: 0, width: 36, textAlign: "center" }}>{tmpl.icon}</div>
+                          {/* Icon: role avatars for crew, chain icon for chains, emoji for builtin */}
+                          {isCrew && roles.length > 1 ? (
+                            <div style={{ display: "flex", flexShrink: 0 }}>
+                              {roles.slice(0, 3).map((r, i) => (
+                                <div key={r.id} style={{
+                                  width: 28, height: 28, borderRadius: "50%",
+                                  background: r.color, border: "2px solid var(--glass-bg)",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                  marginLeft: i === 0 ? 0 : -6, zIndex: 10 - i,
+                                }}>
+                                  {getCrewRoleIcon(r.icon)}
+                                </div>
+                              ))}
+                              {roles.length > 3 && (
+                                <div style={{
+                                  width: 28, height: 28, borderRadius: "50%",
+                                  background: "var(--text-secondary)", border: "2px solid var(--glass-bg)",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                  marginLeft: -6, color: "#fff", fontSize: 9, fontWeight: 700,
+                                }}>+{roles.length - 3}</div>
+                              )}
+                            </div>
+                          ) : isCrew ? (
+                            <div style={{
+                              width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+                              background: roles[0]?.color || "#37ACC0",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                            }}>
+                              {getCrewRoleIcon(roles[0]?.icon || "")}
+                            </div>
+                          ) : (() => {
+                            const bk = tmpl.id.replace("builtin_", "")
+                            const bi = BUILTIN_TPL_ICON[bk]
+                            const iconColor = bi?.color || "#37ACC0"
+                            return (
+                              <div style={{
+                                width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+                                background: iconColor,
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                              }}>
+                                {bi ? getCrewRoleIcon(bi.icon) : (
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
+                                    <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
+                                  </svg>
+                                )}
+                              </div>
+                            )
+                          })()}
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
-                            <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tplDesc(tmpl)}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {isCrew && roles.length > 1
+                                ? `${roles.length} ${t("fireCrew.roles")} · ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
+                                : chain
+                                  ? `${getStepCount(chain)} ${t("crew.chainSteps")} · ${estimateTokens(chain, depth).toLocaleString()} tokens`
+                                  : tplDesc(tmpl)
+                              }
+                            </div>
                           </div>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>
                             <polyline points="9 18 15 12 9 6" />
@@ -1272,19 +1427,189 @@ export function ProjectOverview({
                             background: "var(--glass-bg)",
                             backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
                           }}>
+                            {/* Description */}
                             <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5, marginBottom: 8 }}>
                               {tplDesc(tmpl)}
                             </div>
-                            <div style={{
-                              fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5,
-                              background: "var(--icon-bg)", padding: "8px 10px", borderRadius: 10,
-                              maxHeight: 120, overflowY: "auto", marginBottom: 10,
-                              whiteSpace: "pre-wrap", wordBreak: "break-word",
-                              fontFamily: "'JetBrains Mono', monospace", opacity: 0.8,
-                            }}>
-                              {tmpl.prompt}
-                            </div>
+
+                            {/* Chain: depth selector + step preview */}
+                            {chain && (
+                              <>
+                                {/* Depth selector */}
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                                  <span style={{ fontSize: 11, color: "var(--text-secondary)", fontWeight: 600 }}>{t("chain.depth") || "Depth"}:</span>
+                                  {(["lite", "standard", "deep"] as ChainDepth[]).map(d => (
+                                    <button key={d} onClick={() => setChainDepths(prev => ({ ...prev, [tmpl.id]: d }))} style={{
+                                      padding: "3px 10px", borderRadius: 12, border: "none", cursor: "pointer",
+                                      background: depth === d ? "rgba(55,172,192,0.2)" : "var(--icon-bg)",
+                                      color: depth === d ? "#37ACC0" : "var(--text-secondary)",
+                                      fontSize: 11, fontWeight: 600,
+                                    }}>
+                                      {t(`chain.depth.${d}`)}
+                                    </button>
+                                  ))}
+                                  <span style={{ fontSize: 10, color: "var(--text-secondary)", marginLeft: "auto" }}>
+                                    ~{estimateTokens(chain, depth).toLocaleString()} tokens
+                                  </span>
+                                </div>
+                                {/* Step flow — vertical timeline */}
+                                <div style={{ marginBottom: 8, paddingLeft: 4 }}>
+                                  {chain.steps.map((node, idx) => {
+                                    const isLast = idx === chain.steps.length - 1
+                                    if (isParallelGroup(node)) {
+                                      return (
+                                        <div key={node.id} style={{ display: "flex", gap: 0 }}>
+                                          <div style={{ width: 20, display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                                            <div style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--text-secondary)", opacity: 0.4 }} />
+                                            {!isLast && <div style={{ width: 1.5, flex: 1, background: "rgba(55,172,192,0.15)" }} />}
+                                          </div>
+                                          <div style={{ flex: 1, paddingBottom: isLast ? 0 : 6, marginTop: -2 }}>
+                                            <div style={{ fontSize: 11, color: "var(--text-primary)", fontWeight: 500, lineHeight: 1.2 }}>
+                                              {node.branches.map((b, i) => (
+                                                <span key={b.id}>
+                                                  {resolveChainText(b.labelKey, t)}
+                                                  {i < node.branches.length - 1 && <span style={{ color: "var(--text-secondary)", opacity: 0.5, margin: "0 4px" }}>/</span>}
+                                                </span>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )
+                                    }
+                                    return (
+                                      <div key={node.id} style={{ display: "flex", gap: 0 }}>
+                                        <div style={{ width: 20, display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                                          <div style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--text-secondary)", opacity: 0.4 }} />
+                                          {!isLast && <div style={{ width: 1.5, flex: 1, background: "rgba(55,172,192,0.15)" }} />}
+                                        </div>
+                                        <div style={{ fontSize: 11, color: "var(--text-primary)", fontWeight: 500, paddingBottom: isLast ? 0 : 6, lineHeight: 1.2, marginTop: -2 }}>
+                                          {resolveChainText(node.labelKey, t)}
+                                        </div>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                                {/* Edit chain button */}
+                                <button onClick={() => setChainEditSlug(chainSlug!)} style={{
+                                  padding: "5px 12px", borderRadius: 8, marginBottom: 8,
+                                  border: "1px solid var(--glass-border)", background: "rgba(55,172,192,0.08)",
+                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  display: "flex", alignItems: "center", gap: 4,
+                                }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                                  {t("crew.editChain")}
+                                </button>
+                              </>
+                            )}
+
+                            {/* Crew: role list */}
+                            {isCrew && roles.length > 1 && (
+                              <div style={{ marginBottom: 8 }}>
+                                {roles.map(r => (
+                                  <div key={r.id} style={{
+                                    display: "flex", alignItems: "center", gap: 8, padding: "6px 0",
+                                    borderBottom: "1px solid var(--glass-border)",
+                                  }}>
+                                    <div style={{
+                                      width: 24, height: 24, borderRadius: "50%", flexShrink: 0,
+                                      background: r.color, display: "flex", alignItems: "center", justifyContent: "center",
+                                    }}>
+                                      {getCrewRoleIcon(r.icon)}
+                                    </div>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)" }}>
+                                        {t(r.nameKey) !== r.nameKey ? t(r.nameKey) : r.nameKey}
+                                      </div>
+                                      <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                                        {t("crew.phase").replace("{n}", String(r.phase))} · {(r.estimatedTokens || 0).toLocaleString()} tokens
+                                        {r.skillChainSlug && ` · ${r.skillChainSlug}`}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Builtin: prompt preview */}
+                            {!isCrew && !chain && tmpl.prompt && (
+                              <div style={{
+                                fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5,
+                                background: "var(--icon-bg)", padding: "8px 10px", borderRadius: 10,
+                                maxHeight: 120, overflowY: "auto", marginBottom: 10,
+                                whiteSpace: "pre-wrap", wordBreak: "break-word",
+                                fontFamily: "'JetBrains Mono', monospace", opacity: 0.8,
+                              }}>
+                                {tmpl.prompt}
+                              </div>
+                            )}
+
+                            {/* Action buttons */}
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {/* Run Now — launch session or fire crew */}
+                              {isCrew ? (
+                                <button onClick={async () => {
+                                  const crew = tmpl.crew!
+                                  const svr = localStorage.getItem("agentrune_server") || ""
+                                  try {
+                                    await fetch(`${svr}/api/automations/${selectedProjectForSessions}/fire`, {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ crew, name: tplName(tmpl) }),
+                                    })
+                                  } catch { /* ignore */ }
+                                  setExpandedTemplateId(null)
+                                }} style={{
+                                  padding: "6px 12px", borderRadius: 8,
+                                  border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
+                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  display: "flex", alignItems: "center", gap: 4,
+                                }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                                  {t("automation.runNow")}
+                                </button>
+                              ) : tmpl.prompt ? (
+                                <button onClick={() => {
+                                  localStorage.setItem("agentrune_session_prefill", tmpl.prompt)
+                                  setExpandedTemplateId(null)
+                                  onLaunch(selectedProjectForSessions || selectedProject || "", "claude")
+                                }} style={{
+                                  padding: "6px 12px", borderRadius: 8,
+                                  border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
+                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  display: "flex", alignItems: "center", gap: 4,
+                                }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                                  {t("automation.runNow")}
+                                </button>
+                              ) : null}
+                              {/* Edit — crew or pure prompt templates */}
+                              {(isCrew || tmpl.prompt) && (
+                                <button onClick={() => {
+                                  setExpandedTemplateId(null)
+                                  setAutomationProjectId(selectedProjectForSessions)
+                                  const editData: any = {
+                                    id: "__new__",
+                                    name: tplName(tmpl),
+                                    prompt: tmpl.prompt || "",
+                                    templateId: tmpl.id,
+                                    schedule: { type: "daily", timeOfDay: "03:00" },
+                                  }
+                                  if (isCrew && tmpl.crew) {
+                                    editData.crew = JSON.parse(JSON.stringify(tmpl.crew))
+                                  }
+                                  setEditingAutomation(editData)
+                                  setShowAutomation(true)
+                                }} style={{
+                                  padding: "6px 12px", borderRadius: 8,
+                                  border: "1px solid var(--glass-border)", background: "transparent",
+                                  color: "var(--text-secondary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  display: "flex", alignItems: "center", gap: 4,
+                                }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                                  {t("templates.edit")}
+                                </button>
+                              )}
+                              {/* Schedule */}
                               <button onClick={() => {
                                 setExpandedTemplateId(null)
                                 setAutomationProjectId(selectedProjectForSessions)
@@ -1298,19 +1623,7 @@ export function ProjectOverview({
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
                                 {t("templates.newSchedule") || "New Schedule"}
                               </button>
-                              <button onClick={() => {
-                                setExpandedTemplateId(null)
-                                setSheetProjectId(selectedProjectForSessions)
-                                setShowNewSheet(true)
-                              }} style={{
-                                padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid var(--glass-border)", background: "rgba(55,172,192,0.1)",
-                                color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-                                {t("templates.newSession") || "New Session"}
-                              </button>
+                              {/* Pin */}
                               <button onClick={() => {
                                 const next = isPinned ? pinnedTemplateIds.filter((id) => id !== tmpl.id) : [...pinnedTemplateIds, tmpl.id]
                                 setPinnedTemplateIds(next)
@@ -1338,18 +1651,41 @@ export function ProjectOverview({
                     return filtered.map(renderCard)
                   }
 
-                  // Grouped display
+                  // Grouped display with subgroup headers
                   return TEMPLATE_GROUPS.map((g) => {
                     const items = filtered.filter((tmpl) => tmpl.group === g.key)
                     if (items.length === 0) return null
+                    // Collect unique subgroups in order
+                    const subgroups: string[] = []
+                    items.forEach(tmpl => {
+                      if (tmpl.subgroup && !subgroups.includes(tmpl.subgroup)) subgroups.push(tmpl.subgroup)
+                    })
                     return (
-                      <div key={g.key} style={{ marginBottom: 4 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1, opacity: 0.7 }}>
-                          {t(`tplGroup.${g.key}`) !== `tplGroup.${g.key}` ? t(`tplGroup.${g.key}`) : g.label}
+                      <div key={g.key} style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0", marginBottom: 8, letterSpacing: 0.5 }}>
+                          {t(g.label)}
                         </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          {items.map(renderCard)}
-                        </div>
+                        {subgroups.length > 1 ? subgroups.map(sg => {
+                          const sgItems = items.filter(tmpl => tmpl.subgroup === sg)
+                          if (sgItems.length === 0) return null
+                          const sgLabel = SUBGROUP_LABELS[sg]
+                          return (
+                            <div key={sg} style={{ marginBottom: 8 }}>
+                              {sgLabel && (
+                                <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4, marginLeft: 2, opacity: 0.7 }}>
+                                  {t(sgLabel)}
+                                </div>
+                              )}
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {sgItems.map(renderCard)}
+                              </div>
+                            </div>
+                          )
+                        }) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            {items.map(renderCard)}
+                          </div>
+                        )}
                       </div>
                     )
                   })
@@ -2375,7 +2711,24 @@ export function ProjectOverview({
         serverUrl={localStorage.getItem("agentrune_server") || ""}
         onClose={() => { setShowAutomation(false); setEditingAutomation(null) }}
         initialEdit={editingAutomation}
+        onLaunchSession={() => {
+          setShowAutomation(false)
+          setEditingAutomation(null)
+          onLaunch(automationProjectId || selectedProject || "", "claude")
+        }}
       />
+
+      {/* ChainBuilder overlay from templates tab */}
+      {chainEditSlug && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 500, background: "var(--bg-primary)", overflow: "auto" }}>
+          <ChainBuilder
+            initialSlug={chainEditSlug}
+            onChainSelect={(slug) => setChainEditSlug(slug)}
+            onBack={() => setChainEditSlug(null)}
+            t={t}
+          />
+        </div>
+      )}
 
       {/* Voice Overlay — single container, stopPropagation on interactive content */}
       {voiceSessionId && voicePhase && (

@@ -10,6 +10,10 @@ import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 interface ChainBuilderProps {
   onBack: () => void
   t: (key: string) => string
+  /** Pre-select a chain by slug and go directly to editor (for crew role integration) */
+  initialSlug?: string
+  /** Called when user saves/selects a chain in embedded mode */
+  onChainSelect?: (slug: string) => void
 }
 
 interface ChainDraft {
@@ -292,13 +296,23 @@ function SwipeableChainCard({ chain, t, onEdit, onDelete }: {
 
 // ─── Component ──────────────────────────────────────────────────
 
-export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
+export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: ChainBuilderProps) {
   const { t: tLocale } = useLocale()
   const t = tProp || tLocale
 
-  const [view, setView] = useState<"list" | "editor" | "executing">("list")
-  const [draft, setDraft] = useState<ChainDraft>({
-    name: "", description: "", slug: "", steps: [],
+  const [view, setView] = useState<"list" | "editor" | "executing">(initialSlug ? "editor" : "list")
+  const [draft, setDraft] = useState<ChainDraft>(() => {
+    if (initialSlug) {
+      const chain = BUILTIN_CHAINS.find(c => c.slug === initialSlug)
+      if (chain) return {
+        name: resolveChainText(chain.nameKey, tProp || tLocale),
+        description: resolveChainText(chain.descKey, tProp || tLocale),
+        slug: chain.slug,
+        steps: JSON.parse(JSON.stringify(chain.steps)),
+        forkedFromSlug: chain.slug,
+      }
+    }
+    return { name: "", description: "", slug: "", steps: [] }
   })
   const [showPalette, setShowPalette] = useState(false)
   const [insertIndex, setInsertIndex] = useState(-1)
@@ -376,9 +390,11 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
         if (dirty) {
           setConfirmDialog({
             title: t("builder.unsavedConfirm"),
-            onConfirm: () => { setDirty(false); setView("list") },
+            onConfirm: () => { setDirty(false); initialSlug ? onBack() : setView("list") },
           })
         } else {
+          // Embedded mode (initialSlug): return to caller, not chain list
+          if (initialSlug) { onBack(); return }
           setView("list")
         }
         return
@@ -1630,15 +1646,12 @@ export function ChainBuilder({ onBack, t: tProp }: ChainBuilderProps) {
         flexShrink: 0,
       }}>
         <button onClick={() => {
+          const goBack = () => { setDirty(false); initialSlug ? onBack() : setView("list") }
           if (dirty) {
-            setConfirmDialog({
-              title: t("builder.unsavedConfirm"),
-              onConfirm: () => { setDirty(false); setView("list") },
-            })
+            setConfirmDialog({ title: t("builder.unsavedConfirm"), onConfirm: goBack })
             return
           }
-          setDirty(false)
-          setView("list")
+          goBack()
         }} style={{
           background: "none", border: "none", color: "var(--text-primary)",
           padding: 4, cursor: "pointer", display: "flex", alignItems: "center",

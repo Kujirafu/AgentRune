@@ -18,7 +18,7 @@ interface EventCardProps {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  waiting: "rgba(250,204,21,0.6)",   // yellow
+  waiting: "rgba(55,172,192,0.6)",    // teal (#37ACC0)
   in_progress: "rgba(96,165,250,0.6)", // blue
   completed: "rgba(74,222,128,0.6)",   // green
   failed: "rgba(248,113,113,0.6)",     // red
@@ -247,9 +247,9 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
             padding: "6px 12px",
             borderRadius: 12,
             background: "rgba(59,130,246,0.08)",
-            borderRight: "3px solid rgba(59,130,246,0.5)",
+            borderLeft: "3px solid rgba(59,130,246,0.5)",
             animation: "fadeSlideUp 0.3s ease-out",
-            textAlign: "right",
+            textAlign: "left",
             display: "flex",
             flexDirection: "column",
             gap: 4,
@@ -259,7 +259,7 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
           }}
         >
           {Array.isArray(event._images) && event._images.length > 0 ? (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", marginBottom: 4 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-start", marginBottom: 4 }}>
               {event._images.map((img, i) => (
                 <img
                   key={i}
@@ -271,7 +271,7 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
               ))}
             </div>
           ) : userImgUrl ? (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+            <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 4 }}>
               <img
                 src={userImgUrl}
                 alt="uploaded"
@@ -280,7 +280,7 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
               />
             </div>
           ) : null}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", gap: 8 }}>
             <span style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, flexShrink: 0 }}>
               {new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </span>

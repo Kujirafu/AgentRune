@@ -152,6 +152,34 @@ function getLocalIp(): string {
   return nets[0]?.address ?? "127.0.0.1"
 }
 
+// --- Server-side i18n for crash/restart events ---
+const crashI18n: Record<string, Record<string, string>> = {
+  "crash.title": { "en": "Agent is not running", "zh-TW": "Agent 未在執行" },
+  "crash.detail": { "en": "The agent has exited. Restart it or close this session.", "zh-TW": "Agent 已結束。重新啟動或關閉此工作階段。" },
+  "crash.exited": { "en": "{agent} has exited", "zh-TW": "{agent} 已結束" },
+  "crash.exitedDetail": { "en": "Agent process is no longer running. Your messages will go to the shell instead of the agent.", "zh-TW": "Agent 已停止執行，你的訊息會送到 shell 而不是 Agent。" },
+  "crash.restartClaude": { "en": "Restart Claude", "zh-TW": "重啟 Claude" },
+  "crash.restartCodex": { "en": "Restart Codex", "zh-TW": "重啟 Codex" },
+  "crash.restartGemini": { "en": "Restart Gemini", "zh-TW": "重啟 Gemini" },
+  "crash.restartAider": { "en": "Restart Aider", "zh-TW": "重啟 Aider" },
+  "crash.restartCursor": { "en": "Restart Cursor", "zh-TW": "重啟 Cursor" },
+  "crash.closeSession": { "en": "Close session", "zh-TW": "關閉工作階段" },
+  "crash.ignore": { "en": "Ignore (send to shell)", "zh-TW": "忽略（送到 shell）" },
+  "crash.restarting": { "en": "Restarting {agent}...", "zh-TW": "正在重啟 {agent}⋯" },
+  "crash.autoResuming": { "en": "Auto-resuming {agent}...", "zh-TW": "正在自動恢復 {agent}⋯" },
+}
+function ct(key: string, locale?: string, vars?: Record<string, string>): string {
+  const entry = crashI18n[key]
+  if (!entry) return key
+  let text = entry[locale || "en"] || entry["en"] || key
+  if (vars) for (const [k, v] of Object.entries(vars)) text = text.replace(`{${k}}`, v)
+  return text
+}
+// Get locale for a session from its stored launch settings
+function getSessionLocale(sessionId: string, launchSettings: Map<string, { agentId: string; settings: Record<string, unknown>; projectId: string }>): string {
+  return (launchSettings.get(sessionId)?.settings?.locale as string) || "en"
+}
+
 // --- Agent command builder ---
 
 function buildAgentProtocol(locale?: string, projectId?: string, localPort: number = 3457): string {
@@ -853,7 +881,7 @@ export function createServer(portOverride?: number) {
   log.info(`[Startup] Found ${cachedRecoverable.length} recoverable sessions`)
   const cfg = loadConfig()
   const automationManager = new AutomationManager(sessions, projects, (event) => {
-    // Broadcast automation_completed to all connected WS clients
+    // Broadcast automation events to all connected WS clients
     const payload = JSON.stringify(event)
     for (const ws of wss.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload)
@@ -2996,6 +3024,22 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  // Fire-and-forget: create temp automation and execute immediately (no scheduling)
+  app.post("/api/automations/:projectId/fire", express.json(), async (req, res) => {
+    try {
+      const { crew, sessionContext, name } = req.body
+      if (!crew || !crew.roles || !Array.isArray(crew.roles)) {
+        return res.status(400).json({ error: "crew config with roles is required" })
+      }
+      const projectId = req.params.projectId
+      const autoName = name || `fire_${Date.now()}`
+      const autoId = await automationManager.fireAndForget(projectId, autoName, crew, sessionContext)
+      res.json({ ok: true, automationId: autoId })
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Fire failed" })
+    }
+  })
+
   app.post("/api/automations/:projectId/:id/approve-merge", (req, res) => {
     try {
       const result = automationManager.approveWorktreeMerge(req.params.id)
@@ -3095,11 +3139,19 @@ export function createServer(portOverride?: number) {
   const resumeDecisionDone = new Set<string>() // Sessions where user already chose a resume option
 
   // --- Agent crash detection ---
+  // Track last JSONL activity per session — if agent wrote to JSONL recently, it's alive
+  const lastJsonlActivity = new Map<string, number>()
+  // Track pending tool execution — if agent has a command_run in_progress, shell prompts are expected
+  const pendingToolUse = new Map<string, number>()
   // Tracks sessions where the agent process exited back to shell prompt.
   // Key = sessionId, Value = { detectedAt, agentId, notified }
   const crashedSessions = new Map<string, { detectedAt: number; agentId: string; notified: boolean }>()
   // Pending crash detection (debounce — first shell prompt sighting, needs confirmation)
   const crashPending = new Map<string, number>()
+  // Grace period after restart — suppress crash detection while agent boots
+  const restartGrace = new Map<string, number>()
+  // Track restart attempts — if agent exits again after restart, don't re-trigger crash loop
+  const crashRestartCount = new Map<string, number>()
   // Store launch settings per session so we can restart with the same config
   const sessionLaunchSettings = new Map<string, { agentId: string; settings: Record<string, unknown>; projectId: string }>()
 
@@ -3250,6 +3302,28 @@ export function createServer(portOverride?: number) {
             if (filtered.length === 0) return
 
             log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
+            // Mark agent as alive
+            lastJsonlActivity.set(sid, Date.now())
+            // Track pending commands — if a command_run is in_progress, agent is running a tool
+            for (const e of filtered) {
+              if (e.type === "command_run" && e.status === "in_progress") {
+                pendingToolUse.set(sid, Date.now())
+              } else if (e.type === "command_run" && (e.status === "completed" || e.status === "failed")) {
+                pendingToolUse.delete(sid)
+              } else if (e.type !== "command_run") {
+                // Any non-command event means agent is processing (response, file_edit, etc.)
+                pendingToolUse.delete(sid)
+              }
+            }
+            // Agent is alive — clear all crash state
+            if (crashedSessions.has(sid)) {
+              log.info(`[watcher-cb] Agent alive — clearing crash state for ${sid.slice(0, 8)}`)
+              crashedSessions.delete(sid)
+            }
+            crashPending.delete(sid)
+            crashRestartCount.delete(sid)
+            // Keep restartGrace active (will expire naturally)
+
             const list = sessionRecentEvents.get(sid)
             if (list) {
               list.push(...filtered)
@@ -3440,6 +3514,9 @@ export function createServer(portOverride?: number) {
               log.warn(`[attach] Resume cooldown: skipped ${session.id} (${Math.round((RESUME_COOLDOWN_MS - (now - lastResumeTime)) / 1000)}s remaining)`)
             } else {
               lastResumeTime = now
+              // Suppress crash detection while agent boots after resume
+              restartGrace.set(session.id, now)
+              crashPending.delete(session.id)
               const claudeId = (msg.claudeSessionId as string) || sessionClaudeMap.get(requestedSessionId)?.claudeSessionId
               if (agentId === "claude") {
                 const appSettings = msg.settings as Record<string, unknown> | undefined
@@ -3462,6 +3539,58 @@ export function createServer(portOverride?: number) {
                     }
                   }, 1500)
               }
+            }
+          }
+
+          // Auto-restart agent when re-attaching to a crashed session.
+          // Only attempt once per session — if restartGrace is already set, we already tried.
+          if (alreadyExisted && crashedSessions.has(session.id) && agentId !== "terminal" && !restartGrace.has(session.id)) {
+            const now = Date.now()
+            const RESUME_COOLDOWN_MS = 5_000
+            if (now - lastResumeTime >= RESUME_COOLDOWN_MS) {
+              lastResumeTime = now
+              crashedSessions.delete(session.id)
+              crashPending.delete(session.id)
+              restartGrace.set(session.id, now)
+              crashRestartCount.set(session.id, (crashRestartCount.get(session.id) || 0) + 1)
+              const launchInfo = sessionLaunchSettings.get(session.id)
+              const restartAgentId = launchInfo?.agentId || agentId || "claude"
+              const settings = launchInfo?.settings || (msg.settings as Record<string, unknown>) || {}
+              const projectId = launchInfo?.projectId || sessionProject.id
+
+              let cmd: string | null = null
+              if (restartAgentId === "claude") {
+                const claudeId = sessionClaudeMap.get(session.id)?.claudeSessionId
+                const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
+                const s = settings
+                cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
+                if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
+                if (s.bypass) cmd += " --dangerously-skip-permissions"
+                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, PORT).replace(/"/g, '\\"')}"`
+              } else {
+                cmd = buildAgentCommand(restartAgentId, settings, projectId, PORT)
+              }
+              if (cmd) {
+                setTimeout(() => {
+                  try {
+                    sessions.write(session.id, `${cmd}\r`)
+                    log.info(`[CRASH-AUTO-RESUME] Auto-restarting ${restartAgentId} in session ${session.id.slice(0, 8)}: ${cmd}`)
+                  } catch (err: any) {
+                    log.error(`[CRASH-AUTO-RESUME] PTY write failed: ${err.message}`)
+                  }
+                }, 1500)
+                const autoLoc = getSessionLocale(session.id, sessionLaunchSettings)
+                const restartEvent: AgentEvent = {
+                  id: `auto_restart_${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: "info",
+                  status: "in_progress",
+                  title: ct("crash.autoResuming", autoLoc, { agent: restartAgentId }),
+                }
+                ws.send(JSON.stringify({ type: "event", event: restartEvent }))
+              }
+            } else {
+              log.warn(`[CRASH-AUTO-RESUME] Cooldown: skipped ${session.id.slice(0, 8)}`)
             }
           }
 
@@ -3638,6 +3767,9 @@ export function createServer(portOverride?: number) {
               const crashInfo = crashedSessions.get(sessionId)
               if (crashInfo) {
                 crashedSessions.delete(sessionId)
+                crashPending.delete(sessionId)
+                restartGrace.set(sessionId, Date.now())
+                crashRestartCount.set(sessionId, (crashRestartCount.get(sessionId) || 0) + 1)
                 // Parse agentId from suffix: __restart_agent__claude → "claude"
                 const restartAgentId = inputStr.replace("__restart_agent__", "").trim() || null
                 const launchInfo = sessionLaunchSettings.get(sessionId)
@@ -3667,12 +3799,13 @@ export function createServer(portOverride?: number) {
                   if (launchInfo) {
                     sessionLaunchSettings.set(sessionId, { ...launchInfo, agentId })
                   }
+                  const restartLoc = getSessionLocale(sessionId, sessionLaunchSettings)
                   const restartEvent: AgentEvent = {
                     id: `restart_${Date.now()}`,
                     timestamp: Date.now(),
                     type: "info",
                     status: "in_progress",
-                    title: `Restarting ${agentId}...`,
+                    title: ct("crash.restarting", restartLoc, { agent: agentId }),
                   }
                   ws.send(JSON.stringify({ type: "event", event: restartEvent }))
                 } else {
@@ -3694,27 +3827,33 @@ export function createServer(portOverride?: number) {
 
             // ─── Agent crash: block normal input if agent is dead ───
             if (crashedSessions.has(sessionId)) {
+              const crashInfo = crashedSessions.get(sessionId)!
               log.warn(`[CRASH-BLOCK] Blocking input to crashed session ${sessionId.slice(0, 8)} — agent not running`)
-              const blockEvent: AgentEvent = {
-                id: `crash_block_${Date.now()}`,
-                timestamp: Date.now(),
-                type: "decision_request",
-                status: "waiting",
-                title: "Agent is not running",
-                detail: "The agent has exited. Restart it or close this session.",
-                decision: {
-                  options: [
-                    { label: "Restart Claude",  input: "__restart_agent__claude",  style: "primary" as const },
-                    { label: "Restart Codex",   input: "__restart_agent__codex",   style: "default" as const },
-                    { label: "Restart Gemini",  input: "__restart_agent__gemini",  style: "default" as const },
-                    { label: "Restart Aider",   input: "__restart_agent__aider",   style: "default" as const },
-                    { label: "Restart Cursor",  input: "__restart_agent__cursor",  style: "default" as const },
-                    { label: "Close session",   input: "__close_session__",        style: "danger" as const },
-                    { label: "Ignore (send to shell)", input: "__dismiss_crash__", style: "default" as const },
-                  ],
-                },
+              // Only send crash notification once — don't spam on every keystroke
+              if (!crashInfo.notified) {
+                crashInfo.notified = true
+                const loc = getSessionLocale(sessionId, sessionLaunchSettings)
+                const blockEvent: AgentEvent = {
+                  id: `crash_block_${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: "decision_request",
+                  status: "waiting",
+                  title: ct("crash.title", loc),
+                  detail: ct("crash.detail", loc),
+                  decision: {
+                    options: [
+                      { label: ct("crash.restartClaude", loc),  input: "__restart_agent__claude",  style: "primary" as const },
+                      { label: ct("crash.restartCodex", loc),   input: "__restart_agent__codex",   style: "default" as const },
+                      { label: ct("crash.restartGemini", loc),  input: "__restart_agent__gemini",  style: "default" as const },
+                      { label: ct("crash.restartAider", loc),   input: "__restart_agent__aider",   style: "default" as const },
+                      { label: ct("crash.restartCursor", loc),  input: "__restart_agent__cursor",  style: "default" as const },
+                      { label: ct("crash.closeSession", loc),   input: "__close_session__",        style: "danger" as const },
+                      { label: ct("crash.ignore", loc),         input: "__dismiss_crash__",        style: "default" as const },
+                    ],
+                  },
+                }
+                ws.send(JSON.stringify({ type: "event", event: blockEvent }))
               }
-              ws.send(JSON.stringify({ type: "event", event: blockEvent }))
               break
             }
 
@@ -4496,7 +4635,19 @@ export function createServer(portOverride?: number) {
     {
       const currentSession = sessions.get(sessionId)
       const sessionAgentId = currentSession?.agentId
-      if (sessionAgentId && sessionAgentId !== "terminal" && !crashedSessions.has(sessionId)) {
+      // Skip crash detection during restart grace period (30s after agent restart/resume)
+      const graceStart = restartGrace.get(sessionId)
+      const inGracePeriod = graceStart && (Date.now() - graceStart) < 30_000
+      if (graceStart && !inGracePeriod) restartGrace.delete(sessionId) // cleanup expired
+      // Skip crash detection if:
+      // 1. JSONL had activity in the last 10s (agent is actively processing)
+      // 2. A command_run is in progress (agent ran a tool, shell prompts are expected)
+      const lastActivity = lastJsonlActivity.get(sessionId)
+      const jsonlJustActive = lastActivity && (Date.now() - lastActivity) < 10_000
+      const toolStart = pendingToolUse.get(sessionId)
+      const toolInProgress = toolStart && (Date.now() - toolStart) < 600_000 // expire after 10min
+      if (toolStart && !toolInProgress) pendingToolUse.delete(sessionId)
+      if (sessionAgentId && sessionAgentId !== "terminal" && !crashedSessions.has(sessionId) && !inGracePeriod && !jsonlJustActive && !toolInProgress) {
         const stripped = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
         // Check for shell prompt patterns — only match the last non-empty line to avoid false positives
         const lastLine = stripped.split("\n").filter(Boolean).pop()?.trim() || ""
@@ -4515,33 +4666,41 @@ export function createServer(portOverride?: number) {
           // But if we see a shell error (CommandNotFoundException), trigger immediately
           const pendingTime = crashPending.get(sessionId)
           if (hasShellError || (pendingTime && Date.now() - pendingTime < 3000)) {
-            crashedSessions.set(sessionId, { detectedAt: Date.now(), agentId: sessionAgentId, notified: false })
+            const restartAttempts = crashRestartCount.get(sessionId) || 0
+            // If we already restarted and agent exited again, mark silently (no notification loop)
+            const alreadyRestarted = restartAttempts > 0
+            crashedSessions.set(sessionId, { detectedAt: Date.now(), agentId: sessionAgentId, notified: alreadyRestarted })
             crashPending.delete(sessionId)
-            log.warn(`[CRASH-DETECT] Agent "${sessionAgentId}" exited in session ${sessionId.slice(0, 8)}`)
-
+            log.warn(`[CRASH-DETECT] Agent "${sessionAgentId}" exited in session ${sessionId.slice(0, 8)}${alreadyRestarted ? " (post-restart, silent)" : ""}`)
+            if (alreadyRestarted) {
+              // Don't spam notifications — agent exits after resume are expected
+              // (e.g., Claude resumed a completed conversation and exited normally)
+            } else {
             // Emit crash event to clients
             const agentLabel = sessionAgentId.charAt(0).toUpperCase() + sessionAgentId.slice(1)
+            const loc = getSessionLocale(sessionId, sessionLaunchSettings)
             const crashEvent: AgentEvent = {
               id: `crash_${sessionId}_${Date.now()}`,
               timestamp: Date.now(),
               type: "decision_request",
               status: "waiting",
-              title: `${agentLabel} has exited`,
-              detail: `Agent process is no longer running. Your messages will go to the shell instead of the agent.`,
+              title: ct("crash.exited", loc, { agent: agentLabel }),
+              detail: ct("crash.exitedDetail", loc),
               decision: {
                 options: [
-                  { label: "Restart Claude",  input: "__restart_agent__claude",  style: "primary" as const },
-                  { label: "Restart Codex",   input: "__restart_agent__codex",   style: "default" as const },
-                  { label: "Restart Gemini",  input: "__restart_agent__gemini",  style: "default" as const },
-                  { label: "Restart Aider",   input: "__restart_agent__aider",   style: "default" as const },
-                  { label: "Restart Cursor",  input: "__restart_agent__cursor",  style: "default" as const },
-                  { label: "Close session",   input: "__close_session__",        style: "danger" as const },
-                  { label: "Ignore",          input: "__dismiss_crash__",        style: "default" as const },
+                  { label: ct("crash.restartClaude", loc),  input: "__restart_agent__claude",  style: "primary" as const },
+                  { label: ct("crash.restartCodex", loc),   input: "__restart_agent__codex",   style: "default" as const },
+                  { label: ct("crash.restartGemini", loc),  input: "__restart_agent__gemini",  style: "default" as const },
+                  { label: ct("crash.restartAider", loc),   input: "__restart_agent__aider",   style: "default" as const },
+                  { label: ct("crash.restartCursor", loc),  input: "__restart_agent__cursor",  style: "default" as const },
+                  { label: ct("crash.closeSession", loc),   input: "__close_session__",        style: "danger" as const },
+                  { label: ct("crash.ignore", loc),         input: "__dismiss_crash__",        style: "default" as const },
                 ],
               },
             }
             events.push(crashEvent)
             crashedSessions.get(sessionId)!.notified = true
+            } // end else (first crash, not post-restart)
           } else if (!pendingTime) {
             // First detection — start debounce
             crashPending.set(sessionId, Date.now())
@@ -4618,6 +4777,10 @@ export function createServer(portOverride?: number) {
     authDedup.delete(sessionId)
     crashedSessions.delete(sessionId)
     crashPending.delete(sessionId)
+    restartGrace.delete(sessionId)
+    crashRestartCount.delete(sessionId)
+    lastJsonlActivity.delete(sessionId)
+    pendingToolUse.delete(sessionId)
     sessionLaunchSettings.delete(sessionId)
 
     // Mark session as closed (persisted to disk) so it won't appear as recoverable.
@@ -4669,11 +4832,23 @@ export function createServer(portOverride?: number) {
       server.on("close", () => tunnel.stop())
     } catch (err: any) {
       log.warn(`Tunnel failed (LAN-only mode): ${err.message}`)
-      // Retry tunnel with long backoff to avoid extending Cloudflare rate limit ban
-      const retryTunnel = async (delay: number, attempt: number) => {
+      // Retry tunnel — check Cloudflare rate limit before each attempt
+      const retryTunnel = async (attempt: number) => {
         if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only`); return }
+        // Check Cloudflare rate limit first
+        const { checkCloudflareRateLimit } = await import("./tunnel.js")
+        const waitSeconds = await checkCloudflareRateLimit()
+        const delay = waitSeconds > 0 ? waitSeconds : 120  // Use Retry-After or default 2min
+        log.dim(`Tunnel retry ${attempt} in ${delay}s${waitSeconds > 0 ? " (from Retry-After)" : ""}...`)
         setTimeout(async () => {
           try {
+            // Re-check rate limit right before attempt
+            const preWait = await checkCloudflareRateLimit()
+            if (preWait > 0) {
+              log.dim(`Still rate limited, retrying in ${preWait}s...`)
+              retryTunnel(attempt)  // Same attempt number, don't count this
+              return
+            }
             const { startTunnel } = await import("./tunnel.js")
             const tunnel = await startTunnel(PORT)
             tunnelState.url = tunnel.url
@@ -4692,12 +4867,12 @@ export function createServer(portOverride?: number) {
             }
             server.on("close", () => tunnel.stop())
           } catch {
-            log.dim(`Tunnel retry ${attempt} failed, next in ${delay * 2}s...`)
-            retryTunnel(delay * 2, attempt + 1)
+            log.dim(`Tunnel retry ${attempt} failed`)
+            retryTunnel(attempt + 1)
           }
         }, delay * 1000)
       }
-      retryTunnel(300, 1)  // Start at 5 min, then 10 min, then 20 min
+      retryTunnel(1)
     }
 
     // AgentLore heartbeat
