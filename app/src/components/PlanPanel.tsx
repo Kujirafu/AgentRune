@@ -29,7 +29,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
 export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: PlanPanelProps) {
   const { t } = useLocale()
   const isDark = document.documentElement.classList.contains("dark")
-  const [activeTab, setActiveTab] = useState<"prd" | "standards">("prd")
+  const [activeTab, setActiveTab] = useState<"prd" | "standards" | "constraints">("prd")
 
   // ── PRD list ──
   const [prdList, setPrdList] = useState<PrdSummary[]>([])
@@ -44,6 +44,28 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
   const [createPriority, setCreatePriority] = useState<PrdPriority>("p1")
   const [processing, setProcessing] = useState(false)
 
+  // ── Constraints ──
+  const [constraints, setConstraints] = useState<{ source: string; severity: string; title: string; description: string; ref?: string }[]>([])
+  const [constraintsLoading, setConstraintsLoading] = useState(false)
+  const [selectedAutoId, setSelectedAutoId] = useState<string | null>(null)
+  const [automationList, setAutomationList] = useState<{ id: string; name: string; trustProfile?: string; sandboxLevel?: string }[]>([])
+
+  const fetchAutomations = useCallback(() => {
+    fetch(`${getApiBase()}/api/automations/${encodeURIComponent(projectId)}`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setAutomationList(data) })
+      .catch(() => {})
+  }, [projectId])
+
+  const fetchConstraints = useCallback((autoId: string) => {
+    setConstraintsLoading(true)
+    fetch(`${getApiBase()}/api/automations/${encodeURIComponent(projectId)}/${encodeURIComponent(autoId)}/constraints`)
+      .then(r => r.json())
+      .then(data => { if (data?.constraints) setConstraints(data.constraints) })
+      .catch(() => setConstraints([]))
+      .finally(() => setConstraintsLoading(false))
+  }, [projectId])
+
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fetchPrdList = useCallback(() => {
@@ -55,6 +77,15 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
       .finally(() => setLoading(false))
   }, [projectId])
 
+  const fetchPrdDetail = useCallback((prdId: string) => {
+    setDetailLoading(true)
+    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`)
+      .then(r => r.json())
+      .then(data => { if (data?.id) setSelectedPrd(data) })
+      .catch(() => {})
+      .finally(() => setDetailLoading(false))
+  }, [projectId])
+
   useEffect(() => { fetchPrdList() }, [fetchPrdList])
 
   // Refresh list when tab becomes visible (e.g. after agent generates PRD)
@@ -64,14 +95,12 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
     return () => document.removeEventListener("visibilitychange", handler)
   }, [fetchPrdList])
 
-  const fetchPrdDetail = useCallback((prdId: string) => {
-    setDetailLoading(true)
-    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`)
-      .then(r => r.json())
-      .then(data => { if (data?.id) setSelectedPrd(data) })
-      .catch(() => {})
-      .finally(() => setDetailLoading(false))
-  }, [projectId])
+  // Auto-refresh when PRD changes via WS (agent creates/updates PRD via API)
+  useEffect(() => {
+    const handler = () => { fetchPrdList(); if (selectedPrd) fetchPrdDetail(selectedPrd.id) }
+    window.addEventListener("prd_changed", handler)
+    return () => window.removeEventListener("prd_changed", handler)
+  }, [fetchPrdList, fetchPrdDetail, selectedPrd])
 
   const openPrd = useCallback((prdId: string) => {
     setSelectedPrdId(prdId)
@@ -503,12 +532,75 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
         <button onClick={() => setActiveTab("standards")} style={tabStyle(activeTab === "standards")}>
           {t("standards.title") || "Standards"}
         </button>
+        <button onClick={() => { setActiveTab("constraints"); fetchAutomations() }} style={tabStyle(activeTab === "constraints")}>
+          {t("trust.constraints") || "Constraints"}
+        </button>
       </div>
 
       {/* Content */}
       <div style={{ flex: 1, overflow: "auto", padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
         {activeTab === "prd" && renderPrdList()}
         {activeTab === "standards" && <StandardsContent />}
+        {activeTab === "constraints" && (
+          <div>
+            {/* Automation selector */}
+            {automationList.length > 0 ? (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4, fontWeight: 600 }}>
+                  Select automation
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {automationList.map(a => (
+                    <button key={a.id} onClick={() => { setSelectedAutoId(a.id); fetchConstraints(a.id) }} style={{
+                      padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                      border: selectedAutoId === a.id ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
+                      background: selectedAutoId === a.id ? "rgba(55,172,192,0.1)" : "transparent",
+                      color: selectedAutoId === a.id ? "#37ACC0" : "var(--text-secondary)",
+                    }}>
+                      {a.name}
+                      {a.trustProfile && <span style={{ fontSize: 9, marginLeft: 4, opacity: 0.7 }}>({a.trustProfile})</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", textAlign: "center", padding: 20 }}>
+                No automations found
+              </div>
+            )}
+
+            {/* Constraint list */}
+            {constraintsLoading && <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>Loading...</div>}
+            {!constraintsLoading && selectedAutoId && constraints.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", textAlign: "center", padding: 20 }}>
+                {t("trust.constraints.empty") || "No constraints"}
+              </div>
+            )}
+            {!constraintsLoading && constraints.map((c, i) => {
+              const severityColors: Record<string, string> = { error: "#ef4444", warning: "#f59e0b", info: "#94a3b8" }
+              const sourceLabel = t(`trust.constraints.source.${c.source}`) || c.source
+              return (
+                <div key={i} style={{
+                  padding: "8px 10px", borderRadius: 8, marginBottom: 4,
+                  border: `1px solid ${severityColors[c.severity] || "#94a3b8"}30`,
+                  background: `${severityColors[c.severity] || "#94a3b8"}08`,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                    <span style={{
+                      fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4,
+                      background: `${severityColors[c.severity] || "#94a3b8"}20`,
+                      color: severityColors[c.severity] || "#94a3b8",
+                      textTransform: "uppercase",
+                    }}>{c.severity}</span>
+                    <span style={{ fontSize: 9, color: "var(--text-secondary)" }}>[{sourceLabel}]</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)" }}>{c.title}</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>{c.description}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

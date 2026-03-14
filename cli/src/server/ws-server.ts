@@ -23,6 +23,8 @@ import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
+import { buildPlanningConstraints } from "./planning-constraints.js"
+import { createFromTrustProfile } from "./authority-map.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
@@ -892,6 +894,16 @@ export function createServer(portOverride?: number) {
         sendPushNotification(alCfg, `${name} needs approval`, `Skill requires confirmation (risk score: ${event.riskReport.score})`, {
           automationId: event.automationId,
           type: "confirmation_required",
+        }).catch(() => {})
+      } else if (event.type === "daily_limit_reached") {
+        sendPushNotification(alCfg, `${event.automationName} skipped`, `Daily run limit reached (${event.todayCount}/${event.limit}). Free plan has limited daily runs.`, {
+          automationId: event.automationId,
+          type: "daily_limit_reached",
+        }).catch(() => {})
+      } else if (event.type === "plan_review_required") {
+        sendPushNotification(alCfg, `${event.automationName} awaiting review`, `Plan review required (timeout: ${event.timeoutMinutes}m). Approve or reject in the app.`, {
+          automationId: event.automationId,
+          type: "plan_review_required",
         }).catch(() => {})
       }
     }
@@ -2266,6 +2278,10 @@ export function createServer(portOverride?: number) {
     }
     const dir = getPrdDir(req.params.projectId)
     writeFileSync(join(dir, `${prdId}.json`), JSON.stringify(prd, null, 2))
+    // Broadcast to connected clients so PlanPanel auto-refreshes
+    for (const ws of wss.clients) {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prd_changed", projectId: req.params.projectId, prdId }))
+    }
     res.json(prd)
   })
 
@@ -2280,6 +2296,9 @@ export function createServer(portOverride?: number) {
     if (req.body.goal) prd.goal = req.body.goal
     prd.updatedAt = Date.now()
     writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    for (const ws of wss.clients) {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prd_changed", projectId: req.params.projectId, prdId: req.params.prdId }))
+    }
     res.json(prd)
   })
 
@@ -2295,6 +2314,9 @@ export function createServer(portOverride?: number) {
     prd.tasks.push(task)
     prd.updatedAt = Date.now()
     writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    for (const ws of wss.clients) {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prd_changed", projectId: req.params.projectId, prdId: req.params.prdId }))
+    }
     res.json(task)
   })
 
@@ -2313,6 +2335,9 @@ export function createServer(portOverride?: number) {
     prd.updatedAt = Date.now()
     const autoCompleted = checkAutoComplete(prd)
     writeFileSync(filePath, JSON.stringify(prd, null, 2))
+    for (const ws of wss.clients) {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prd_changed", projectId: req.params.projectId, prdId: req.params.prdId }))
+    }
     res.json({ task, prdAutoCompleted: autoCompleted })
   })
 
@@ -2880,6 +2905,31 @@ export function createServer(portOverride?: number) {
     const result = automationManager.scanConflicts(req.params.id, level as any)
     if (!result) return res.status(404).json({ error: "Automation not found or has no prompt" })
     res.json(result)
+  })
+
+  app.get("/api/automations/:projectId/:id/constraints", (req, res) => {
+    const auto = automationManager.get(req.params.id)
+    if (!auto) return res.status(404).json({ error: "Automation not found" })
+    const project = projects.find(p => p.id === req.params.projectId)
+    try {
+      const authorityMap = createFromTrustProfile({
+        sessionId: auto.id,
+        automationId: auto.id,
+        sandboxLevel: auto.sandboxLevel,
+        requirePlanReview: auto.requirePlanReview,
+        requireMergeApproval: auto.requireMergeApproval,
+      })
+      const constraintSet = buildPlanningConstraints({
+        projectPath: project?.cwd,
+        sandboxLevel: auto.sandboxLevel || "strict",
+        manifest: auto.manifest,
+        authorityMap,
+        trustProfile: auto.trustProfile,
+      })
+      res.json(constraintSet)
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build constraints" })
+    }
   })
 
   app.post("/api/automations/:projectId/:id/trigger", async (req, res) => {
