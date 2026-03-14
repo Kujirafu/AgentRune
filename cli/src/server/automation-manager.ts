@@ -1048,6 +1048,19 @@ export class AutomationManager {
 
       const data: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
       for (const auto of data) {
+        // Backward compat: infer trustProfile from sandboxLevel for pre-Trust-Layer automations
+        if (!auto.trustProfile) {
+          const sl = auto.sandboxLevel || "strict"
+          if (sl === "none" && !auto.requirePlanReview && !auto.requireMergeApproval) {
+            auto.trustProfile = "autonomous"
+          } else if (sl === "strict" && auto.requirePlanReview) {
+            auto.trustProfile = "guarded"
+          } else if (sl === "moderate" || sl === "permissive") {
+            auto.trustProfile = "supervised"
+          } else {
+            auto.trustProfile = "custom"
+          }
+        }
         this.automations.set(auto.id, auto)
         // Load results
         try {
