@@ -2933,25 +2933,48 @@ export function createServer(portOverride?: number) {
     }
   })
 
-  // ── Audit log API ──
-  app.get("/api/audit", (_req, res) => {
+  // ── Audit log API (rate limited: 30 req/min) ──
+  const auditRateMap = new Map<string, { count: number; resetAt: number }>()
+  const AUDIT_RATE_LIMIT = 30
+  const AUDIT_RATE_WINDOW = 60_000
+
+  function checkAuditRate(ip: string): boolean {
+    const now = Date.now()
+    const entry = auditRateMap.get(ip)
+    if (!entry || now > entry.resetAt) {
+      auditRateMap.set(ip, { count: 1, resetAt: now + AUDIT_RATE_WINDOW })
+      return true
+    }
+    entry.count++
+    return entry.count <= AUDIT_RATE_LIMIT
+  }
+
+  function auditRateLimiter(req: any, res: any, next: any) {
+    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    if (!checkAuditRate(ip)) {
+      return res.status(429).json({ error: "Too many requests", retryAfter: 60 })
+    }
+    next()
+  }
+
+  app.get("/api/audit", auditRateLimiter, (_req, res) => {
     const dates = listAuditDates()
     res.json({ dates })
   })
 
-  app.get("/api/audit/recent", (req, res) => {
+  app.get("/api/audit/recent", auditRateLimiter, (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50
     res.json(getRecentAuditEntries(Math.min(limit, 200)))
   })
 
-  app.get("/api/audit/:date", (req, res) => {
+  app.get("/api/audit/:date", auditRateLimiter, (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) {
       return res.status(400).json({ error: "Invalid date format (expected YYYY-MM-DD)" })
     }
     res.json(readAuditLog(req.params.date))
   })
 
-  app.get("/api/audit/automation/:automationId", (req, res) => {
+  app.get("/api/audit/automation/:automationId", auditRateLimiter, (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50
     res.json(getAutomationAudit(req.params.automationId, Math.min(limit, 200)))
   })

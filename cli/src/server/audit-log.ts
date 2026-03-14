@@ -81,6 +81,8 @@ export function auditLog(action: AuditAction, detail: Record<string, unknown> = 
 
 export function readAuditLog(date?: string): AuditEntry[] {
   try {
+    // Defense-in-depth: validate date format even for internal callers
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return []
     const filePath = date ? join(AUDIT_DIR, `${date}.jsonl`) : getLogFile()
     if (!existsSync(filePath)) return []
     const content = readFileSync(filePath, "utf-8")
