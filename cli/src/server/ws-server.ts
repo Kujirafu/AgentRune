@@ -295,12 +295,17 @@ function loadProjectEvents(projectId: string): AgentEvent[] {
 // Cached sibling daemon info — updated by probeSiblingDaemon, exposed via /api/daemon-info
 let cachedSiblingInfo: { tunnelUrl: string; role: string; port: number } | null = null
 
+// Track consecutive sibling failures for auto-restart
+let siblingFailCount = 0
+const SIBLING_RESTART_THRESHOLD = 3 // restart after 3 consecutive failures (~3 heartbeats)
+
 async function probeSiblingDaemon(myPort: number): Promise<string | undefined> {
   const otherPort = myPort === 3457 ? 3456 : 3457
   try {
     const r = await fetch(`http://127.0.0.1:${otherPort}/api/daemon-info`, { signal: AbortSignal.timeout(2000) })
     if (r.ok) {
       const info = await r.json()
+      siblingFailCount = 0 // reset on success
       if (info.tunnelUrl) {
         log.dim(`Sibling daemon (port ${otherPort}) tunnel: ${info.tunnelUrl}`)
         cachedSiblingInfo = { tunnelUrl: info.tunnelUrl, role: info.role, port: otherPort }
@@ -309,8 +314,59 @@ async function probeSiblingDaemon(myPort: number): Promise<string | undefined> {
     }
   } catch {
     cachedSiblingInfo = null // sibling offline
+    siblingFailCount++
+    if (siblingFailCount === SIBLING_RESTART_THRESHOLD) {
+      log.warn(`[Watchdog] Sibling daemon (port ${otherPort}) not responding after ${SIBLING_RESTART_THRESHOLD} checks, restarting...`)
+      restartSiblingDaemon(otherPort)
+    }
   }
   return undefined
+}
+
+/** Restart sibling daemon via spawn (unless stop marker exists) */
+function restartSiblingDaemon(port: number) {
+  try {
+    // Check stop marker — if someone explicitly stopped this daemon, don't restart
+    const markerPath = join(process.env.HOME || process.env.USERPROFILE || "~", ".agentrune", `stop-${port}.marker`)
+    if (existsSync(markerPath)) {
+      log.dim(`[Watchdog] Stop marker found for port ${port}, skipping restart`)
+      return
+    }
+    const thisFile = fileURLToPath(import.meta.url)
+    const distBin = join(thisFile, "..", "..", "bin.js")
+    const srcBin = join(thisFile, "..", "..", "..", "bin.ts")
+    const binScript = existsSync(distBin) ? distBin : srcBin
+
+    const loaderArgs: string[] = []
+    for (let i = 0; i < process.execArgv.length; i++) {
+      if (process.execArgv[i] === "--import" && process.execArgv[i + 1]) {
+        loaderArgs.push("--import", process.execArgv[i + 1])
+        i++
+      }
+    }
+
+    const configDir = join(process.env.HOME || process.env.USERPROFILE || "~", ".agentrune")
+    const logFile = join(configDir, "daemon.log")
+    const logFd = openSync(logFile, "a")
+    const pidSuffix = port !== 3456 ? `-${port}` : ""
+    const pidFile = join(configDir, `daemon${pidSuffix}.pid`)
+
+    const child = childSpawn(process.execPath, [
+      ...loaderArgs, binScript, "start", "--foreground", "--port", String(port),
+    ], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      windowsHide: true,
+    })
+
+    if (child.pid) {
+      writeFileSync(pidFile, String(child.pid))
+      child.unref()
+      log.success(`[Watchdog] Restarted sibling daemon on port ${port} (PID: ${child.pid})`)
+    }
+  } catch (err: any) {
+    log.error(`[Watchdog] Failed to restart sibling: ${err.message}`)
+  }
 }
 
 async function agentloreHeartbeat(token: string, deviceId: string, port: number, cloudToken?: string, tunnelUrl?: string) {
@@ -355,6 +411,55 @@ async function agentloreHeartbeat(token: string, deviceId: string, port: number,
     }
   } catch (err: any) {
     log.warn("AgentLore heartbeat error: " + (err?.message || err))
+  }
+}
+
+// --- AgentLore push notifications ---
+
+/** Read FCM token from ~/.agentrune/fcm-token (written by the app) */
+function readFcmToken(): string | null {
+  try {
+    const tokenPath = join(homedir(), ".agentrune", "fcm-token")
+    if (!existsSync(tokenPath)) return null
+    return readFileSync(tokenPath, "utf-8").trim() || null
+  } catch {
+    return null
+  }
+}
+
+/** Send a push notification via AgentLore API. Fails silently — never crashes the daemon. */
+async function sendPushNotification(
+  config: { token: string; deviceId: string },
+  title: string,
+  body: string,
+  data?: Record<string, string>,
+) {
+  try {
+    const fcmToken = readFcmToken()
+    if (!fcmToken) return // no FCM token registered, skip silently
+
+    const res = await fetch("https://agentlore.vercel.app/api/push-notification", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        deviceId: config.deviceId,
+        fcmToken,
+        title,
+        body,
+        data: data || undefined,
+      }),
+    })
+    if (res.ok) {
+      log.dim(`Push notification sent: ${title}`)
+    } else {
+      const text = await res.text().catch(() => "")
+      log.dim(`Push notification failed: ${res.status} ${text.substring(0, 100)}`)
+    }
+  } catch (err: any) {
+    log.dim(`Push notification error: ${err?.message || err}`)
   }
 }
 
@@ -749,6 +854,46 @@ export function createServer(portOverride?: number) {
     const payload = JSON.stringify(event)
     for (const ws of wss.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload)
+    }
+
+    // Send push notification via AgentLore
+    const alCfg = cfg.agentlore
+    if (alCfg) {
+      if (event.type === "automation_completed") {
+        const { automation, result } = event
+        const durationMs = result.finishedAt - result.startedAt
+        const durationStr = durationMs < 60000 ? `${Math.round(durationMs / 1000)}s` : `${Math.round(durationMs / 60000)}m`
+
+        let title: string
+        let body: string
+        if (result.status === "success") {
+          title = `${automation.name} completed`
+          body = `Finished in ${durationStr}`
+        } else if (result.status === "timeout") {
+          title = `${automation.name} timed out`
+          body = `Timed out after ${durationStr}`
+        } else {
+          title = `${automation.name} failed`
+          body = `Status: ${result.status}`
+        }
+
+        sendPushNotification(alCfg, title, body, {
+          automationId: automation.id,
+          status: result.status,
+        }).catch(() => {})
+      } else if (event.type === "bypass_confirmation_required") {
+        sendPushNotification(alCfg, `${event.automationName} needs approval`, "Automation requires permission confirmation", {
+          automationId: event.automationId,
+          type: "confirmation_required",
+        }).catch(() => {})
+      } else if (event.type === "skill_confirmation_required") {
+        const auto = automationManager.get(event.automationId)
+        const name = auto?.name || event.skillId
+        sendPushNotification(alCfg, `${name} needs approval`, `Skill requires confirmation (risk score: ${event.riskReport.score})`, {
+          automationId: event.automationId,
+          type: "confirmation_required",
+        }).catch(() => {})
+      }
     }
   }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS })
 
@@ -2747,6 +2892,20 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  app.post("/api/automations/:projectId/:id/approve-merge", (req, res) => {
+    try {
+      const result = automationManager.approveWorktreeMerge(req.params.id)
+      if (!result.success) return res.status(404).json({ error: result.message })
+      res.json(result)
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Merge approval failed" })
+    }
+  })
+
+  app.get("/api/automations/pending-merges", (_req, res) => {
+    res.json(automationManager.listPendingMerges())
+  })
+
   // --- Skill security API ---
 
   app.post("/api/skill-analyze", express.json(), (req, res) => {
@@ -2896,6 +3055,16 @@ export function createServer(portOverride?: number) {
       switch (msg.type) {
         case "ping": {
           ws.send(JSON.stringify({ type: "pong" }))
+          break
+        }
+        case "set_fcm_token": {
+          const token = msg.token as string
+          if (token && typeof token === "string" && token.length > 10) {
+            const fcmPath = join(getConfigDir(), "fcm-token")
+            writeFileSync(fcmPath, token, { encoding: "utf-8" })
+            log.info(`[FCM] Token saved (${token.slice(0, 12)}...)`)
+            ws.send(JSON.stringify({ type: "fcm_token_saved" }))
+          }
           break
         }
         case "attach": {
@@ -4396,6 +4565,35 @@ export function createServer(portOverride?: number) {
       server.on("close", () => tunnel.stop())
     } catch (err: any) {
       log.warn(`Tunnel failed (LAN-only mode): ${err.message}`)
+      // Retry tunnel with long backoff to avoid extending Cloudflare rate limit ban
+      const retryTunnel = async (delay: number, attempt: number) => {
+        if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only`); return }
+        setTimeout(async () => {
+          try {
+            const { startTunnel } = await import("./tunnel.js")
+            const tunnel = await startTunnel(PORT)
+            tunnelState.url = tunnel.url
+            updateGlobalTunnelUrl(tunnel.url)
+            log.info(`Tunnel recovered (attempt ${attempt}): ${tunnel.url}`)
+            tunnel.onRestart = (newUrl: string) => {
+              tunnelState.url = newUrl
+              updateGlobalTunnelUrl(newUrl)
+              log.info(`Tunnel URL changed: ${newUrl}`)
+              const agentloreConfig = config.agentlore
+              if (agentloreConfig) {
+                const cloudTokenPath = join(getConfigDir(), "cloud-token")
+                const cloudToken = existsSync(cloudTokenPath) ? readFileSync(cloudTokenPath, "utf-8").trim() : ""
+                if (cloudToken) agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, newUrl)
+              }
+            }
+            server.on("close", () => tunnel.stop())
+          } catch {
+            log.dim(`Tunnel retry ${attempt} failed, next in ${delay * 2}s...`)
+            retryTunnel(delay * 2, attempt + 1)
+          }
+        }, delay * 1000)
+      }
+      retryTunnel(300, 1)  // Start at 5 min, then 10 min, then 20 min
     }
 
     // AgentLore heartbeat

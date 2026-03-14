@@ -2,6 +2,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { AgentEvent } from "../shared/types.js"
+import { readEncryptedFile, writeEncryptedFile } from "./crypto.js"
 
 interface SessionRecord {
   id: string
@@ -111,7 +112,7 @@ export class EventStore {
   private persistSession(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    writeFileSync(this.sessionPath(sessionId), JSON.stringify(session, null, 2))
+    writeEncryptedFile(this.sessionPath(sessionId), JSON.stringify(session, null, 2))
   }
 
   getSession(sessionId: string): Omit<SessionRecord, "events"> | undefined {
@@ -132,12 +133,15 @@ export class EventStore {
     const session = this.sessions.get(sessionId)
     if (session) return session.events
 
-    // Try loading from disk
+    // Try loading from disk (handles both encrypted and legacy plaintext files)
     const path = this.sessionPath(sessionId)
     if (existsSync(path)) {
       try {
-        const data = JSON.parse(readFileSync(path, "utf-8"))
-        return data.events || []
+        const raw = readEncryptedFile(path)
+        if (raw) {
+          const data = JSON.parse(raw)
+          return data.events || []
+        }
       } catch {}
     }
     return []

@@ -1,11 +1,23 @@
 // commands/stop.ts
-import { readFileSync, unlinkSync, existsSync } from "node:fs"
-import { getPidFile } from "../shared/config.js"
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs"
+import { join } from "node:path"
+import { getPidFile, getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
+
+/** Stop marker file — tells sibling daemon NOT to auto-restart this port */
+export function getStopMarker(port: number): string {
+  return join(getConfigDir(), `stop-${port}.marker`)
+}
 
 export async function stopCommand(opts?: { port?: string }) {
   const port = opts?.port ? parseInt(opts.port) : undefined
+  const resolvedPort = port || 3456
   const pidFile = getPidFile(port)
+
+  // Write stop marker so sibling daemon won't auto-restart
+  const marker = getStopMarker(resolvedPort)
+  writeFileSync(marker, String(Date.now()))
+
   if (!existsSync(pidFile)) {
     log.warn("No daemon running (PID file not found)")
     return
