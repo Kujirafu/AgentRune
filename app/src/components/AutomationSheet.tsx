@@ -353,9 +353,17 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
         setFormBypass(!!initialEdit.bypass)
-        const tp = (initialEdit as any).trustProfile || "supervised"
+        const sl = (initialEdit as any).sandboxLevel || "strict"
+        let tp = (initialEdit as any).trustProfile
+        if (!tp) {
+          // Infer from legacy sandboxLevel
+          if (sl === "none") tp = "autonomous"
+          else if (sl === "strict" && (initialEdit as any).requirePlanReview) tp = "guarded"
+          else if (sl === "moderate" || sl === "permissive") tp = "supervised"
+          else tp = "custom"
+        }
         setFormTrustProfile(tp)
-        setFormSandboxLevel((initialEdit as any).sandboxLevel || "strict")
+        setFormSandboxLevel(sl)
         setFormRequirePlanReview(!!(initialEdit as any).requirePlanReview)
         setFormRequireMergeApproval(!!(initialEdit as any).requireMergeApproval)
         setFormDailyRunLimit((initialEdit as any).dailyRunLimit ?? 50)
@@ -1672,6 +1680,22 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 4 }}>
                 {t(`trust.profile.${formTrustProfile}.desc`) || ""}
               </div>
+
+              {/* Preset summary (non-custom only) */}
+              {formTrustProfile !== "custom" && (
+                <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 4, opacity: 0.7 }}>
+                  {(() => {
+                    const p = TRUST_PROFILE_PRESETS[formTrustProfile]
+                    const parts = [
+                      `Sandbox: ${p.sandboxLevel}`,
+                      `Plan Review: ${p.requirePlanReview ? "on" : "off"}`,
+                      `Merge Approval: ${p.requireMergeApproval ? "on" : "off"}`,
+                      `Daily: ${p.dailyRunLimit === 0 ? "\u221E" : p.dailyRunLimit}`,
+                    ]
+                    return parts.join(" | ")
+                  })()}
+                </div>
+              )}
 
               {/* Custom settings panel */}
               {showCustomSettings && (
