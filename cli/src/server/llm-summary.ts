@@ -32,15 +32,18 @@ function findEnvKey(...keys: string[]): string | null {
 
 // --- Provider call helpers ---
 
-async function callClaude(apiKey: string, text: string): Promise<string> {
+async function callClaude(apiKey: string, text: string, useBearer = false): Promise<string> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
+    const authHeader = useBearer
+      ? { "authorization": `Bearer ${apiKey}` }
+      : { "x-api-key": apiKey }
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": apiKey,
+        ...authHeader,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
@@ -165,7 +168,7 @@ export async function callLlmForSummary(activityLog: string): Promise<string | n
   const claudeToken = claudeCreds?.claudeAiOauth?.accessToken as string | undefined
   if (claudeToken) {
     try {
-      const result = await callClaude(claudeToken, trimmed)
+      const result = await callClaude(claudeToken, trimmed, true)
       log.info("LLM summary: Claude OAuth (Haiku)")
       return result
     } catch (e: any) {

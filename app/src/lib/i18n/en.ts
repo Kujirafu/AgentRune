@@ -164,6 +164,10 @@ export const en: Record<string, string> = {
   // Tasks
   "tasks.queueHint": "Top = next to execute. Drag or use arrows to reorder.",
   "tasks.empty": "No tasks yet",
+  "tasks.tabTitle": "Tasks",
+  "tasks.emptyTitle": "No tasks yet",
+  "tasks.emptyDesc": "Use the task button in the input bar to add tasks",
+  "tasks.manual": "Manual Tasks",
   "tasks.emptyHint": "Let AI break down your idea into actionable steps, or import tasks manually.",
   "tasks.aiBreakdown": "AI Breakdown",
   "tasks.importJson": "Import JSON",
@@ -522,6 +526,7 @@ export const en: Record<string, string> = {
   "unified.mergeAllDesc": "Merge all session worktrees to main",
 
   // Plan
+  "prd.tabTitle": "Plans",
   "prd.empty": "No plan yet",
   "prd.emptyHint": "Start a session and describe what you want to build. The agent will guide you through creating a plan automatically.",
   "prd.viewDesc": "View plan and task progress",
