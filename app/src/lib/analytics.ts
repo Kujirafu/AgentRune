@@ -50,20 +50,50 @@ export function getOptOut(): boolean {
   return localStorage.getItem("agentrune_telemetry_optout") === "true"
 }
 
+const MAX_PROPERTIES_SIZE = 4096
+
 function track(event: string, properties: Record<string, unknown> = {}) {
   if (optOut) return
-  queue.push({ event, properties, platform: "app" })
+  // Limit properties size to prevent abuse
+  const json = JSON.stringify(properties)
+  const safeProps = json.length <= MAX_PROPERTIES_SIZE
+    ? properties
+    : { _truncated: true, _originalSize: json.length }
+  queue.push({ event, properties: safeProps, platform: "app" })
   if (queue.length >= MAX_QUEUE) flush()
+}
+
+/** Generate device-specific signing key (persisted in localStorage) */
+function getSigningKey(): string {
+  let key = localStorage.getItem("agentrune_telemetry_key")
+  if (!key) {
+    key = crypto.randomUUID() + crypto.randomUUID()
+    localStorage.setItem("agentrune_telemetry_key", key)
+  }
+  return key
+}
+
+/** Simple hash for request signing (not crypto-grade, but prevents casual spoofing) */
+async function signPayload(payload: string): Promise<string> {
+  const key = getSigningKey()
+  const data = new TextEncoder().encode(key + payload)
+  const hash = await crypto.subtle.digest("SHA-256", data)
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("")
 }
 
 async function flush() {
   if (queue.length === 0 || optOut) return
   const batch = queue.splice(0, MAX_QUEUE)
   try {
+    const body = JSON.stringify({ distinctId, events: batch })
+    const sig = await signPayload(body)
     await fetch(TELEMETRY_URL, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ distinctId, events: batch }),
+      headers: {
+        "content-type": "application/json",
+        "x-telemetry-sig": sig,
+      },
+      body,
       signal: AbortSignal.timeout(10_000),
     })
   } catch {
@@ -81,8 +111,11 @@ export function trackSessionEnd(agentId: string, durationMs: number) {
   track("session_end", { agentId, durationMs })
 }
 
+const SENSITIVE_FIELDS = ["apiKey", "token", "password", "secret", "key", "credential"]
+
 export function trackSettingsChange(field: string, value: string) {
-  track("settings_change", { field, value })
+  const isSensitive = SENSITIVE_FIELDS.some(s => field.toLowerCase().includes(s))
+  track("settings_change", { field, value: isSensitive ? "[REDACTED]" : value })
 }
 
 export function trackAutomationTrigger(scheduleId: string, trigger: string) {

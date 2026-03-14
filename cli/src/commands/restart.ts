@@ -41,6 +41,11 @@ async function killPort(port: number): Promise<void> {
   if (existsSync(pidFile)) {
     try {
       const pid = parseInt(readFileSync(pidFile, "utf-8").trim())
+      if (!Number.isFinite(pid) || pid <= 0) {
+        log.warn(`  Port ${port}: invalid PID in file, skipping kill`)
+        unlinkSync(pidFile)
+        return
+      }
       try { process.kill(pid) } catch {}
       unlinkSync(pidFile)
       log.info(`  Port ${port}: killed PID ${pid}`)
@@ -60,7 +65,12 @@ async function killPort(port: number): Promise<void> {
 }
 
 export async function restartCommand(opts?: { port?: string }) {
-  const ports = opts?.port ? [parseInt(opts.port)] : ALL_PORTS
+  const parsedPort = opts?.port ? parseInt(opts.port) : NaN
+  if (opts?.port && (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535)) {
+    log.error(`Invalid port: ${opts.port} (must be 1-65535)`)
+    return
+  }
+  const ports = opts?.port ? [parsedPort] : ALL_PORTS
 
   log.info(`Restarting daemon${ports.length > 1 ? "s" : ""}: ${ports.join(", ")}`)
 
