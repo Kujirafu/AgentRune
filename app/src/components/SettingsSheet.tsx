@@ -5,6 +5,7 @@ import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
 import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled, getWorktreeEnabled, setWorktreeEnabled, getAutoSaveKeysEnabled, setAutoSaveKeysEnabled, getAutoSaveKeysPath, setAutoSaveKeysPath, getNotificationsEnabled, setNotificationsEnabled, getAutoUpdateEnabled, setAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, setSkippedVersion } from "../lib/storage"
 import { App } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
+import { identifyUser, trackLogin } from "../lib/analytics"
 
 interface SettingsSheetProps {
   open: boolean
@@ -126,6 +127,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
         if (token) {
           localStorage.setItem("agentrune_phone_token", token)
           if (userId) localStorage.setItem("agentrune_user_id", userId)
+          identifyUser(); trackLogin()
           setPhoneToken(token)
         }
       }

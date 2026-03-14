@@ -15,6 +15,7 @@ import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
 import { motion, AnimatePresence } from "framer-motion"
+import { identifyUser, trackLogin, trackSessionStart } from "./lib/analytics"
 
 // ─── Error Boundary ──────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -387,6 +388,14 @@ function useWs() {
           localStorage.setItem("agentrune_daemon_device_id", msg.daemonDeviceId as string)
         }
       }
+      // Forward PRD changes to window so PlanPanel can auto-refresh
+      if (msg.type === "prd_changed") {
+        window.dispatchEvent(new CustomEvent("prd_changed", { detail: msg }))
+      }
+      // Forward Trust Layer events to window for MissionControl
+      if (msg.type === "plan_review_required" || msg.type === "daily_limit_reached" || msg.type === "skill_confirmation_required" || msg.type === "bypass_confirmation_required") {
+        window.dispatchEvent(new CustomEvent("trust_event", { detail: msg }))
+      }
       const handlers = handlersRef.current.get(msg.type)
       if (handlers) for (const h of handlers) h(msg)
     }
@@ -664,6 +673,8 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
         const token = data.data.token as string
         localStorage.setItem("agentrune_phone_token", token)
         if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
+        // Re-identify telemetry with real userId
+        identifyUser(); trackLogin()
         if (onLogin) {
           onLogin(token)
         } else {
@@ -1764,6 +1775,7 @@ export function App() {
           if (token) {
             localStorage.setItem("agentrune_phone_token", token)
             if (userId) localStorage.setItem("agentrune_user_id", userId)
+            identifyUser(); trackLogin()
             setIsCloudMode(true)
             setServerReady(true)
             // Auto-connect to first ONLINE device
@@ -1910,6 +1922,7 @@ export function App() {
   // Launch handler — creates a new session
   // Optional resumeAgentSessionId: Claude Code session ID to resume (--resume <id>)
   const handleLaunch = (projectId: string, agentId: string, resumeAgentSessionId?: string) => {
+    trackSessionStart(agentId, projectId)
     const sessionId = `${projectId}_${Date.now()}`
     setSelectedProject(projectId)
     setActiveAgentId(agentId)
