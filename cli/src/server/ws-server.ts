@@ -219,11 +219,11 @@ function buildAgentProtocol(locale?: string, projectId?: string, localPort: numb
 function appendClaudeFlags(cmd: string, s: Record<string, unknown>, projectId?: string, port: number = 3457): string {
   if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
   if (s.claudeEffort && s.claudeEffort !== "default" && /^(low|medium|high|max)$/.test(s.claudeEffort as string)) cmd += ` --effort ${s.claudeEffort}`
-  if (s.bypass) {
+  if (s.bypass === true) {
     cmd += " --dangerously-skip-permissions"
-  } else if (s.planMode) {
+  } else if (s.planMode === true) {
     cmd += " --permission-mode plan"
-  } else if (s.autoEdit) {
+  } else if (s.autoEdit === true) {
     cmd += " --permission-mode acceptEdits"
   }
   cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, port).replace(/"/g, '\\"')}"`
@@ -2123,6 +2123,7 @@ export function createServer(portOverride?: number) {
     const { project: projectId, branch, force } = req.body
     const proj = projects.find((p) => p.id === projectId)
     if (!proj || !branch) return res.status(400).json({ error: "Missing project or branch" })
+    if (typeof branch !== "string" || branch.startsWith("-") || !/^[a-zA-Z0-9_\/.@-]+$/.test(branch)) return res.status(400).json({ error: "Invalid branch name" })
 
     try {
       const flag = force ? "-D" : "-d"
@@ -2143,6 +2144,7 @@ export function createServer(portOverride?: number) {
     const { project: projectId, branch } = req.body
     const proj = projects.find((p) => p.id === projectId)
     if (!proj || !branch) return res.status(400).json({ error: "Missing project or branch" })
+    if (typeof branch !== "string" || branch.startsWith("-") || !/^[a-zA-Z0-9_\/.@-]+$/.test(branch)) return res.status(400).json({ error: "Invalid branch name" })
 
     try {
       execFileSync("git", ["checkout", branch], { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
@@ -2186,6 +2188,7 @@ export function createServer(portOverride?: number) {
     const { project: projectId, path: wtPath, force } = req.body
     const proj = projects.find((p) => p.id === projectId)
     if (!proj || !wtPath) return res.status(400).json({ error: "Missing project or path" })
+    if (typeof wtPath !== "string" || wtPath.startsWith("-")) return res.status(400).json({ error: "Invalid worktree path" })
 
     try {
       const args = ["worktree", "remove"]
@@ -2982,6 +2985,7 @@ export function createServer(portOverride?: number) {
       })
       res.json(constraintSet)
     } catch (err) {
+      log.error(`[constraints] ${err instanceof Error ? err.message : err}`)
       res.status(500).json({ error: "Failed to build constraints" })
     }
   })
@@ -3035,7 +3039,7 @@ export function createServer(portOverride?: number) {
   app.post("/api/automations/:projectId/:id/trigger", async (req, res) => {
     try {
       const result = await automationManager.trigger(req.params.id)
-      if (!result.ok) return res.status(429).json({ error: result.error })
+      if (!result.ok) return res.status(429).json({ error: "Automation trigger rate limited" })
       res.json({ ok: true })
     } catch (err) {
       log.error(`[automation/trigger] ${err instanceof Error ? err.message : err}`)
@@ -3063,7 +3067,7 @@ export function createServer(portOverride?: number) {
   app.post("/api/automations/:projectId/:id/approve-merge", (req, res) => {
     try {
       const result = automationManager.approveWorktreeMerge(req.params.id)
-      if (!result.success) return res.status(404).json({ error: result.message })
+      if (!result.success) return res.status(404).json({ error: "Merge approval failed or not found" })
       res.json(result)
     } catch (err) {
       log.error(`[automation/approve-merge] ${err instanceof Error ? err.message : err}`)
@@ -3785,7 +3789,9 @@ export function createServer(portOverride?: number) {
                 restartGrace.set(sessionId, Date.now())
                 crashRestartCount.set(sessionId, (crashRestartCount.get(sessionId) || 0) + 1)
                 // Parse agentId from suffix: __restart_agent__claude → "claude"
-                const restartAgentId = inputStr.replace("__restart_agent__", "").trim() || null
+                const ALLOWED_AGENTS = new Set(["claude", "codex", "gemini", "aider", "cursor", "cline"])
+                const rawRestartAgent = inputStr.replace("__restart_agent__", "").trim()
+                const restartAgentId = ALLOWED_AGENTS.has(rawRestartAgent) ? rawRestartAgent : null
                 const launchInfo = sessionLaunchSettings.get(sessionId)
                 // Use explicitly selected agent, fall back to saved launch settings, then default to "claude"
                 const agentId = restartAgentId || launchInfo?.agentId || "claude"
@@ -4033,7 +4039,8 @@ export function createServer(portOverride?: number) {
           // Client-side events (e.g. user messages) persisted to server for replay
           const storeSid = msg.sessionId as string
           const storeEvt = msg.event as AgentEvent | undefined
-          if (storeSid && storeEvt) {
+          const clientOwnedSession = clientSessions.get(ws)
+          if (storeSid && storeEvt && (clientOwnedSession === storeSid || isLocal)) {
             const list = sessionRecentEvents.get(storeSid)
             if (list) {
               list.push(storeEvt)
@@ -4168,7 +4175,8 @@ export function createServer(portOverride?: number) {
         // ─── Session Snapshots ────────────────────────────────
         case "snapshot_create": {
           const sid = msg.sessionId as string
-          const name = (msg.name as string) || `snap-${Date.now()}`
+          const rawName = (msg.name as string) || `snap-${Date.now()}`
+          const name = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64)
           const s = sessions.get(sid)
           if (!s) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Session not found" })); break }
           try {
@@ -4207,7 +4215,7 @@ export function createServer(portOverride?: number) {
           const tag = msg.tag as string
           const s = sessions.get(sid)
           if (!s || !tag) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Invalid" })); break }
-          if (!tag.startsWith("agentrune/snapshot/")) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Invalid snapshot tag" })); break }
+          if (!/^agentrune\/snapshot\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(tag)) { ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Invalid snapshot tag" })); break }
           try {
             execFileSync("git", ["checkout", tag, "--", "."], { cwd: s.project.cwd, stdio: "pipe", timeout: 10000 })
             ws.send(JSON.stringify({ type: "snapshot_result", success: true, message: `Restored to "${tag}"` }))
