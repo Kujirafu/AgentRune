@@ -51,6 +51,15 @@ program
   })
 
 program
+  .command("restart")
+  .description("Restart daemons (default: both 3456 + 3457)")
+  .option("-p, --port <port>", "Restart only this port (default: restart all)")
+  .action(async (opts) => {
+    const { restartCommand } = await import("./commands/restart.js")
+    await restartCommand(opts)
+  })
+
+program
   .command("status")
   .description("Show daemon status and AgentLore login")
   .action(async () => {
