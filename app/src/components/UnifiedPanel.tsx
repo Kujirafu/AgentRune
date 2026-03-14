@@ -1559,7 +1559,7 @@ export function UnifiedPanel({
                       >
                         <div style={{
                           width: 18, height: 18, borderRadius: "50%",
-                          background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                          background: "var(--card-bg)", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
                           transform: auto.enabled ? "translateX(18px)" : "translateX(0)",
                           transition: "transform 0.2s",
                         }} />
@@ -2440,7 +2440,7 @@ export function UnifiedPanel({
               style={{
                 width: "100%", padding: "10px 12px", fontSize: 14,
                 borderRadius: 10, border: "1px solid var(--glass-border)",
-                background: theme === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
+                background: "var(--glass-bg)",
                 color: "var(--text-primary)", outline: "none",
                 boxSizing: "border-box",
               }}
@@ -3146,6 +3146,18 @@ export function UnifiedPanel({
             initialSlug={chainEditSlug}
             onBack={() => setChainEditSlug(null)}
             t={t}
+            onSchedule={(slug) => {
+              setChainEditSlug(null)
+              if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+              const chainTpl = CHAIN_TEMPLATES.find(ct => ct.id === `chain_${slug}`)
+              const editData: any = {
+                id: "__new__", name: chainTpl ? tplName(chainTpl) : slug, prompt: "",
+                templateId: chainTpl?.id || slug, enabled: true,
+                schedule: { type: "daily", timeOfDay: "03:00" },
+              }
+              setEditingAutomation(editData as typeof projectAutomations[0])
+              setShowAutomation(true)
+            }}
           />
         </div>
       )}

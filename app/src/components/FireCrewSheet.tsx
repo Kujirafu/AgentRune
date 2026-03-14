@@ -154,7 +154,7 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
         {sessionId && (
           <div style={{ padding: "0 16px 8px" }}>
             <div style={{
-              fontSize: 11, color: "#64748b", padding: "6px 10px",
+              fontSize: 11, color: "var(--text-secondary)", padding: "6px 10px",
               borderRadius: 8, background: "rgba(55,172,192,0.08)",
               border: "1px solid rgba(55,172,192,0.15)",
             }}>
@@ -182,8 +182,8 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
                   style={{
                     width: "100%", textAlign: "left",
                     padding: "12px 14px", borderRadius: 14,
-                    border: "1px solid rgba(0,0,0,0.08)",
-                    background: "rgba(255,255,255,0.6)",
+                    border: "1px solid var(--glass-border)",
+                    background: "var(--glass-bg)",
                     cursor: firing ? "default" : "pointer",
                     opacity: firing ? 0.5 : 1,
                     display: "flex", alignItems: "center", gap: 12,
@@ -197,7 +197,7 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
                         background: role.color, display: "flex",
                         alignItems: "center", justifyContent: "center",
                         marginLeft: i > 0 ? -6 : 0,
-                        border: "2px solid rgba(255,255,255,0.8)",
+                        border: "2px solid var(--card-bg)",
                         zIndex: 3 - i,
                       }}>
                         {getCrewRoleIcon(role.icon)}
@@ -206,8 +206,8 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)" }}>{name}</div>
-                    {desc && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{desc}</div>}
-                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>
+                    {desc && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>{desc}</div>}
+                    <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 2 }}>
                       {tmpl.crew.roles.length} {t("fireCrew.roles")} · ~{tmpl.crew.tokenBudget.toLocaleString()} tok
                     </div>
                   </div>

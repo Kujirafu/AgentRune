@@ -952,7 +952,7 @@ export function MissionControl({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tasks: [...existing, newTask] }),
-          })
+          }).then(() => window.dispatchEvent(new Event("tasks_changed")))
         })
         .catch(() => {})
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`

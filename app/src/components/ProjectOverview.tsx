@@ -1188,7 +1188,7 @@ export function ProjectOverview({
                         >
                           <div style={{
                             width: 18, height: 18, borderRadius: "50%",
-                            background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                            background: "var(--card-bg)", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
                             transform: auto.enabled ? "translateX(18px)" : "translateX(0)",
                             transition: "transform 0.2s",
                           }} />

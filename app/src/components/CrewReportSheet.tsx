@@ -40,7 +40,7 @@ function TokenBar({ used, budget }: { used: number; budget: number }) {
   const pct = Math.min((used / budget) * 100, 100)
   const isOver = used >= budget
   return (
-    <div style={{ width: "100%", height: 6, borderRadius: 3, background: "rgba(0,0,0,0.06)", overflow: "hidden" }}>
+    <div style={{ width: "100%", height: 6, borderRadius: 3, background: "var(--glass-border)", overflow: "hidden" }}>
       <div style={{
         width: `${pct}%`, height: "100%", borderRadius: 3,
         background: isOver ? "#ef4444" : pct > 80 ? "#f59e0b" : "#37ACC0",
@@ -95,19 +95,19 @@ export default function CrewReportSheet({ open, automationId, automationName, se
       {/* Header */}
       <div style={{
         padding: "16px 20px", display: "flex", alignItems: "center", gap: 12,
-        background: "rgba(255,255,255,0.95)", borderBottom: "1px solid rgba(0,0,0,0.08)",
+        background: "var(--card-bg)", borderBottom: "1px solid var(--glass-border)",
       }}>
         <button onClick={onClose} style={{
           background: "none", border: "none", cursor: "pointer", padding: 4,
-          color: "#64748b", display: "flex",
+          color: "var(--text-secondary)", display: "flex",
         }}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="15 18 9 12 15 6" />
           </svg>
         </button>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "#1e293b" }}>{t("crew.report.title")}</div>
-          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 1 }}>{automationName}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)" }}>{t("crew.report.title")}</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1 }}>{automationName}</div>
         </div>
         {/* History selector */}
         {reports.length > 1 && (
@@ -116,8 +116,8 @@ export default function CrewReportSheet({ open, automationId, automationName, se
             onChange={(e) => { setSelectedIdx(Number(e.target.value)); setExpandedRole(null) }}
             style={{
               padding: "4px 8px", borderRadius: 6, fontSize: 11,
-              border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.8)",
-              color: "#1e293b", outline: "none",
+              border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+              color: "var(--text-primary)", outline: "none",
             }}
           >
             {reports.map((r, i) => (
@@ -132,9 +132,9 @@ export default function CrewReportSheet({ open, automationId, automationName, se
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
         {loading ? (
-          <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 13 }}>Loading...</div>
+          <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)", fontSize: 13 }}>Loading...</div>
         ) : !report ? (
-          <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 13 }}>
+          <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)", fontSize: 13 }}>
             {t("crew.report.noReports")}
           </div>
         ) : (
@@ -143,25 +143,25 @@ export default function CrewReportSheet({ open, automationId, automationName, se
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
               <div style={{
                 padding: "12px 14px", borderRadius: 12,
-                background: "rgba(255,255,255,0.8)", border: "1px solid rgba(0,0,0,0.06)",
+                background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
               }}>
-                <div style={{ fontSize: 10, color: "#94a3b8", marginBottom: 4 }}>{t("crew.report.totalTokens")}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#1e293b" }}>
+                <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 4 }}>{t("crew.report.totalTokens")}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>
                   {report.totalTokensUsed.toLocaleString()}
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <TokenBar used={report.totalTokensUsed} budget={report.tokenBudget} />
-                  <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 3 }}>
+                  <div style={{ fontSize: 9, color: "var(--text-secondary)", marginTop: 3 }}>
                     {t("crew.report.budget")}: {report.tokenBudget.toLocaleString()}
                   </div>
                 </div>
               </div>
               <div style={{
                 padding: "12px 14px", borderRadius: 12,
-                background: "rgba(255,255,255,0.8)", border: "1px solid rgba(0,0,0,0.06)",
+                background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
               }}>
-                <div style={{ fontSize: 10, color: "#94a3b8", marginBottom: 4 }}>{t("crew.report.duration")}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#1e293b" }}>
+                <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 4 }}>{t("crew.report.duration")}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>
                   {formatDuration(report.completedAt - report.startedAt)}
                 </div>
                 <div style={{ marginTop: 8 }}>
@@ -181,12 +181,12 @@ export default function CrewReportSheet({ open, automationId, automationName, se
                   <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                   <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
                 </svg>
-                <span style={{ fontSize: 12, color: "#92400e" }}>{t("crew.report.circuitBreaker")}</span>
+                <span style={{ fontSize: 12, color: "var(--accent-primary)" }}>{t("crew.report.circuitBreaker")}</span>
               </div>
             )}
 
             {/* Phase timeline */}
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#64748b", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 10 }}>
               {t("crew.report.phaseTimeline")}
             </div>
 
@@ -194,7 +194,7 @@ export default function CrewReportSheet({ open, automationId, automationName, se
               <div key={phase.phase} style={{ marginBottom: 12 }}>
                 {/* Phase header */}
                 <div style={{
-                  fontSize: 11, fontWeight: 600, color: "#94a3b8", marginBottom: 6,
+                  fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6,
                   display: "flex", alignItems: "center", gap: 6,
                 }}>
                   <div style={{
@@ -207,7 +207,7 @@ export default function CrewReportSheet({ open, automationId, automationName, se
                   </div>
                   {t("crew.phase").replace("{n}", String(phase.phase))}
                   {phase.roles.length > 1 && (
-                    <span style={{ fontSize: 9, color: "#94a3b8" }}>({t("crew.parallel")})</span>
+                    <span style={{ fontSize: 9, color: "var(--text-secondary)" }}>({t("crew.parallel")})</span>
                   )}
                 </div>
 
@@ -218,8 +218,8 @@ export default function CrewReportSheet({ open, automationId, automationName, se
                     const roleName = t(role.roleName) !== role.roleName ? t(role.roleName) : role.roleId
                     return (
                       <div key={role.roleId} style={{
-                        borderRadius: 10, border: "1px solid rgba(0,0,0,0.06)",
-                        background: "rgba(255,255,255,0.8)", overflow: "hidden",
+                        borderRadius: 10, border: "1px solid var(--glass-border)",
+                        background: "var(--glass-bg)", overflow: "hidden",
                         borderLeft: `3px solid ${role.color}`,
                       }}>
                         <button
@@ -239,8 +239,8 @@ export default function CrewReportSheet({ open, automationId, automationName, se
                             {roleName.charAt(0).toUpperCase()}
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 600, color: "#1e293b" }}>{roleName}</div>
-                            <div style={{ fontSize: 10, color: "#94a3b8" }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>{roleName}</div>
+                            <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
                               {role.tokensUsed.toLocaleString()} tok · {formatDuration(role.durationMs)}
                             </div>
                           </div>
@@ -251,11 +251,11 @@ export default function CrewReportSheet({ open, automationId, automationName, se
                           <div style={{ padding: "0 10px 10px" }}>
                             {/* Output summary */}
                             <div style={{
-                              fontSize: 11, lineHeight: 1.6, color: "#475569",
+                              fontSize: 11, lineHeight: 1.6, color: "var(--text-secondary)",
                               whiteSpace: "pre-wrap", wordBreak: "break-word",
                               maxHeight: 200, overflowY: "auto",
                               padding: "8px 10px", borderRadius: 8,
-                              background: "rgba(0,0,0,0.03)",
+                              background: "var(--glass-border)",
                               fontFamily: "monospace",
                             }}>
                               {role.outputSummary || "(no output)"}
@@ -274,7 +274,7 @@ export default function CrewReportSheet({ open, automationId, automationName, se
               <div style={{
                 marginTop: 12, padding: "8px 12px", borderRadius: 8,
                 background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.12)",
-                fontSize: 11, color: "#0e7490", display: "flex", alignItems: "center", gap: 6,
+                fontSize: 11, color: "var(--accent-primary)", display: "flex", alignItems: "center", gap: 6,
               }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />

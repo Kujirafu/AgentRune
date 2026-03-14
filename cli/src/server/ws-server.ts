@@ -2224,7 +2224,7 @@ export function createServer(portOverride?: number) {
             id: prdId,
             title: old.prd?.goal || old.requirement || "Migrated PRD",
             priority: "p1",
-            status: old.tasks?.every((t: any) => t.status === "done" || t.status === "skipped") ? "done" : "active",
+            status: old.tasks?.every((t: any) => t.status === "done" || t.status === "completed" || t.status === "skipped") ? "done" : "active",
             goal: old.prd?.goal || old.requirement || "",
             decisions: old.prd?.decisions || [],
             approaches: old.prd?.approaches || [],
@@ -2251,7 +2251,7 @@ export function createServer(portOverride?: number) {
 
   function checkAutoComplete(prd: PrdItem): boolean {
     if (prd.status === "done" || prd.tasks.length === 0) return false
-    const allDone = prd.tasks.every(t => t.status === "done" || t.status === "skipped")
+    const allDone = prd.tasks.every(t => t.status === "done" || t.status === "completed" || t.status === "skipped")
     if (allDone) {
       prd.status = "done"
       prd.updatedAt = Date.now()
@@ -2273,7 +2273,7 @@ export function createServer(portOverride?: number) {
           title: prd.title,
           priority: prd.priority,
           status: prd.status,
-          tasksDone: prd.tasks.filter(t => t.status === "done").length,
+          tasksDone: prd.tasks.filter(t => t.status === "done" || t.status === "completed").length,
           tasksSkipped: prd.tasks.filter(t => t.status === "skipped").length,
           tasksTotal: prd.tasks.length,
           createdAt: prd.createdAt,

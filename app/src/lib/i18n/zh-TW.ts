@@ -168,6 +168,10 @@ export const zhTW: Record<string, string> = {
   // 待辦事項
   "tasks.queueHint": "最上面的最先執行，長按拖移或用箭頭調整順序",
   "tasks.empty": "還沒有待辦事項",
+  "tasks.tabTitle": "任務",
+  "tasks.emptyTitle": "還沒有任務",
+  "tasks.emptyDesc": "用輸入欄的任務按鈕新增任務",
+  "tasks.manual": "手動任務",
   "tasks.emptyHint": "讓 AI 把你的想法拆解成可執行步驟，或手動匯入任務",
   "tasks.aiBreakdown": "AI 拆解任務",
   "tasks.importJson": "匯入 JSON",
@@ -526,6 +530,7 @@ export const zhTW: Record<string, string> = {
   "unified.mergeAllDesc": "合併所有工作階段的分支到 main",
 
   // 規劃
+  "prd.tabTitle": "計畫",
   "prd.empty": "尚無規劃",
   "prd.emptyHint": "開始一個工作階段並描述你想做什麼，Agent 會自動引導你完成規劃。",
   "prd.viewDesc": "查看規劃和任務進度",

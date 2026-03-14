@@ -185,14 +185,14 @@ function PillToggle({ options, value, onChange }: {
   return (
     <div style={{
       display: "flex", gap: 0,
-      background: "rgba(0,0,0,0.06)", borderRadius: 10, padding: 3,
+      background: "var(--glass-border)", borderRadius: 10, padding: 3,
     }}>
       {options.map((opt) => (
         <button key={opt.value} onClick={() => onChange(opt.value)} style={{
           flex: 1, padding: "6px 14px", borderRadius: 8,
           border: "none",
           background: value === opt.value ? "#37ACC0" : "transparent",
-          color: value === opt.value ? "#fff" : "#52667a",
+          color: value === opt.value ? "#fff" : "var(--text-secondary)",
           fontSize: 12, fontWeight: 600, cursor: "pointer",
           transition: "all 0.2s",
         }}>
@@ -751,21 +751,21 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         ref={sheetRef} {...swipeHandlers}
         style={{
           position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 201,
-          background: "#e5ddd5",
-          borderTop: "1px solid rgba(0,0,0,0.08)", borderRadius: "24px 24px 0 0",
+          background: "var(--card-bg)",
+          borderTop: "1px solid var(--glass-border)", borderRadius: "24px 24px 0 0",
           padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
           maxHeight: "85dvh", overflowY: "auto",
-          color: "#1e293b",
+          color: "var(--text-primary)",
         }}
       >
         {/* Handle */}
-        <div style={{ width: 36, height: 4, borderRadius: 2, background: "#94a3b8", opacity: 0.3, margin: "0 auto 20px" }} />
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--text-secondary)", opacity: 0.3, margin: "0 auto 20px" }} />
 
         {page === "pick" ? (
           /* ======================== TEMPLATE PICKER (entry page) ======================== */
           <>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: "#1e293b" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>
                 {t("automation.newAutomation") || "New Schedule"}
               </div>
             </div>
@@ -775,24 +775,24 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <button onClick={() => openAddForm()} style={{
                 display: "flex", alignItems: "center", gap: 10, flex: 1,
                 padding: "12px 14px", borderRadius: 14,
-                border: "1.5px dashed #c8bfb6", background: "transparent",
+                border: "1.5px dashed var(--glass-border)", background: "transparent",
                 cursor: "pointer", textAlign: "left",
               }}>
                 <div style={{
                   width: 36, height: 36, borderRadius: 10,
-                  background: "#ddd5cc", border: "1px solid #c8bfb6",
+                  background: "var(--card-bg)", border: "1px solid var(--glass-border)",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  color: "#64748b", flexShrink: 0,
+                  color: "var(--text-secondary)", flexShrink: 0,
                 }}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                   </svg>
                 </div>
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
                     {t("automation.manualCreate") || "Manual"}
                   </div>
-                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 1 }}>
+                  <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                     {t("automation.manualCreateDesc") || "Start from scratch"}
                   </div>
                 </div>
@@ -831,10 +831,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   </svg>
                 </div>
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
                     {t("automation.customCrew") || "Custom Crew"}
                   </div>
-                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 1 }}>
+                  <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                     {t("automation.customCrewDesc") || "Build your own role chain"}
                   </div>
                 </div>
@@ -843,7 +843,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
             {/* Search bar */}
             <div style={{ position: "relative", marginBottom: 10 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
                 <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
               <input
@@ -851,14 +851,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 placeholder={t("automation.searchTemplates") || "Search templates..."}
                 style={{
                   width: "100%", padding: "10px 14px 10px 34px", borderRadius: 12,
-                  border: "1px solid #c8bfb6", background: "#ddd5cc",
-                  color: "#1e293b", fontSize: 13, outline: "none", boxSizing: "border-box",
+                  border: "1px solid var(--glass-border)", background: "var(--card-bg)",
+                  color: "var(--text-primary)", fontSize: 13, outline: "none", boxSizing: "border-box",
                 }}
               />
               {templateSearch && (
                 <button onClick={() => setTemplateSearch("")} style={{
                   position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-                  background: "none", border: "none", color: "#94a3b8", cursor: "pointer", padding: 4,
+                  background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", padding: 4,
                 }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -874,8 +874,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             }}>
               <button onClick={() => setSelectedGroup(null)} style={{
                 padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
-                background: selectedGroup === null ? "rgba(55, 172, 192, 0.15)" : "#ddd5cc",
-                color: selectedGroup === null ? "#37ACC0" : "#64748b",
+                background: selectedGroup === null ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
+                color: selectedGroup === null ? "#37ACC0" : "var(--text-secondary)",
                 fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
               }}>
                 {t("automation.allCategories") || "All"}
@@ -883,8 +883,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               {customTemplates.length > 0 && (
                 <button onClick={() => setSelectedGroup(selectedGroup === "custom" ? null : "custom")} style={{
                   padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
-                  background: selectedGroup === "custom" ? "rgba(55, 172, 192, 0.15)" : "#ddd5cc",
-                  color: selectedGroup === "custom" ? "#37ACC0" : "#64748b",
+                  background: selectedGroup === "custom" ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
+                  color: selectedGroup === "custom" ? "#37ACC0" : "var(--text-secondary)",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}>
                   {t("automation.myTemplates") || "My Templates"}
@@ -893,8 +893,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               {TEMPLATE_GROUPS.map((g) => (
                 <button key={g.key} onClick={() => setSelectedGroup(selectedGroup === g.key ? null : g.key)} style={{
                   padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
-                  background: selectedGroup === g.key ? "rgba(55, 172, 192, 0.15)" : "#ddd5cc",
-                  color: selectedGroup === g.key ? "#37ACC0" : "#64748b",
+                  background: selectedGroup === g.key ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
+                  color: selectedGroup === g.key ? "#37ACC0" : "var(--text-secondary)",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}>
                   {t(g.label) !== g.label ? t(g.label) : g.key}
@@ -991,8 +991,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                   {sgVisible.map(renderItem)}
                                   {sgHidden > 0 && !sgExpanded && (
                                     <button onClick={() => toggleSection(sg)} style={{
-                                      background: "none", border: "1px dashed #c8bfb6", borderRadius: 10,
-                                      padding: "8px 0", color: "#64748b", fontSize: 12, cursor: "pointer",
+                                      background: "none", border: "1px dashed var(--glass-border)", borderRadius: 10,
+                                      padding: "8px 0", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer",
                                     }}>
                                       {t("automation.showMore") || "Show more"} ({sgHidden})
                                     </button>
@@ -1010,8 +1010,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 {gVisible.map(renderItem)}
                                 {gHidden > 0 && !gExpanded && (
                                   <button onClick={() => toggleSection(g.key)} style={{
-                                    background: "none", border: "1px dashed #c8bfb6", borderRadius: 10,
-                                    padding: "8px 0", color: "#64748b", fontSize: 12, cursor: "pointer",
+                                    background: "none", border: "1px dashed var(--glass-border)", borderRadius: 10,
+                                    padding: "8px 0", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer",
                                   }}>
                                     {t("automation.showMore") || "Show more"} ({gHidden})
                                   </button>
@@ -1340,7 +1340,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         color: "var(--text-secondary)",
                                         whiteSpace: "pre-wrap", wordBreak: "break-word",
                                         maxHeight: 120, overflowY: "auto",
-                                        background: "rgba(0,0,0,0.1)", padding: "8px 10px", borderRadius: 8,
+                                        background: "var(--glass-border)", padding: "8px 10px", borderRadius: 8,
                                       }}>
                                         {displayText}
                                       </div>
@@ -1549,8 +1549,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               placeholder={t("automation.namePlaceholder")}
               style={{
                 width: "100%", padding: "10px 14px", borderRadius: 12,
-                border: "1px solid rgba(0,0,0,0.12)", background: "rgba(255,255,255,0.6)",
-                color: "#1e293b", fontSize: 14, outline: "none",
+                border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                color: "var(--text-primary)", fontSize: 14, outline: "none",
                 boxSizing: "border-box", marginBottom: 10,
               }}
             />
@@ -1559,7 +1559,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             {formCrew ? (
               /* ---- CREW MODE: Role card list ---- */
               <div style={{ width: "100%", marginBottom: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#64748b", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>
                   {t("crew.rolesCount").replace("{n}", String(formCrew.roles.length))}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1583,8 +1583,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     }
                     return (
                       <div key={role.id} style={{
-                        borderRadius: 12, border: "1px solid rgba(0,0,0,0.08)",
-                        background: "rgba(255,255,255,0.6)", overflow: "hidden",
+                        borderRadius: 12, border: "1px solid var(--glass-border)",
+                        background: "var(--glass-bg)", overflow: "hidden",
                         borderLeft: `3px solid ${role.color}`,
                       }}>
                         <button
@@ -1652,7 +1652,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 { label: t("crew.persona.focus"), value: role.persona.focus },
                                 { label: t("crew.persona.style"), value: role.persona.style },
                               ].map((p) => (
-                                <div key={p.label} style={{ fontSize: 10, color: "#64748b", background: "rgba(0,0,0,0.04)", borderRadius: 6, padding: "3px 7px" }}>
+                                <div key={p.label} style={{ fontSize: 10, color: "var(--text-secondary)", background: "var(--glass-border)", borderRadius: 6, padding: "3px 7px" }}>
                                   <span style={{ fontWeight: 600 }}>{p.label}:</span> {p.value}
                                 </div>
                               ))}
@@ -1667,8 +1667,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               rows={4}
                               style={{
                                 width: "100%", padding: "8px 10px", borderRadius: 8,
-                                border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.8)",
-                                color: "#1e293b", fontSize: 11, lineHeight: 1.5,
+                                border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                                color: "var(--text-primary)", fontSize: 11, lineHeight: 1.5,
                                 outline: "none", boxSizing: "border-box", resize: "vertical",
                                 fontFamily: "inherit",
                               }}
@@ -1690,7 +1690,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                   <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 500 }}>
                                     {resolveChainText(chain.nameKey, t)}
                                   </span>
-                                  <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>
+                                  <span style={{ fontSize: 10, color: "var(--text-secondary)", marginLeft: "auto" }}>
                                     {stepCount} {t("crew.chainSteps")}
                                   </span>
                                 </div>
@@ -1698,7 +1698,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             })()}
                             {/* Phase selector */}
                             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                              <span style={{ fontSize: 11, color: "#64748b" }}>{t("crew.phase").replace("{n}", "")}</span>
+                              <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{t("crew.phase").replace("{n}", "")}</span>
                               <input
                                 type="number" min={1} max={10} value={role.phase}
                                 onChange={(e) => {
@@ -1707,7 +1707,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 }}
                                 style={{
                                   width: 48, padding: "4px 8px", borderRadius: 6,
-                                  border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.8)",
+                                  border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
                                   fontSize: 12, textAlign: "center", outline: "none",
                                 }}
                               />
@@ -1753,8 +1753,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   }}
                   style={{
                     width: "100%", padding: "8px 0", marginTop: 6,
-                    borderRadius: 10, border: "1.5px dashed rgba(0,0,0,0.15)",
-                    background: "transparent", color: "#64748b",
+                    borderRadius: 10, border: "1.5px dashed var(--glass-border)",
+                    background: "transparent", color: "var(--text-secondary)",
                     fontSize: 12, cursor: "pointer", display: "flex",
                     alignItems: "center", justifyContent: "center", gap: 6,
                   }}
@@ -1765,13 +1765,13 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 {/* Token budget + separate branch toggle */}
                 <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "flex-end" }}>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>{t("crew.tokenBudget")}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>{t("crew.tokenBudget")}</div>
                     <input
                       type="number" value={formCrew.tokenBudget}
                       onChange={(e) => setFormCrew({ ...formCrew, tokenBudget: parseInt(e.target.value) || 10000 })}
                       style={{
                         width: "100%", padding: "8px 10px", borderRadius: 8,
-                        border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.6)",
+                        border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
                         fontSize: 12, outline: "none", boxSizing: "border-box",
                       }}
                     />
@@ -1785,15 +1785,15 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
                       padding: "8px 12px", borderRadius: 8,
-                      border: `1px solid ${formCrew.targetBranch ? "rgba(55,172,192,0.3)" : "rgba(0,0,0,0.1)"}`,
-                      background: formCrew.targetBranch ? "rgba(55,172,192,0.08)" : "rgba(255,255,255,0.6)",
+                      border: `1px solid ${formCrew.targetBranch ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
+                      background: formCrew.targetBranch ? "rgba(55,172,192,0.08)" : "var(--glass-bg)",
                       cursor: "pointer", flexShrink: 0, height: 36, boxSizing: "border-box",
                     }}
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.targetBranch ? "#37ACC0" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.targetBranch ? "#37ACC0" : "var(--text-secondary)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
                     </svg>
-                    <span style={{ fontSize: 11, fontWeight: 500, color: formCrew.targetBranch ? "#37ACC0" : "#94a3b8", whiteSpace: "nowrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 500, color: formCrew.targetBranch ? "#37ACC0" : "var(--text-secondary)", whiteSpace: "nowrap" }}>
                       {t("crew.separateBranch")}
                     </span>
                   </button>
@@ -1804,8 +1804,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 onClick={() => setFormTemplateId(null)}
                 style={{
                   width: "100%", padding: "10px 14px", borderRadius: 12,
-                  border: "1px solid rgba(0,0,0,0.12)", background: "rgba(255,255,255,0.6)",
-                  color: "#52667a", fontSize: 12, lineHeight: 1.4,
+                  border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                  color: "var(--text-secondary)", fontSize: 12, lineHeight: 1.4,
                   boxSizing: "border-box", marginBottom: 0, cursor: "pointer",
                   overflow: "hidden", maxHeight: 40,
                   display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as never,
@@ -1821,9 +1821,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   rows={3}
                   style={{
                     width: "100%", padding: "10px 14px", paddingRight: 36, borderRadius: 12,
-                    border: promptMatches.length > 0 ? "1.5px solid rgba(55,172,192,0.4)" : "1px solid rgba(0,0,0,0.12)",
-                    background: "rgba(255,255,255,0.6)",
-                    color: "#1e293b", fontSize: 13, outline: "none",
+                    border: promptMatches.length > 0 ? "1.5px solid rgba(55,172,192,0.4)" : "1px solid var(--glass-border)",
+                    background: "var(--glass-bg)",
+                    color: "var(--text-primary)", fontSize: 13, outline: "none",
                     boxSizing: "border-box", marginBottom: 0, resize: "vertical",
                     fontFamily: "inherit", lineHeight: 1.5,
                   }}
@@ -1836,7 +1836,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     position: "absolute", top: 8, right: 8,
                     width: 24, height: 24, borderRadius: 6,
                     border: "none", background: "transparent",
-                    color: formPrompt.length > 50 ? "#37ACC0" : "rgba(0,0,0,0.25)",
+                    color: formPrompt.length > 50 ? "#37ACC0" : "var(--text-secondary)",
                     cursor: "pointer", display: "flex",
                     alignItems: "center", justifyContent: "center",
                     opacity: formPrompt.length > 50 ? 1 : 0.6,
@@ -2004,7 +2004,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
                     <input type="time" value={formTimeOfDay} onChange={(e) => setFormTimeOfDay(e.target.value)} style={{
                       fontSize: 32, fontWeight: 300, fontFamily: "'Inter', system-ui, sans-serif",
-                      background: "transparent", border: "none", color: "#1e293b",
+                      background: "transparent", border: "none", color: "var(--text-primary)",
                       textAlign: "center", outline: "none", letterSpacing: "-1px",
                     }} />
                   </div>
@@ -2016,8 +2016,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{t("automation.every")}</span>
                   <input type="number" value={formInterval} onChange={(e) => setFormInterval(e.target.value)} min="1" style={{
                     width: 60, padding: "8px 10px", borderRadius: 10, textAlign: "center",
-                    border: "1px solid rgba(0,0,0,0.12)", background: "rgba(255,255,255,0.6)",
-                    color: "#1e293b", fontSize: 14, outline: "none",
+                    border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                    color: "var(--text-primary)", fontSize: 14, outline: "none",
                   }} />
                   <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{t("automation.minutes")}</span>
                 </div>
@@ -2504,23 +2504,23 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
     <div style={{
       display: "flex", alignItems: "center", gap: 0,
       width: "100%", borderRadius: 14,
-      border: "1px solid #c8bfb6", background: "#ddd5cc",
+      border: "1px solid var(--glass-border)", background: "var(--card-bg)",
     }}>
       <button onClick={onUse} style={{
         display: "flex", alignItems: "center", gap: 12,
         flex: 1, minWidth: 0, padding: "12px 8px 12px 14px",
         background: "none", border: "none", cursor: "pointer", textAlign: "left",
       }}>
-        <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: "50%", background: circleColor, border: "2.5px solid #ddd5cc", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 0 }}>
+        <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: "50%", background: circleColor, border: "2.5px solid var(--glass-border)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 0 }}>
           <div style={{ transform: "scale(0.78)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             {icon || CUSTOM_TEMPLATE_ICON}
           </div>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{tplName(tmpl)}</div>
-          <div style={{ fontSize: 11, color: "#64748b", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tplDesc(tmpl)}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tplDesc(tmpl)}</div>
         </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
           <polyline points="9 18 15 12 9 6" />
         </svg>
       </button>
@@ -2529,7 +2529,7 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
           flexShrink: 0, width: 36, height: "100%", padding: "0 8px 0 0",
           background: "none", border: "none", cursor: "pointer",
           display: "flex", alignItems: "center", justifyContent: "center",
-          color: pinned ? "#37ACC0" : "#c8bfb6",
+          color: pinned ? "#37ACC0" : "var(--glass-border)",
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill={pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
@@ -2579,7 +2579,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
     <div style={{
       display: "flex", alignItems: "center", gap: 0,
       width: "100%", borderRadius: 14,
-      border: "1px solid #c8bfb6", background: "#ddd5cc",
+      border: "1px solid var(--glass-border)", background: "var(--card-bg)",
     }}>
       <button onClick={onUse} style={{
         display: "flex", alignItems: "center", gap: 12,
@@ -2591,7 +2591,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           {roles.slice(0, 4).map((r, i) => (
             <div key={r.id} style={{
               width: 30, height: 30, borderRadius: "50%",
-              background: r.color, border: "2.5px solid #ddd5cc",
+              background: r.color, border: "2.5px solid var(--glass-border)",
               display: "flex", alignItems: "center", justifyContent: "center",
               marginLeft: i === 0 ? 0 : -6, zIndex: 10 - i,
             }}>
@@ -2601,7 +2601,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           {roles.length > 4 && (
             <div style={{
               width: 30, height: 30, borderRadius: "50%",
-              background: "#94a3b8", border: "2.5px solid #ddd5cc",
+              background: "#94a3b8", border: "2.5px solid var(--glass-border)",
               display: "flex", alignItems: "center", justifyContent: "center",
               marginLeft: -6, color: "#fff", fontSize: 10, fontWeight: 700,
             }}>
@@ -2610,13 +2610,13 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           )}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{name}</div>
-          <div style={{ fontSize: 11, color: "#64748b", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
-          <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{name}</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
+          <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 3 }}>
             {t("crew.rolesCount").replace("{n}", String(roles.length))} · {tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
           </div>
         </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
           <polyline points="9 18 15 12 9 6" />
         </svg>
       </button>
@@ -2625,7 +2625,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           flexShrink: 0, width: 36, height: "100%", padding: "0 8px 0 0",
           background: "none", border: "none", cursor: "pointer",
           display: "flex", alignItems: "center", justifyContent: "center",
-          color: pinned ? "#37ACC0" : "#c8bfb6",
+          color: pinned ? "#37ACC0" : "var(--glass-border)",
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill={pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />

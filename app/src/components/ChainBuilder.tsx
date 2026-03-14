@@ -14,7 +14,11 @@ interface ChainBuilderProps {
   initialSlug?: string
   /** Called when user saves/selects a chain in embedded mode */
   onChainSelect?: (slug: string) => void
+  /** Called when user wants to schedule this chain */
+  onSchedule?: (slug: string) => void
 }
+
+type SandboxLevel = "strict" | "moderate" | "permissive" | "none"
 
 interface ChainDraft {
   name: string
@@ -22,6 +26,8 @@ interface ChainDraft {
   slug: string
   steps: ChainNode[]
   forkedFromSlug?: string
+  sandboxLevel: SandboxLevel
+  bypass: boolean
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -296,7 +302,7 @@ function SwipeableChainCard({ chain, t, onEdit, onDelete }: {
 
 // ─── Component ──────────────────────────────────────────────────
 
-export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: ChainBuilderProps) {
+export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onSchedule }: ChainBuilderProps) {
   const { t: tLocale } = useLocale()
   const t = tProp || tLocale
 
@@ -310,9 +316,11 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
         slug: chain.slug,
         steps: JSON.parse(JSON.stringify(chain.steps)),
         forkedFromSlug: chain.slug,
+        sandboxLevel: "none" as SandboxLevel,
+        bypass: true,
       }
     }
-    return { name: "", description: "", slug: "", steps: [] }
+    return { name: "", description: "", slug: "", steps: [], sandboxLevel: "none" as SandboxLevel, bypass: true }
   })
   const [showPalette, setShowPalette] = useState(false)
   const [insertIndex, setInsertIndex] = useState(-1)
@@ -877,6 +885,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
       slug: chain.slug,
       steps: chain.steps || [],
       forkedFromSlug: chain.forkedFromSlug,
+      sandboxLevel: "none",
+      bypass: true,
     })
     setView("editor")
   }, [])
@@ -1260,10 +1270,13 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
     const isRunning = executionStatus === "QUEUED" || executionStatus === "RUNNING"
     const isDone = executionStatus === "COMPLETED" || executionStatus === "FAILED" || executionStatus === "CANCELLED"
     const statusKey = `builder.execution${executionStatus.charAt(0) + executionStatus.slice(1).toLowerCase()}` as string
-    const statusColor = executionStatus === "COMPLETED" ? "#34d399"
+    // Hex values are needed for opacity-suffix concatenation (e.g. `${statusHex}18`)
+    const statusHex = executionStatus === "COMPLETED" ? "#34d399"
       : executionStatus === "FAILED" ? "#FB8184"
-      : executionStatus === "CANCELLED" ? "#94a3b8"
+      : executionStatus === "CANCELLED" ? "#8899aa"
       : "#37ACC0"
+    // CSS-variable version for direct color/background use
+    const statusColor = executionStatus === "CANCELLED" ? "var(--text-secondary)" : statusHex
 
     // Group branches by parallel group
     const groupedBranches = branchRuns.reduce<Record<string, typeof branchRuns>>((acc, br) => {
@@ -1299,8 +1312,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
           {/* Status badge */}
           <span style={{
             padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700,
-            background: `${statusColor}18`, color: statusColor,
-            border: `1px solid ${statusColor}30`,
+            background: `${statusHex}18`, color: statusColor,
+            border: `1px solid ${statusHex}30`,
           }}>
             {t(statusKey) || executionStatus}
           </span>
@@ -1349,7 +1362,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
             const stepDef = step as ChainStepDef
             const stepDone = i < executionStep || (isDone && executionStatus === "COMPLETED")
             const stepActive = i === executionStep && isRunning
-            const phaseColor = isParallel ? "#60a5fa" : PHASE_COLORS[stepDef.phase]?.dot ?? "#94a3b8"
+            const phaseColorHex = isParallel ? "#60a5fa" : PHASE_COLORS[stepDef.phase]?.dot ?? "#8899aa"
+            const phaseColor = (!isParallel && !PHASE_COLORS[stepDef.phase]) ? "var(--text-secondary)" : phaseColorHex
 
             return (
               <div key={isParallel ? `pg-${i}` : stepDef.id} style={{ display: "flex", gap: 12, marginBottom: 8 }}>
@@ -1357,20 +1371,20 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 20 }}>
                   <div style={{
                     width: 12, height: 12, borderRadius: "50%", marginTop: 12, flexShrink: 0,
-                    background: stepDone ? phaseColor : stepActive ? `${phaseColor}80` : "rgba(255,255,255,0.1)",
+                    background: stepDone ? phaseColor : stepActive ? `${phaseColorHex}80` : "rgba(255,255,255,0.1)",
                     border: stepActive ? `2px solid ${phaseColor}` : "none",
-                    boxShadow: stepActive ? `0 0 8px ${phaseColor}40` : "none",
+                    boxShadow: stepActive ? `0 0 8px ${phaseColorHex}40` : "none",
                   }} />
                   {i < draft.steps.length - 1 && (
-                    <div style={{ width: 2, flex: 1, background: stepDone ? `${phaseColor}60` : "rgba(255,255,255,0.06)" }} />
+                    <div style={{ width: 2, flex: 1, background: stepDone ? `${phaseColorHex}60` : "rgba(255,255,255,0.06)" }} />
                   )}
                 </div>
 
                 {/* Step card */}
                 <div style={{
                   flex: 1, padding: "10px 14px", borderRadius: 12, marginBottom: 4,
-                  background: stepActive ? `${phaseColor}08` : "var(--glass-bg)",
-                  border: `1px solid ${stepActive ? `${phaseColor}30` : "var(--glass-border)"}`,
+                  background: stepActive ? `${phaseColorHex}08` : "var(--glass-bg)",
+                  border: `1px solid ${stepActive ? `${phaseColorHex}30` : "var(--glass-border)"}`,
                   opacity: stepDone ? 0.6 : 1,
                 }}>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>
@@ -1513,7 +1527,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
           {/* New Chain button */}
           <button
             onClick={() => {
-              setDraft({ name: "", description: "", slug: "", steps: [] })
+              setDraft({ name: "", description: "", slug: "", steps: [], sandboxLevel: "none", bypass: true })
               setView("editor")
             }}
             style={{
@@ -1668,35 +1682,56 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
             fontFamily: "inherit",
           }}
         />
-        <button
-          onClick={handleSave}
-          disabled={saving || !draft.name || draft.steps.length < 1}
-          style={{
-            padding: "6px 14px", borderRadius: 8,
-            background: "var(--accent-primary)", color: "#fff",
-            border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer",
-            opacity: (saving || !draft.name || draft.steps.length < 1) ? 0.4 : 1,
-            transition: "opacity 0.15s ease",
-          }}
-        >
-          {saving ? "..." : t("builder.save")}
-        </button>
+        {/* Execute */}
         <button
           onClick={handleExecute}
           disabled={saving || !draft.slug || draft.steps.length < 1}
+          title={t("builder.execute")}
           style={{
-            padding: "6px 14px", borderRadius: 8,
-            background: "#37ACC0", color: "#fff",
-            border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer",
-            opacity: (saving || !draft.slug || draft.steps.length < 1) ? 0.4 : 1,
-            transition: "opacity 0.15s ease",
-            display: "flex", alignItems: "center", gap: 4,
+            padding: 6, borderRadius: 8,
+            background: "none", border: "none", cursor: "pointer",
+            color: "#37ACC0",
+            opacity: (saving || !draft.slug || draft.steps.length < 1) ? 0.3 : 1,
+            display: "flex", alignItems: "center",
           }}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-            <polygon points="5,3 19,12 5,21" />
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="5,3 19,12 5,21"/>
           </svg>
-          {t("builder.execute")}
+        </button>
+        {/* Schedule */}
+        <button
+          onClick={() => { if (draft.slug && onSchedule) onSchedule(draft.slug) }}
+          disabled={!draft.slug || draft.steps.length < 1}
+          title={t("templates.newSchedule") || "Schedule"}
+          style={{
+            padding: 6, borderRadius: 8,
+            background: "none", border: "none", cursor: "pointer",
+            color: "var(--text-secondary)",
+            opacity: (!draft.slug || draft.steps.length < 1) ? 0.3 : 0.7,
+            display: "flex", alignItems: "center",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
+        {/* Save */}
+        <button
+          onClick={handleSave}
+          disabled={saving || !draft.name || draft.steps.length < 1}
+          title={t("builder.save")}
+          style={{
+            padding: 6, borderRadius: 8,
+            background: "none", border: "none", cursor: "pointer",
+            color: "var(--text-secondary)",
+            opacity: (saving || !draft.name || draft.steps.length < 1) ? 0.3 : 0.7,
+            display: "flex", alignItems: "center",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+          </svg>
         </button>
       </div>
 
@@ -1763,6 +1798,56 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect }: C
             </div>
           </>
         )}
+      </div>
+
+      {/* ═══ Sandbox controls — bottom right ═══ */}
+      <div style={{
+        position: "absolute", bottom: 16, right: 16,
+        display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6,
+        zIndex: 50,
+      }}>
+        {/* Sandbox level chips */}
+        <div style={{
+          display: "flex", gap: 4, padding: "4px 6px", borderRadius: 10,
+          background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+          backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+        }}>
+          {(["none", "permissive", "moderate", "strict"] as SandboxLevel[]).map(lv => {
+            const active = draft.sandboxLevel === lv
+            const colors: Record<SandboxLevel, string> = { none: "#22c55e", permissive: "#37ACC0", moderate: "#f59e0b", strict: "#ef4444" }
+            return (
+              <button key={lv} onClick={() => setDraft(d => ({ ...d, sandboxLevel: lv }))} style={{
+                padding: "3px 8px", borderRadius: 6, border: "none", cursor: "pointer",
+                background: active ? `${colors[lv]}20` : "transparent",
+                color: active ? colors[lv] : "var(--text-secondary)",
+                fontSize: 9, fontWeight: 700, opacity: active ? 1 : 0.5,
+              }}>
+                {t(`sandbox.level.${lv}`)}
+              </button>
+            )
+          })}
+        </div>
+        {/* Bypass toggle */}
+        <button
+          onClick={() => setDraft(d => ({ ...d, bypass: !d.bypass }))}
+          style={{
+            padding: "5px 10px", borderRadius: 8,
+            border: `1px solid ${draft.bypass ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
+            background: draft.bypass ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.08)",
+            backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            color: draft.bypass ? "#22c55e" : "#ef4444",
+            fontSize: 10, fontWeight: 700, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 5,
+          }}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {draft.bypass
+              ? <><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></>
+              : <><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>
+            }
+          </svg>
+          Bypass {draft.bypass ? "ON" : "OFF"}
+        </button>
       </div>
 
       {/* ═══ Step Palette Bottom Sheet ═══ */}
