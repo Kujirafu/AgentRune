@@ -947,19 +947,12 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                 {settings.model === "opus" && (
                   <ToggleCard
                     label={t("settings.fastMode") || "Fast Mode (Opus)"}
-                    description={t("settings.fastModeDesc") || "Faster output with same Opus model"}
+                    description={(t("settings.fastModeDesc") || "Faster output with same Opus model") + " — /fast in session"}
                     icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>}
                     active={settings.fastMode}
                     onChange={(v) => onChange({ ...settings, fastMode: v })}
                   />
                 )}
-                <ToggleCard
-                  label={t("settings.thinking") || "Thinking"}
-                  description={t("settings.thinkingDesc") || "Show extended thinking process"}
-                  icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>}
-                  active={settings.claudeThinking}
-                  onChange={(v) => onChange({ ...settings, claudeThinking: v })}
-                />
                 {/* Claude Effort Level */}
                 <div style={{
                   display: "flex",
