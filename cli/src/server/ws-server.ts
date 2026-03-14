@@ -2858,9 +2858,10 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/automations/:projectId", express.json(), (req, res) => {
-    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model, bypass } = req.body
-    if (!name || !schedule || (!command && !prompt)) {
-      return res.status(400).json({ error: "name, schedule, and (prompt or command) are required" })
+    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model, bypass, crew } = req.body
+    // Crew automations don't need a prompt (roles have their own prompts)
+    if (!name || !schedule || (!command && !prompt && !crew)) {
+      return res.status(400).json({ error: "name, schedule, and (prompt or command or crew) are required" })
     }
     const auto = automationManager.add({
       projectId: req.params.projectId,
@@ -2875,6 +2876,7 @@ export function createServer(portOverride?: number) {
       model: model || undefined,
       bypass: bypass || false,
       enabled: req.body.enabled !== false,
+      crew: crew || undefined,
     })
     if ("error" in auto) return res.status(429).json(auto)
     res.json(auto)
@@ -2895,6 +2897,11 @@ export function createServer(portOverride?: number) {
   app.get("/api/automations/:projectId/:id/results", (req, res) => {
     const results = automationManager.getResults(req.params.id)
     res.json(results)
+  })
+
+  app.get("/api/automations/:projectId/:id/crew-reports", (req, res) => {
+    const reports = automationManager.getCrewReports(req.params.id)
+    res.json(reports)
   })
 
   app.get("/api/automations/:projectId/:id/scan-conflicts", (req, res) => {
@@ -3228,7 +3235,7 @@ export function createServer(portOverride?: number) {
           // ParseEngine now only used for TUI detection (resume menu)
           let engine = sessionEngines.get(session.id)
           if (!engine) {
-            engine = new ParseEngine(agentId, projectId, project.cwd)
+            engine = new ParseEngine(agentId, projectId, sessionProject.cwd)
             sessionEngines.set(session.id, engine)
             sessionRecentEvents.set(session.id, [])
           }
