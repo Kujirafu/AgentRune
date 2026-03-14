@@ -1148,6 +1148,9 @@ export const zhTW: Record<string, string> = {
   "trust.constraints.source.standard": "規範",
   "trust.constraints.source.sandbox": "沙箱",
   "trust.constraints.source.authority": "權限",
+  "trust.audit": "審計記錄",
+  "trust.audit.empty": "暫無審計記錄",
+  "trust.audit.noEntries": "尚無審計記錄",
 
   // 計數 & 總覽
   "count.projects": "{count} 個專案",

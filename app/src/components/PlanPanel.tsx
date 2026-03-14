@@ -29,7 +29,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
 export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: PlanPanelProps) {
   const { t } = useLocale()
   const isDark = document.documentElement.classList.contains("dark")
-  const [activeTab, setActiveTab] = useState<"prd" | "standards" | "constraints">("prd")
+  const [activeTab, setActiveTab] = useState<"prd" | "standards" | "constraints" | "audit">("prd")
 
   // ── PRD list ──
   const [prdList, setPrdList] = useState<PrdSummary[]>([])
@@ -49,6 +49,19 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
   const [constraintsLoading, setConstraintsLoading] = useState(false)
   const [selectedAutoId, setSelectedAutoId] = useState<string | null>(null)
   const [automationList, setAutomationList] = useState<{ id: string; name: string; trustProfile?: string; sandboxLevel?: string }[]>([])
+
+  // ── Audit ──
+  const [auditEntries, setAuditEntries] = useState<{ timestamp: number; action: string; automationName?: string; detail: Record<string, unknown> }[]>([])
+  const [auditLoading, setAuditLoading] = useState(false)
+
+  const fetchAuditLog = useCallback(() => {
+    setAuditLoading(true)
+    fetch(`${getApiBase()}/api/audit/recent?limit=50`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setAuditEntries(data) })
+      .catch(() => setAuditEntries([]))
+      .finally(() => setAuditLoading(false))
+  }, [])
 
   const fetchAutomations = useCallback(() => {
     fetch(`${getApiBase()}/api/automations/${encodeURIComponent(projectId)}`)
@@ -535,6 +548,9 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
         <button onClick={() => { setActiveTab("constraints"); fetchAutomations() }} style={tabStyle(activeTab === "constraints")}>
           {t("trust.constraints") || "Constraints"}
         </button>
+        <button onClick={() => { setActiveTab("audit"); fetchAuditLog() }} style={tabStyle(activeTab === "audit")}>
+          Audit
+        </button>
       </div>
 
       {/* Content */}
@@ -596,6 +612,59 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
                     <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)" }}>{c.title}</span>
                   </div>
                   <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>{c.description}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {activeTab === "audit" && (
+          <div>
+            {auditLoading && <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>Loading...</div>}
+            {!auditLoading && auditEntries.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", textAlign: "center", padding: 20 }}>
+                No audit entries
+              </div>
+            )}
+            {!auditLoading && auditEntries.map((entry, i) => {
+              const actionColors: Record<string, string> = {
+                automation_started: "#37ACC0",
+                automation_completed: "#22c55e",
+                daily_limit_reached: "#f59e0b",
+                plan_review_requested: "#37ACC0",
+                plan_review_approved: "#22c55e",
+                plan_review_denied: "#ef4444",
+                plan_review_timeout: "#f59e0b",
+                runtime_violation: "#ef4444",
+                runtime_halt: "#ef4444",
+                trust_profile_changed: "#94a3b8",
+                permission_granted: "#22c55e",
+                permission_denied: "#ef4444",
+              }
+              const color = actionColors[entry.action] || "#94a3b8"
+              const time = new Date(entry.timestamp)
+              const timeStr = `${time.getHours().toString().padStart(2, "0")}:${time.getMinutes().toString().padStart(2, "0")}:${time.getSeconds().toString().padStart(2, "0")}`
+              return (
+                <div key={i} style={{
+                  padding: "6px 10px", borderRadius: 8, marginBottom: 3,
+                  border: `1px solid ${color}20`,
+                  background: `${color}06`,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{
+                      fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
+                      background: `${color}20`, color,
+                      fontFamily: "monospace",
+                    }}>{entry.action.replace(/_/g, " ")}</span>
+                    <span style={{ fontSize: 10, color: "var(--text-secondary)", fontFamily: "monospace" }}>{timeStr}</span>
+                    {entry.automationName && (
+                      <span style={{ fontSize: 10, color: "var(--text-primary)", fontWeight: 600 }}>{entry.automationName}</span>
+                    )}
+                  </div>
+                  {Object.keys(entry.detail).length > 0 && (
+                    <div style={{ fontSize: 9, color: "var(--text-secondary)", marginTop: 2, fontFamily: "monospace" }}>
+                      {Object.entries(entry.detail).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ")}
+                    </div>
+                  )}
                 </div>
               )
             })}

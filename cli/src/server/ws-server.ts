@@ -25,6 +25,7 @@ import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
 import { buildPlanningConstraints } from "./planning-constraints.js"
 import { createFromTrustProfile } from "./authority-map.js"
+import { readAuditLog, listAuditDates, getRecentAuditEntries, getAutomationAudit } from "./audit-log.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
@@ -2930,6 +2931,29 @@ export function createServer(portOverride?: number) {
     } catch (err) {
       res.status(500).json({ error: "Failed to build constraints" })
     }
+  })
+
+  // ── Audit log API ──
+  app.get("/api/audit", (_req, res) => {
+    const dates = listAuditDates()
+    res.json({ dates })
+  })
+
+  app.get("/api/audit/recent", (req, res) => {
+    const limit = parseInt(req.query.limit as string) || 50
+    res.json(getRecentAuditEntries(Math.min(limit, 200)))
+  })
+
+  app.get("/api/audit/:date", (req, res) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) {
+      return res.status(400).json({ error: "Invalid date format (expected YYYY-MM-DD)" })
+    }
+    res.json(readAuditLog(req.params.date))
+  })
+
+  app.get("/api/audit/automation/:automationId", (req, res) => {
+    const limit = parseInt(req.query.limit as string) || 50
+    res.json(getAutomationAudit(req.params.automationId, Math.min(limit, 200)))
   })
 
   app.post("/api/automations/:projectId/:id/trigger", async (req, res) => {
