@@ -113,6 +113,7 @@ export function MissionControl({
   const [toast, setToast] = useState<string | null>(null)
   const showToast = useCallback((msg: string, duration = 3000) => { setToast(msg); setTimeout(() => setToast(null), duration) }, [])
   const [bypassConfirmPending, setBypassConfirmPending] = useState(false)
+  const [trustEvents, setTrustEvents] = useState<{ type: string; automationId: string; automationName: string; timeoutMinutes?: number; limit?: number; todayCount?: number }[]>([])
   // Track Claude's actual fast mode state (from output detection)
   const actualFastModeRef = useRef<boolean | null>(null)
   const [panel, setPanel] = useState(0) // 0=events(Live), 1=diff(Code), 2=plan
@@ -596,6 +597,42 @@ export function MissionControl({
       window.visualViewport?.removeEventListener("scroll", update)
       window.removeEventListener("resize", update)
     }
+  }, [])
+
+  // Listen for Trust Layer events (plan review, daily limit, etc.)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (!detail?.type) return
+      setTrustEvents(prev => [...prev, {
+        type: detail.type,
+        automationId: detail.automationId,
+        automationName: detail.automationName || "Automation",
+        timeoutMinutes: detail.timeoutMinutes,
+        limit: detail.limit,
+        todayCount: detail.todayCount,
+      }])
+    }
+    window.addEventListener("trust_event", handler)
+    return () => window.removeEventListener("trust_event", handler)
+  }, [])
+
+  const handleTrustAction = useCallback(async (automationId: string, action: "approve" | "deny", index: number) => {
+    try {
+      await fetch(`${getApiBase()}/api/skill-trust/${encodeURIComponent(automationId)}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      })
+      setTrustEvents(prev => prev.filter((_, i) => i !== index))
+      showToast(action === "approve" ? (t("trust.planReviewApproved") || "Approved") : (t("trust.planReviewRejected") || "Rejected"))
+    } catch {
+      showToast("Failed to send response")
+    }
+  }, [showToast, t])
+
+  const dismissTrustEvent = useCallback((index: number) => {
+    setTrustEvents(prev => prev.filter((_, i) => i !== index))
   }, [])
 
   // Auto-scroll to bottom when keyboard opens/closes
@@ -2798,6 +2835,64 @@ return (
           </div>
         )
       })()}
+      {/* Trust Layer event cards */}
+      {trustEvents.map((evt, i) => (
+        <div key={`trust-${i}`} style={{
+          position: "fixed", top: 60 + i * 90, left: 12, right: 12, zIndex: 9999,
+          padding: "12px 14px", borderRadius: 14,
+          background: "var(--glass-bg)", backdropFilter: "blur(20px)",
+          WebkitBackdropFilter: "blur(20px)",
+          border: `1px solid ${evt.type === "plan_review_required" ? "rgba(55,172,192,0.4)" : evt.type === "daily_limit_reached" ? "rgba(245,158,11,0.4)" : "rgba(148,163,184,0.3)"}`,
+          boxShadow: "0 4px 24px rgba(0,0,0,0.2)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            {/* Icon */}
+            {evt.type === "plan_review_required" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            )}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+                {evt.automationName}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                {evt.type === "plan_review_required"
+                  ? `${t("trust.planReviewPending") || "Awaiting plan review"} (${evt.timeoutMinutes || 30}m timeout)`
+                  : evt.type === "daily_limit_reached"
+                  ? t("trust.dailyLimitReached", { count: String(evt.todayCount || 0), limit: String(evt.limit || 0) }) || `Daily limit reached (${evt.todayCount}/${evt.limit})`
+                  : evt.type}
+              </div>
+            </div>
+          </div>
+          {/* Action buttons */}
+          {evt.type === "plan_review_required" || evt.type === "skill_confirmation_required" || evt.type === "bypass_confirmation_required" ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => handleTrustAction(evt.automationId, "approve", i)} style={{
+                flex: 1, padding: "8px 12px", borderRadius: 10, border: "none",
+                background: "#37ACC0", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              }}>
+                {t("trust.planReviewApproved")?.replace("已", "") || "Approve"}
+              </button>
+              <button onClick={() => handleTrustAction(evt.automationId, "deny", i)} style={{
+                flex: 1, padding: "8px 12px", borderRadius: 10,
+                border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)",
+                color: "#ef4444", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              }}>
+                {t("trust.planReviewRejected")?.replace("已", "") || "Reject"}
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => dismissTrustEvent(i)} style={{
+              width: "100%", padding: "6px 12px", borderRadius: 8,
+              border: "1px solid var(--glass-border)", background: "transparent",
+              color: "var(--text-secondary)", fontSize: 11, cursor: "pointer",
+            }}>
+              OK
+            </button>
+          )}
+        </div>
+      ))}
       {/* Toast notification */}
       {toast && (
         <div style={{

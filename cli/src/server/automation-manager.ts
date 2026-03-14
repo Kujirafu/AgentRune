@@ -9,7 +9,8 @@ import { VaultSync } from "./vault-sync.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { type SkillManifest, createDefaultManifest, createManifestForLevel, buildSandboxInstructions, scanPromptForConflicts, type PromptScanResult } from "./skill-manifest.js"
 import { buildPlanningConstraints, formatConstraintsForPrompt } from "./planning-constraints.js"
-import { createFromTrustProfile, type AuthorityMap } from "./authority-map.js"
+import { createFromTrustProfile, inheritForResume, hasPermission, type AuthorityMap } from "./authority-map.js"
+import { auditLog, pruneAuditLogs } from "./audit-log.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
@@ -216,6 +217,7 @@ export class AutomationManager {
     this.storageDir = join(getConfigDir(), "automations")
     mkdirSync(this.storageDir, { recursive: true })
     this.loadFromDisk()
+    pruneAuditLogs()
   }
 
   /** Get the skill whitelist (for API routes) */
@@ -394,6 +396,7 @@ export class AutomationManager {
     if (updates.manifest !== undefined) auto.manifest = updates.manifest
     // Trust Layer fields
     if (updates.trustProfile !== undefined) {
+      auditLog("trust_profile_changed", { from: auto.trustProfile, to: updates.trustProfile }, { automationId: id, automationName: auto.name })
       auto.trustProfile = updates.trustProfile
       const expanded = expandTrustProfile(updates.trustProfile)
       if (expanded) {
@@ -628,6 +631,8 @@ export class AutomationManager {
     }
     this.running.add(id)
 
+    auditLog("automation_started", { trustProfile: auto.trustProfile, sandboxLevel: auto.sandboxLevel, manualTrigger }, { automationId: id, automationName: auto.name })
+
     try {
     // Daily rate limit check
     const todayKey = new Date().toISOString().slice(0, 10)
@@ -652,6 +657,7 @@ export class AutomationManager {
       const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
       if (todayRunCount >= auto.dailyRunLimit) {
         log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
+        auditLog("daily_limit_reached", { todayRunCount, limit: auto.dailyRunLimit }, { automationId: id, automationName: auto.name })
         const result: AutomationResult = {
           id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
           exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
@@ -718,11 +724,13 @@ export class AutomationManager {
     if (auto.requirePlanReview && this.onEvent) {
       const timeoutMinutes = auto.planReviewTimeoutMinutes || 30
       log.info(`[Automation] Plan review required for "${auto.name}" (timeout: ${timeoutMinutes}m)`)
+      auditLog("plan_review_requested", { timeoutMinutes }, { automationId: id, automationName: auto.name })
       this.onEvent({ type: "plan_review_required", automationId: id, automationName: auto.name, timeoutMinutes })
 
       const action = await this.waitForConfirmation(id, timeoutMinutes * 60 * 1000)
       if (action === "deny") {
         log.info(`[Automation] Plan review rejected for "${auto.name}"`)
+        auditLog("plan_review_denied", {}, { automationId: id, automationName: auto.name })
         const result: AutomationResult = {
           id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
           exitCode: null, output: "Skipped: plan review rejected by user",
@@ -734,6 +742,7 @@ export class AutomationManager {
       }
       // "approve" or "approve_and_trust" → proceed
       log.info(`[Automation] Plan review approved for "${auto.name}"`)
+      auditLog("plan_review_approved", {}, { automationId: id, automationName: auto.name })
     }
 
     const built = this.buildAutomationCommand(auto)
@@ -775,11 +784,37 @@ export class AutomationManager {
       // Runtime behavior monitor
       const level = auto.sandboxLevel || "strict"
       const manifest = auto.manifest || createManifestForLevel(auto.templateId || auto.id, level)
+
+      // Runtime Authority Map — checkpoint permissions during execution
+      const runtimeAuthority = createFromTrustProfile({
+        sessionId: `exec_${id}_${startedAt}`,
+        automationId: id,
+        sandboxLevel: auto.sandboxLevel,
+        requirePlanReview: auto.requirePlanReview,
+        requireMergeApproval: auto.requireMergeApproval,
+      })
+
       const monitor = new SkillMonitor({
         manifest,
         projectCwd: execProject.cwd,
         autoHalt: riskReport.score >= 30,
         onViolation: (v) => {
+          // Runtime authority checkpoint: check if violated permission is denied
+          const permKey = v.type === "filesystem" ? "filesystem.write" : v.type === "network" ? "network" : v.type === "shell" ? "shell.unrestricted" : v.type
+          const permitted = hasPermission(runtimeAuthority, permKey)
+          auditLog("runtime_violation", {
+            type: v.type, description: v.description, matchedText: v.matchedText,
+            permissionKey: permKey, permitted, halted: !permitted,
+          }, { automationId: id, automationName: auto.name })
+
+          if (!permitted) {
+            // Authority denies this operation — halt
+            auditLog("runtime_halt", { reason: `Authority denied: ${permKey}`, violationType: v.type }, { automationId: id, automationName: auto.name })
+            log.warn(`[Automation] Authority checkpoint halted "${auto.name}": ${permKey} denied`)
+            const proc = this.runningProcesses.get(id)
+            if (proc && !proc.killed) killProcessTree(proc)
+          }
+
           if (this.onEvent) {
             this.onEvent({
               type: "automation_completed",
@@ -790,6 +825,7 @@ export class AutomationManager {
         },
         onHalt: (reason) => {
           log.warn(`[Automation] Monitor halted "${auto.name}": ${reason}`)
+          auditLog("runtime_halt", { reason }, { automationId: id, automationName: auto.name })
           const proc = this.runningProcesses.get(id)
           if (proc && !proc.killed) killProcessTree(proc)
         },
@@ -955,6 +991,7 @@ export class AutomationManager {
     }
 
     // Broadcast completion event
+    auditLog("automation_completed", { status: resultEntry.status, exitCode: resultEntry.exitCode, durationMs: resultEntry.finishedAt - resultEntry.startedAt }, { automationId: id, automationName: auto.name })
     if (this.onEvent) {
       this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
     }

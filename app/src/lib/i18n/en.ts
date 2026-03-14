@@ -1144,6 +1144,9 @@ export const en: Record<string, string> = {
   "trust.constraints.source.standard": "Standard",
   "trust.constraints.source.sandbox": "Sandbox",
   "trust.constraints.source.authority": "Authority",
+  "trust.audit": "Audit",
+  "trust.audit.empty": "No audit entries",
+  "trust.audit.noEntries": "No audit trail yet",
 
   // Counts & overview
   "count.projects": "{count} projects",
