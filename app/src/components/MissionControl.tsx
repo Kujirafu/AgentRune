@@ -21,6 +21,7 @@ const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
+import { trackSessionStart, trackSettingsChange, trackAgentLaunch } from "../lib/analytics"
 
 // iOS-like spring curve
 const SPRING = "cubic-bezier(0.32, 0.72, 0, 1)"
@@ -461,6 +462,7 @@ export function MissionControl({
   useEffect(() => {
     if (prevSessionIdRef.current !== sessionId) {
       prevSessionIdRef.current = sessionId
+      if (sessionId) trackSessionStart(agentId, project.id)
       setEvents([])
       setAgentStatus("idle")
       setInitializing(true) // Lock input until init_status:"done" or attached(resumed)
@@ -728,6 +730,13 @@ export function MissionControl({
     setSettings(newSettings)
     saveSettings(project.id, newSettings)
 
+    // Track changed fields
+    for (const key of Object.keys(newSettings) as (keyof ProjectSettings)[]) {
+      if (newSettings[key] !== prev[key]) {
+        trackSettingsChange(key, String(newSettings[key]))
+      }
+    }
+
     // Send settings changes to running Claude session
     if (agentId === "claude") {
       // Model change — clear current input first, then /model <name>
@@ -756,6 +765,22 @@ export function MissionControl({
             setTimeout(() => send({ type: "input", data: "\r" }), 50)
           }, 100)
         }
+      }
+      // Effort level change
+      if (newSettings.claudeEffort !== prev.claudeEffort && newSettings.claudeEffort !== "default") {
+        send({ type: "input", data: "\x15" }) // Ctrl+U clear line
+        setTimeout(() => {
+          send({ type: "input", data: `/effort ${newSettings.claudeEffort}` })
+          setTimeout(() => send({ type: "input", data: "\r" }), 50)
+        }, 100)
+      }
+      // Thinking mode toggle
+      if (newSettings.claudeThinking !== prev.claudeThinking) {
+        send({ type: "input", data: "\x15" }) // Ctrl+U clear line
+        setTimeout(() => {
+          send({ type: "input", data: "/thinking" })
+          setTimeout(() => send({ type: "input", data: "\r" }), 50)
+        }, 100)
       }
       // Bypass mode — CLI flag, restart session with new command
       if (newSettings.bypass !== prev.bypass && sessionId) {

@@ -70,40 +70,17 @@
 - ESM 模組中 `__dirname` / `__filename` 不能直接用，必須用 `fileURLToPath(import.meta.url)`
 - 完整規範見 Obsidian：`AgentLore/Daemon 修改規範.md`
 
-## PRD 自動生成（必須遵守！）
-- 收到新功能需求時，**不要直接開始實作**，先進入 PRD 引導流程：
+## PRD 管理（必須用 API！）
+- 收到需要超過 30 分鐘的功能需求時，走 PRD 流程：
   1. **釐清目標**：用一句話確認用戶想要什麼
   2. **問決策問題**：一次問一個關鍵問題，等用戶回答後再問下一個（通常 3-5 個問題就夠）
      - 問題要具體，盡量給選項讓用戶選
-     - 例如：「要支援哪些登入方式？A. Google B. Email C. 兩者都要」
   3. **提出方案**：提出 2-3 個可行方案，用白話說明各自的優缺點，讓用戶選
   4. **確認範圍**：明確列出「要做什麼」和「不做什麼」
-  5. **產出 PRD**：收集完畢後，輸出以下格式的 PRD（用 `<prd_output>` 標籤包裹）：
-
-```
-<prd_output>
-{
-  "goal": "一句話描述目標",
-  "decisions": [
-    { "question": "問題", "answer": "用戶的回答" }
-  ],
-  "approaches": [
-    { "name": "方案名稱", "pros": ["優點1"], "cons": ["缺點1"], "adopted": true, "techNote": "技術備註（可選）" }
-  ],
-  "scope": {
-    "included": ["要做的事1", "要做的事2"],
-    "excluded": ["不做的事1"]
-  },
-  "tasks": [
-    { "id": 1, "title": "任務標題", "description": "任務描述", "dependsOn": [] }
-  ]
-}
-</prd_output>
-```
-
-  6. 輸出 PRD 後，等用戶確認再開始實作
-- 如果需求很簡單（例如「改個按鈕顏色」），可以跳過 PRD 流程直接做
-- 判斷標準：需要超過 30 分鐘的工作就應該走 PRD 流程
+  5. **用 PRD API 建立 PRD**（見下方 PRD API section），不要只在聊天裡輸出 JSON
+  6. 等用戶在 AgentRune app 上確認後再開始實作
+  7. 實作過程中用 API 更新 task 狀態（pending → in_progress → done）
+- 簡單需求（改按鈕顏色等）可以跳過
 
 ## 語音指令
 - 收到 [語音指令] 開頭的訊息 → 理解語意和意圖，直接執行，不要回問
