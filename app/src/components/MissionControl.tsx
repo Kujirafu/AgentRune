@@ -21,7 +21,6 @@ const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
-import { trackSessionStart, trackSettingsChange, trackAgentLaunch } from "../lib/analytics"
 
 // iOS-like spring curve
 const SPRING = "cubic-bezier(0.32, 0.72, 0, 1)"
@@ -462,7 +461,6 @@ export function MissionControl({
   useEffect(() => {
     if (prevSessionIdRef.current !== sessionId) {
       prevSessionIdRef.current = sessionId
-      if (sessionId) trackSessionStart(agentId, project.id)
       setEvents([])
       setAgentStatus("idle")
       setInitializing(true) // Lock input until init_status:"done" or attached(resumed)
@@ -729,13 +727,6 @@ export function MissionControl({
     const prev = settings
     setSettings(newSettings)
     saveSettings(project.id, newSettings)
-
-    // Track changed fields
-    for (const key of Object.keys(newSettings) as (keyof ProjectSettings)[]) {
-      if (newSettings[key] !== prev[key]) {
-        trackSettingsChange(key, String(newSettings[key]))
-      }
-    }
 
     // Send settings changes to running Claude session
     if (agentId === "claude") {
