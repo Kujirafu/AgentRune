@@ -18,6 +18,7 @@ const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPane
 import { PlanPanel } from "./PlanPanel"
 import { PathBadge } from "./PathBadge"
 const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
+const FireCrewSheet = lazy(() => import("./FireCrewSheet"))
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
@@ -94,11 +95,13 @@ export function MissionControl({
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle")
   const [initializing, setInitializing] = useState(false)
+  const injectingRef = useRef(false)  // true while rules are being injected — blocks prompt-based unlock
   const prevSessionIdRef = useRef(sessionId)
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
   const [showSettings, setShowSettings] = useState(false)
   const [showBrowser, setShowBrowser] = useState(false)
   const [showInsight, setShowInsight] = useState(false)
+  const [showFireCrew, setShowFireCrew] = useState(false)
   const [showGit, setShowGit] = useState(false)
   const [previewFile, setPreviewFile] = useState<string | null>(null)
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null)
@@ -467,13 +470,14 @@ export function MissionControl({
       setEvents([])
       setAgentStatus("idle")
       setInitializing(true) // Lock input until init_status:"done" or attached(resumed)
+      injectingRef.current = true // Assume injection will happen — init_status:"done" will clear
       parserRef.current = new AnsiParser()
       setParsedBlocks([])
       setUsageTokens({ input: 0, output: 0 })
       setWorktreeBranch(null)
       scrollbackProcessedRef.current = false
       // Safety timeout: auto-unlock after 45s to prevent stuck state
-      const safetyTimer = setTimeout(() => setInitializing(false), 45000)
+      const safetyTimer = setTimeout(() => { injectingRef.current = false; setInitializing(false) }, 45000)
       return () => clearTimeout(safetyTimer)
     }
   }, [sessionId])
@@ -1334,7 +1338,8 @@ export function MissionControl({
       const isPrompt = /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/.test(text)
       if (isPrompt) {
         promptReadyRef.current = true
-        setInitializing(false)
+        // Only unlock if NOT currently injecting rules — injection has its own unlock via init_status:"done"
+        if (!injectingRef.current) setInitializing(false)
       }
 
       if (!isPrompt && text.length > 10) setAgentStatus("working")
@@ -1396,7 +1401,10 @@ export function MissionControl({
       const agentName = (msg.agentId as string) || "terminal"
       if (msg.worktreeBranch) setWorktreeBranch(msg.worktreeBranch as string)
       // Resumed sessions don't need initialization — unlock input immediately
-      if (resumed) setInitializing(false)
+      if (resumed) {
+        injectingRef.current = false
+        setInitializing(false)
+      }
       const title = resumed
         ? t("mc.sessionResumed") || `Session resumed (${agentName})`
         : t("mc.sessionStarted") || `Session started (${agentName})`
@@ -1452,6 +1460,7 @@ export function MissionControl({
 
     // Init status: lock/unlock input during injection
     unsubs.push(on("init_status", (msg) => {
+      injectingRef.current = msg.phase === "injecting"
       setInitializing(msg.phase === "injecting")
     }))
 
@@ -1878,6 +1887,7 @@ return (
               checkUploading={checkUploading}
               hasPendingImages={hasPendingImages}
               onOpenBuilder={onOpenBuilder}
+              onFireCrew={() => setShowFireCrew(true)}
             />
           </div>
 
@@ -2131,6 +2141,16 @@ return (
         projectId={project.id}
         sessionId={sessionId}
       />}
+
+      {showFireCrew && <Suspense fallback={null}><FireCrewSheet
+        open={showFireCrew}
+        onClose={() => setShowFireCrew(false)}
+        t={t}
+        serverUrl={getApiBase()}
+        projectId={project.id}
+        sessionId={sessionId || null}
+        sessionSummary={events.length > 0 ? events.filter(e => e.title).slice(-5).map(e => e.title).join(" → ") : undefined}
+      /></Suspense>}
 
       {showBrowser && <FileBrowser
         open={showBrowser}
