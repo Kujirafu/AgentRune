@@ -7,7 +7,7 @@ import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
 import { AutomationSheet } from "./AutomationSheet"
-import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS, SUBGROUP_LABELS } from "../data/builtin-templates"
+import { BUILTIN_TEMPLATES } from "../data/builtin-templates"
 import { CHAIN_TEMPLATES, BUILTIN_CREWS } from "../data/builtin-crews"
 import type { AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
@@ -44,6 +44,11 @@ const CREW_ROLE_ICONS: Record<string, React.ReactNode> = {
 function getCrewRoleIcon(iconName: string) {
   return CREW_ROLE_ICONS[iconName] || <svg {..._s}><circle cx="12" cy="12" r="10"/></svg>
 }
+
+// Template type classifiers (shared between filter chips and grouping)
+const isCrew = (tmpl: AutomationTemplate) => tmpl.category === "crew" && (tmpl.crew?.roles?.length || 0) > 1
+const isChain = (tmpl: AutomationTemplate) => tmpl.id.startsWith("chain_")
+const isPrompt = (tmpl: AutomationTemplate) => !isChain(tmpl) && !isCrew(tmpl)
 
 // Map builtin template IDs → { CREW_ROLE_ICONS key, circle color }
 const BUILTIN_TPL_ICON: Record<string, { icon: string; color: string }> = {
@@ -303,7 +308,6 @@ export function UnifiedPanel({
   })
   const [expandedTemplateId, setExpandedTemplateId] = useState<string | null>(null)
   const [tplSearch, setTplSearch] = useState("")
-  const [tplGroup, setTplGroup] = useState<string | null>(null)
   const [tplTypeFilter, setTplTypeFilter] = useState<"all" | "chain" | "prompt" | "crew">("all")
   const [showNewPicker, setShowNewPicker] = useState(false)
   const [chainDepths, setChainDepths] = useState<Record<string, ChainDepth>>({})
@@ -1735,30 +1739,6 @@ export function UnifiedPanel({
                 {t("templates.create")}
               </button>
 
-              {/* Type filter chips */}
-              <div style={{
-                display: "flex", gap: 5, overflowX: "auto", paddingBottom: 2,
-                WebkitOverflowScrolling: "touch", scrollbarWidth: "none",
-              }}>
-                {([
-                  { key: "all" as const, label: t("templates.filterAll"), icon: null },
-                  { key: "chain" as const, label: t("templates.filterChain"), icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/></svg> },
-                  { key: "prompt" as const, label: t("templates.filterPrompt"), icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><polyline points="14 2 14 8 20 8"/></svg> },
-                  { key: "crew" as const, label: t("templates.filterCrew"), icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
-                ]).map(f => (
-                  <button key={f.key} onClick={() => setTplTypeFilter(f.key)} style={{
-                    padding: "5px 12px", borderRadius: 16, border: "none", cursor: "pointer",
-                    background: tplTypeFilter === f.key ? "rgba(55,172,192,0.15)" : "var(--icon-bg)",
-                    color: tplTypeFilter === f.key ? "#37ACC0" : "var(--text-secondary)",
-                    fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
-                    display: "flex", alignItems: "center", gap: 4,
-                  }}>
-                    {f.icon}
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-
               {/* New Workflow type picker */}
               {showNewPicker && (
                 <div style={{
@@ -1846,8 +1826,35 @@ export function UnifiedPanel({
                 </div>
               )}
 
+              {/* Type filter */}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 0,
+                padding: "5px 10px", borderRadius: 10,
+                background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+                backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                overflowX: "auto", scrollbarWidth: "none",
+              }}>
+                {([
+                  { key: "all" as const, label: t("templates.filterAll"), icon: null },
+                  { key: "crew" as const, label: t("templates.filterCrew"), icon: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
+                  { key: "chain" as const, label: t("templates.filterChain"), icon: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/></svg> },
+                  { key: "prompt" as const, label: t("templates.filterPrompt"), icon: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><polyline points="14 2 14 8 20 8"/></svg> },
+                ]).map(f => (
+                  <button key={f.key} onClick={() => setTplTypeFilter(f.key)} style={{
+                    padding: "4px 8px", borderRadius: 8, border: "none", cursor: "pointer",
+                    background: tplTypeFilter === f.key ? "rgba(55,172,192,0.18)" : "transparent",
+                    color: tplTypeFilter === f.key ? "#37ACC0" : "var(--text-secondary)",
+                    fontSize: 10, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
+                    display: "flex", alignItems: "center", gap: 3,
+                  }}>
+                    {f.icon}
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+
               {/* Search */}
-              <div style={{ position: "relative", marginBottom: 2 }}>
+              <div style={{ position: "relative" }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", opacity: 0.6 }}>
                   <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                 </svg>
@@ -1855,10 +1862,10 @@ export function UnifiedPanel({
                   type="text" value={tplSearch} onChange={(e) => setTplSearch(e.target.value)}
                   placeholder={t("automation.searchTemplates") || "Search templates..."}
                   style={{
-                    width: "100%", padding: "10px 14px 10px 34px", borderRadius: 12,
+                    width: "100%", padding: "9px 14px 9px 34px", borderRadius: 10,
                     border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
                     backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
-                    color: "var(--text-primary)", fontSize: 13, outline: "none", boxSizing: "border-box",
+                    color: "var(--text-primary)", fontSize: 12, outline: "none", boxSizing: "border-box",
                   }}
                 />
                 {tplSearch && (
@@ -1873,41 +1880,16 @@ export function UnifiedPanel({
                 )}
               </div>
 
-              {/* Scene/category chips */}
-              <div style={{
-                display: "flex", gap: 5, overflowX: "auto", paddingBottom: 4,
-                WebkitOverflowScrolling: "touch", scrollbarWidth: "none",
-              }}>
-                <button onClick={() => setTplGroup(null)} style={{
-                  padding: "4px 10px", borderRadius: 14, border: "none", cursor: "pointer",
-                  background: tplGroup === null ? "rgba(52,119,146,0.15)" : "var(--icon-bg)",
-                  color: tplGroup === null ? "#347792" : "var(--text-secondary)",
-                  fontSize: 10, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
-                }}>
-                  {t("automation.allCategories") || "All"}
-                </button>
-                {TEMPLATE_GROUPS.map((g) => (
-                  <button key={g.key} onClick={() => setTplGroup(tplGroup === g.key ? null : g.key)} style={{
-                    padding: "4px 10px", borderRadius: 14, border: "none", cursor: "pointer",
-                    background: tplGroup === g.key ? "rgba(52,119,146,0.15)" : "var(--icon-bg)",
-                    color: tplGroup === g.key ? "#347792" : "var(--text-secondary)",
-                    fontSize: 10, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
-                  }}>
-                    {t(g.label)}
-                  </button>
-                ))}
-              </div>
-
               {/* Template list */}
               {(() => {
                 const allTemplates = [...BUILTIN_TEMPLATES, ...BUILTIN_CREWS, ...CHAIN_TEMPLATES]
                 const filtered = allTemplates.filter((tmpl) => {
                   // Type filter
-                  if (tplTypeFilter === "chain" && !tmpl.id.startsWith("chain_")) return false
-                  if (tplTypeFilter === "prompt" && (tmpl.id.startsWith("chain_") || (tmpl.category === "crew" && (tmpl.crew?.roles?.length || 0) > 1))) return false
-                  if (tplTypeFilter === "crew" && !(tmpl.category === "crew" && (tmpl.crew?.roles?.length || 0) > 1)) return false
+                  if (tplTypeFilter === "chain" && !isChain(tmpl)) return false
+                  if (tplTypeFilter === "prompt" && !isPrompt(tmpl)) return false
+                  if (tplTypeFilter === "crew" && !isCrew(tmpl)) return false
                   // Group filter (only when type=all or type=prompt)
-                  if (tplGroup && tmpl.group !== tplGroup) return false
+                  // scene filter removed
                   if (tplSearch) {
                     const q = tplSearch.toLowerCase()
                     return tplName(tmpl).toLowerCase().includes(q)
@@ -2239,19 +2221,24 @@ export function UnifiedPanel({
                   )
                 }
 
-                // When search or specific filters active, flat list
-                if (tplSearch || tplGroup || tplTypeFilter !== "all") {
+                // When search active, flat list
+                if (tplSearch) {
                   return <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{filtered.map(renderCard)}</div>
                 }
 
-                // Default: group by scene (Code / Ops / Docs) — all types mixed within each scene
-                return TEMPLATE_GROUPS.map((g) => {
-                  const items = filtered.filter((tmpl) => tmpl.group === g.key)
+                // Group by type: Crew → Chain → Prompt (priority order)
+                const typeGroups = [
+                  { key: "crew", label: t("templates.filterCrew"), test: isCrew },
+                  { key: "chain", label: t("templates.filterChain"), test: isChain },
+                  { key: "prompt", label: t("templates.filterPrompt"), test: isPrompt },
+                ]
+                return typeGroups.map((g) => {
+                  const items = filtered.filter(g.test)
                   if (items.length === 0) return null
                   return (
                     <div key={g.key} style={{ marginBottom: 12 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0", marginBottom: 8, letterSpacing: 0.5 }}>
-                        {t(g.label)}
+                        {g.label}
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {items.map(renderCard)}

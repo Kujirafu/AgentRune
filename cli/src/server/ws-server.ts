@@ -215,15 +215,26 @@ function buildAgentProtocol(locale?: string, projectId?: string, localPort: numb
   ].join(" ")
 }
 
+/** Append model, effort, permission-mode, and system-prompt flags to a Claude CLI command */
+function appendClaudeFlags(cmd: string, s: Record<string, unknown>, projectId?: string, port: number = 3457): string {
+  if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
+  if (s.claudeEffort && s.claudeEffort !== "default" && /^(low|medium|high|max)$/.test(s.claudeEffort as string)) cmd += ` --effort ${s.claudeEffort}`
+  if (s.bypass) {
+    cmd += " --dangerously-skip-permissions"
+  } else if (s.planMode) {
+    cmd += " --permission-mode plan"
+  } else if (s.autoEdit) {
+    cmd += " --permission-mode acceptEdits"
+  }
+  cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, port).replace(/"/g, '\\"')}"`
+  return cmd
+}
+
 function buildAgentCommand(agentId: string, settings?: Record<string, unknown>, projectId?: string, port: number = 3457): string | null {
   const s = settings || {}
   switch (agentId) {
     case "claude": {
-      let cmd = "claude"
-      if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
-      if (s.bypass) cmd += " --dangerously-skip-permissions"
-      cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, port).replace(/"/g, '\\"')}"`
-      return cmd
+      return appendClaudeFlags("claude", s, projectId, port)
     }
     case "codex":
       return "codex"
@@ -1984,8 +1995,8 @@ export function createServer(portOverride?: number) {
         res.json({ ok: true, message: `Staged ${hunks.length} hunk(s) of ${filePath}` })
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Stage failed"
-      res.status(500).json({ error: msg })
+      log.error(`[git/stage] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Stage failed" })
     }
   })
 
@@ -2055,8 +2066,8 @@ export function createServer(portOverride?: number) {
         res.json({ ok: true, message: `Reverted ${hunks.length} hunk(s) of ${filePath}` })
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Revert failed"
-      res.status(500).json({ error: msg })
+      log.error(`[git/revert] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Revert failed" })
     }
   })
 
@@ -2081,8 +2092,8 @@ export function createServer(portOverride?: number) {
       const hashMatch = result.match(/\[[\w/-]+ ([a-f0-9]+)\]/)
       res.json({ hash: hashMatch?.[1] || "unknown", message })
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Commit failed"
-      res.status(500).json({ error: msg })
+      log.error(`[git/commit] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Commit failed" })
     }
   })
 
@@ -2103,7 +2114,8 @@ export function createServer(portOverride?: number) {
       })
       res.json({ branches })
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to list branches" })
+      log.error(`[git/branches] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Failed to list branches" })
     }
   })
 
@@ -2117,11 +2129,12 @@ export function createServer(portOverride?: number) {
       execFileSync("git", ["branch", flag, branch], { cwd: proj.cwd, encoding: "utf-8", timeout: 5000 })
       res.json({ ok: true })
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Delete failed"
-      if (msg.includes("not fully merged")) {
+      const errMsg = err instanceof Error ? err.message : ""
+      log.error(`[git/branch-delete] ${errMsg || err}`)
+      if (errMsg.includes("not fully merged")) {
         res.status(409).json({ error: "Branch not fully merged. Use force delete.", notMerged: true })
       } else {
-        res.status(500).json({ error: msg })
+        res.status(500).json({ error: "Delete failed" })
       }
     }
   })
@@ -2135,7 +2148,8 @@ export function createServer(portOverride?: number) {
       execFileSync("git", ["checkout", branch], { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
       res.json({ ok: true })
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Checkout failed" })
+      log.error(`[git/checkout] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Checkout failed" })
     }
   })
 
@@ -2163,7 +2177,8 @@ export function createServer(portOverride?: number) {
       if (current.path) worktrees.push(current)
       res.json({ worktrees })
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to list worktrees" })
+      log.error(`[git/worktrees] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Failed to list worktrees" })
     }
   })
 
@@ -2179,7 +2194,8 @@ export function createServer(portOverride?: number) {
       execFileSync("git", args, { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
       res.json({ ok: true })
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Remove failed" })
+      log.error(`[git/worktree-remove] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Remove failed" })
     }
   })
 
@@ -2589,7 +2605,8 @@ export function createServer(portOverride?: number) {
       const vault = new VaultSync({ vaultPath: cfg.vaultPath, projectName })
       res.json({ context: vault.readContext() })
     } catch (err) {
-      res.json({ context: `Error reading vault: ${err instanceof Error ? err.message : "unknown"}` })
+      log.error(`[vault/read] ${err instanceof Error ? err.message : err}`)
+      res.json({ context: "Error reading vault" })
     }
   })
 
@@ -2867,7 +2884,8 @@ export function createServer(portOverride?: number) {
       const result = await apiRes.json()
       res.json(result)
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Submit failed" })
+      log.error(`[submit-knowledge] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Submit failed" })
     }
   })
 
@@ -3020,7 +3038,8 @@ export function createServer(portOverride?: number) {
       if (!result.ok) return res.status(429).json({ error: result.error })
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Trigger failed" })
+      log.error(`[automation/trigger] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Trigger failed" })
     }
   })
 
@@ -3036,7 +3055,8 @@ export function createServer(portOverride?: number) {
       const autoId = await automationManager.fireAndForget(projectId, autoName, crew, sessionContext)
       res.json({ ok: true, automationId: autoId })
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Fire failed" })
+      log.error(`[automation/fire] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Fire failed" })
     }
   })
 
@@ -3046,7 +3066,8 @@ export function createServer(portOverride?: number) {
       if (!result.success) return res.status(404).json({ error: result.message })
       res.json(result)
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Merge approval failed" })
+      log.error(`[automation/approve-merge] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Merge approval failed" })
     }
   })
 
@@ -3524,18 +3545,14 @@ export function createServer(portOverride?: number) {
                 // Use --resume <id> if we have the Claude session ID, otherwise --continue (most recent)
                 // Validate claudeId format (UUID-like) to prevent command injection
                 const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
-                let cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
-                if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
-                // Bypass confirmation handled client-side — if bypass=true, user already confirmed
-                if (s.bypass) cmd += " --dangerously-skip-permissions"
-                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, sessionProject.id, PORT).replace(/"/g, '\\"')}"`
+                const cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, sessionProject.id, PORT)
                 setTimeout(() => {
                     try {
                       sessions.write(session.id, `${cmd}\r`)
                       log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
                     } catch (err: any) {
                       log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
-                      try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed: " + err.message })) } catch {}
+                      try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed" })) } catch {}
                     }
                   }, 1500)
               }
@@ -3563,10 +3580,7 @@ export function createServer(portOverride?: number) {
                 const claudeId = sessionClaudeMap.get(session.id)?.claudeSessionId
                 const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
                 const s = settings
-                cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
-                if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
-                if (s.bypass) cmd += " --dangerously-skip-permissions"
-                cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, PORT).replace(/"/g, '\\"')}"`
+                cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, projectId, PORT)
               } else {
                 cmd = buildAgentCommand(restartAgentId, settings, projectId, PORT)
               }
@@ -3784,10 +3798,7 @@ export function createServer(portOverride?: number) {
                   const claudeId = sessionClaudeMap.get(sessionId)?.claudeSessionId
                   const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
                   const s = settings
-                  cmd = safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue"
-                  if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
-                  if (s.bypass) cmd += " --dangerously-skip-permissions"
-                  cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, PORT).replace(/"/g, '\\"')}"`
+                  cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, projectId, PORT)
                 } else {
                   cmd = buildAgentCommand(agentId, settings, projectId, PORT)
                 }
@@ -4166,7 +4177,8 @@ export function createServer(portOverride?: number) {
             execFileSync("git", ["tag", "-f", tag], { cwd: s.project.cwd, stdio: "pipe", timeout: 5000 })
             ws.send(JSON.stringify({ type: "snapshot_result", success: true, tag, message: `Snapshot "${name}" created` }))
           } catch (err) {
-            ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
+            log.error(`[snapshot/create] ${err instanceof Error ? err.message : err}`)
+            ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Snapshot creation failed" }))
           }
           break
         }
@@ -4200,7 +4212,8 @@ export function createServer(portOverride?: number) {
             execFileSync("git", ["checkout", tag, "--", "."], { cwd: s.project.cwd, stdio: "pipe", timeout: 10000 })
             ws.send(JSON.stringify({ type: "snapshot_result", success: true, message: `Restored to "${tag}"` }))
           } catch (err) {
-            ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
+            log.error(`[snapshot/restore] ${err instanceof Error ? err.message : err}`)
+            ws.send(JSON.stringify({ type: "snapshot_result", success: false, message: "Snapshot restore failed" }))
           }
           break
         }
@@ -4239,7 +4252,8 @@ export function createServer(portOverride?: number) {
 
             ws.send(JSON.stringify({ type: "health_result", health }))
           } catch (err) {
-            ws.send(JSON.stringify({ type: "health_result", error: err instanceof Error ? err.message : "Failed" }))
+            log.error(`[health/scan] ${err instanceof Error ? err.message : err}`)
+            ws.send(JSON.stringify({ type: "health_result", error: "Health scan failed" }))
           }
           break
         }
@@ -4293,7 +4307,8 @@ export function createServer(portOverride?: number) {
             }
             ws.send(JSON.stringify({ type: "api_key_result", success: true }))
           } catch (err) {
-            ws.send(JSON.stringify({ type: "api_key_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
+            log.error(`[vault/save-key] ${err instanceof Error ? err.message : err}`)
+            ws.send(JSON.stringify({ type: "api_key_result", success: false, message: "Failed to save key" }))
           }
           break
         }
@@ -4306,7 +4321,8 @@ export function createServer(portOverride?: number) {
             deleteVaultKey(envVar)
             ws.send(JSON.stringify({ type: "api_key_result", success: true, deleted: true }))
           } catch (err) {
-            ws.send(JSON.stringify({ type: "api_key_result", success: false, message: err instanceof Error ? err.message : "Failed" }))
+            log.error(`[vault/delete-key] ${err instanceof Error ? err.message : err}`)
+            ws.send(JSON.stringify({ type: "api_key_result", success: false, message: "Failed to delete key" }))
           }
           break
         }

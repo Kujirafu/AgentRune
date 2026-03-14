@@ -803,7 +803,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 setFormPrompt("")
                 setFormSkill("")
                 setFormTemplateId(null)
-                setFormCrew({ roles: [{ id: `role_${Date.now()}`, nameKey: "crew.role.custom", prompt: "", persona: { tone: "", focus: "", style: "" }, icon: "lightbulb", color: "#37ACC0", phase: 1, estimatedTokens: 2000 }], tokenBudget: 10000, targetBranch: "crew/YYYY-MM-DD", phaseDelayMinutes: 0 })
+                setFormCrew({ roles: [{ id: `role_${Date.now()}`, nameKey: "crew.role.custom", prompt: "", persona: { tone: "", focus: "", style: "" }, icon: "lightbulb", color: "#37ACC0", phase: 1, estimatedTokens: 2000 }], tokenBudget: 10000, targetBranch: `crew/${new Date().toISOString().slice(0, 10)}`, phaseDelayMinutes: 0 })
                 setExpandedRoleId(null)
                 setFormScheduleType("daily")
                 setFormTimeOfDay("09:00")
@@ -1563,11 +1563,24 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   {t("crew.rolesCount").replace("{n}", String(formCrew.roles.length))}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {formCrew.roles.map((role) => {
+                  {formCrew.roles.map((role, roleIdx) => {
                     const isExpanded = expandedRoleId === role.id
                     const roleName = t(role.nameKey) !== role.nameKey ? t(role.nameKey) : role.id
                     const phaseRoles = formCrew.roles.filter(r => r.phase === role.phase)
                     const isParallel = phaseRoles.length > 1
+                    const isFirst = roleIdx === 0
+                    const isLast = roleIdx === formCrew.roles.length - 1
+                    const moveRole = (dir: -1 | 1) => {
+                      const newIdx = roleIdx + dir
+                      if (newIdx < 0 || newIdx >= formCrew.roles.length) return
+                      const newRoles = [...formCrew.roles]
+                      const thisPhase = newRoles[roleIdx].phase
+                      const thatPhase = newRoles[newIdx].phase
+                      newRoles[roleIdx] = { ...newRoles[roleIdx], phase: thatPhase }
+                      newRoles[newIdx] = { ...newRoles[newIdx], phase: thisPhase };
+                      [newRoles[roleIdx], newRoles[newIdx]] = [newRoles[newIdx], newRoles[roleIdx]]
+                      setFormCrew({ ...formCrew, roles: newRoles })
+                    }
                     return (
                       <div key={role.id} style={{
                         borderRadius: 12, border: "1px solid rgba(0,0,0,0.08)",
@@ -1577,11 +1590,41 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         <button
                           onClick={() => setExpandedRoleId(isExpanded ? null : role.id)}
                           style={{
-                            width: "100%", display: "flex", alignItems: "center", gap: 10,
+                            width: "100%", display: "flex", alignItems: "center", gap: 0,
                             padding: "10px 12px", background: "none", border: "none",
                             cursor: "pointer", textAlign: "left",
                           }}
                         >
+                          {/* Move up/down buttons */}
+                          <div style={{ display: "flex", flexDirection: "row", gap: 0, flexShrink: 0, marginRight: 8 }}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); moveRole(-1) }}
+                              disabled={isFirst}
+                              style={{
+                                padding: "4px", background: "none", border: "none",
+                                cursor: isFirst ? "default" : "pointer",
+                                opacity: isFirst ? 0.15 : 0.45, display: "flex", alignItems: "center",
+                              }}
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="18 15 12 9 6 15"/>
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); moveRole(1) }}
+                              disabled={isLast}
+                              style={{
+                                padding: "4px", background: "none", border: "none",
+                                cursor: isLast ? "default" : "pointer",
+                                opacity: isLast ? 0.15 : 0.45, display: "flex", alignItems: "center",
+                              }}
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="6 9 12 15 18 9"/>
+                              </svg>
+                            </button>
+                          </div>
+                          {/* Role icon + info */}
                           <div style={{
                             width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
                             background: role.color,
@@ -1589,9 +1632,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           }}>
                             {getCrewRoleIcon(role.icon)}
                           </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{roleName}</div>
-                            <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>
+                          <div style={{ flex: 1, minWidth: 0, marginLeft: 10 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{roleName}</div>
+                            <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                               {t("crew.phase").replace("{n}", String(role.phase))}
                               {isParallel && ` · ${t("crew.parallel")}`}
                               {role.estimatedTokens ? ` · ~${role.estimatedTokens.toLocaleString()} tok` : ""}
@@ -1719,8 +1762,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   <IconPlus /> {t("crew.addRole")}
                 </button>
 
-                {/* Token budget + target branch */}
-                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                {/* Token budget + separate branch toggle */}
+                <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "flex-end" }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>{t("crew.tokenBudget")}</div>
                     <input
@@ -1733,19 +1776,27 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                       }}
                     />
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>{t("crew.targetBranch")}</div>
-                    <input
-                      type="text" value={formCrew.targetBranch || ""}
-                      onChange={(e) => setFormCrew({ ...formCrew, targetBranch: e.target.value || undefined })}
-                      placeholder="crew/YYYY-MM-DD"
-                      style={{
-                        width: "100%", padding: "8px 10px", borderRadius: 8,
-                        border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.6)",
-                        fontSize: 12, outline: "none", boxSizing: "border-box",
-                      }}
-                    />
-                  </div>
+                  <button
+                    onClick={() => {
+                      const hasBranch = !!formCrew.targetBranch
+                      const today = new Date().toISOString().slice(0, 10)
+                      setFormCrew({ ...formCrew, targetBranch: hasBranch ? undefined : `crew/${today}` })
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "8px 12px", borderRadius: 8,
+                      border: `1px solid ${formCrew.targetBranch ? "rgba(55,172,192,0.3)" : "rgba(0,0,0,0.1)"}`,
+                      background: formCrew.targetBranch ? "rgba(55,172,192,0.08)" : "rgba(255,255,255,0.6)",
+                      cursor: "pointer", flexShrink: 0, height: 36, boxSizing: "border-box",
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.targetBranch ? "#37ACC0" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+                    </svg>
+                    <span style={{ fontSize: 11, fontWeight: 500, color: formCrew.targetBranch ? "#37ACC0" : "#94a3b8", whiteSpace: "nowrap" }}>
+                      {t("crew.separateBranch")}
+                    </span>
+                  </button>
                 </div>
               </div>
             ) : formTemplateId ? (
