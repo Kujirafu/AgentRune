@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
-import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified, getKilledSessionIds, addKilledSessionId } from "./lib/storage"
+import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified, getKilledSessionIds, addKilledSessionId, getFcmToken, setFcmToken } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
+import { PushNotifications } from "@capacitor/push-notifications"
 import { LaunchPad } from "./components/LaunchPad"
 const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
 import { MissionControl } from "./components/MissionControl"
@@ -1523,6 +1524,50 @@ export function App() {
     // Cleanup: don't close on re-render — useWs manages its own lifecycle.
     // Only close on full unmount (App teardown).
   }, [isAuthed, connect, wsToken])
+
+  // FCM Push Notifications — register and send token to daemon
+  useEffect(() => {
+    if (!isCapacitor()) return
+    if (!isAuthed || !wsConnected) return
+
+    let cancelled = false
+
+    const registerFcm = async () => {
+      try {
+        const permResult = await PushNotifications.requestPermissions()
+        if (permResult.receive !== "granted") return
+
+        await PushNotifications.register()
+
+        await PushNotifications.addListener("registration", (token) => {
+          if (cancelled) return
+          const prev = getFcmToken()
+          // Only send to daemon if token changed
+          if (token.value && token.value !== prev) {
+            setFcmToken(token.value)
+            send({ type: "set_fcm_token", token: token.value })
+            console.log("[FCM] Token registered and sent to daemon")
+          } else if (token.value && prev === token.value) {
+            // Re-send on reconnect so daemon always has latest
+            send({ type: "set_fcm_token", token: token.value })
+          }
+        })
+
+        await PushNotifications.addListener("registrationError", (err) => {
+          console.error("[FCM] Registration error:", err)
+        })
+      } catch (e) {
+        console.warn("[FCM] Push registration failed:", e)
+      }
+    }
+
+    registerFcm()
+
+    return () => {
+      cancelled = true
+      PushNotifications.removeAllListeners().catch(() => {})
+    }
+  }, [isAuthed, wsConnected, send])
 
   // Update worktreeBranch on session when attached message arrives from server
   useEffect(() => {

@@ -56,6 +56,11 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
     return
   }
 
+  // Clear stop marker (signal sibling it's OK to auto-restart us again)
+  const { getStopMarker } = await import("./stop.js")
+  const marker = getStopMarker(port)
+  if (existsSync(marker)) unlinkSync(marker)
+
   // Kill any stale process on the port before starting
   await ensurePortFree(port)
 
@@ -120,5 +125,15 @@ function setupSelfHealing() {
     const msg = reason?.message || String(reason)
     log.error(`[Self-heal] Unhandled rejection: ${msg}`)
     // Don't exit — let the server keep running
+  })
+  // Log exit reason — helps diagnose silent daemon deaths
+  process.on("exit", (code) => {
+    log.error(`[Self-heal] Process exiting with code ${code} (memory: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB)`)
+  })
+  process.on("SIGTERM", () => {
+    log.warn(`[Self-heal] Received SIGTERM`)
+  })
+  process.on("SIGINT", () => {
+    log.warn(`[Self-heal] Received SIGINT`)
   })
 }

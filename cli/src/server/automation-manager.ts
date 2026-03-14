@@ -1,8 +1,8 @@
 // server/automation-manager.ts
 // Manages scheduled automations — runs agent commands on intervals/cron/events
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream, chmodSync } from "node:fs"
 import { join } from "node:path"
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, execSync, execFileSync, type ChildProcess } from "node:child_process"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
 import { VaultSync } from "./vault-sync.js"
@@ -13,6 +13,23 @@ import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
+
+/** Kill a child process and its entire tree (Windows: taskkill /T, POSIX: negative PID for detached) */
+function killProcessTree(proc: ChildProcess): void {
+  if (!proc.pid || proc.killed) return
+  try {
+    if (process.platform === "win32") {
+      // taskkill /T kills child tree; windowsHide prevents CMD flash
+      execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore", windowsHide: true })
+    } else {
+      // Kill process group (negative PID) — works because detached=true on POSIX
+      process.kill(-proc.pid, "SIGTERM")
+    }
+  } catch {
+    // Fallback: kill just the process
+    try { proc.kill("SIGTERM") } catch {}
+  }
+}
 
 // --- Types ---
 
@@ -40,6 +57,7 @@ export interface AutomationConfig {
   agentId: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
+  requireMergeApproval?: boolean  // when true, worktree changes wait for manual approval instead of auto-merging (default: false)
   sandboxLevel?: SandboxLevel  // "strict" (default) | "moderate" | "permissive" | "none"
   manifest?: SkillManifest   // resource permissions declared by this skill
   enabled: boolean
@@ -58,6 +76,7 @@ export interface AutomationResult {
   summary?: string
   status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
   riskReport?: SkillRiskReport
+  pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
 }
 
 // --- Locale detection ---
@@ -108,7 +127,10 @@ function buildAgentProtocol(locale?: string): string {
  */
 function writePromptFile(storageDir: string, automationId: string, prompt: string): string {
   const filePath = join(storageDir, `prompt_${automationId}.txt`)
-  writeFileSync(filePath, prompt, "utf-8")
+  writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 })
+  // On Windows writeFileSync mode is ignored, but chmodSync still sets read-only;
+  // on POSIX this ensures owner-only read/write.
+  try { chmodSync(filePath, 0o600) } catch {}
   return filePath
 }
 
@@ -148,6 +170,8 @@ export class AutomationManager {
   private whitelist: SkillWhitelist
   /** Pending confirmations: automationId → { resolve, timer } */
   private pendingConfirmations = new Map<string, { resolve: (action: "approve" | "approve_and_trust" | "deny") => void; timer: NodeJS.Timeout }>()
+  /** Pending worktree merges: automationId → { worktree info for deferred merge } */
+  private pendingMerges = new Map<string, { projectCwd: string; worktreePath: string; branch: string; sessionId: string }>()
 
   private static MAX_RESULTS_PER_AUTOMATION = 20
   private static MAX_OUTPUT_BYTES = 50_000
@@ -175,6 +199,54 @@ export class AutomationManager {
     this.pendingConfirmations.delete(automationId)
     pending.resolve(action)
     return true
+  }
+
+  /** Approve a pending worktree merge (when requireMergeApproval is true) */
+  approveWorktreeMerge(automationId: string): { success: boolean; message: string } {
+    const pending = this.pendingMerges.get(automationId)
+    if (!pending) return { success: false, message: "No pending merge found for this automation" }
+
+    const wtm = new WorktreeManager(pending.projectCwd)
+    // Re-register the worktree in the new manager instance so merge() can find it
+    // WorktreeManager.merge() looks up by sessionId, so we recreate the entry
+    const wt = wtm.get(pending.sessionId)
+    if (!wt) {
+      // The worktree was created by a previous manager instance — do a direct git merge
+      try {
+        execFileSync("git", ["merge", pending.branch, "--no-edit"], {
+          cwd: pending.projectCwd,
+          encoding: "utf-8",
+          stdio: "pipe",
+        })
+        this.pendingMerges.delete(automationId)
+        log.info(`[Automation] Approved merge for "${automationId}": merged ${pending.branch}`)
+        return { success: true, message: `Merged ${pending.branch} into current branch` }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Merge failed"
+        return { success: false, message: msg }
+      }
+    }
+
+    const result = wtm.merge(pending.sessionId)
+    if (result.success) {
+      this.pendingMerges.delete(automationId)
+      log.info(`[Automation] Approved merge for "${automationId}": ${result.message}`)
+    }
+    return result
+  }
+
+  /** Get pending merge info for an automation */
+  getPendingMerge(automationId: string): { worktreePath: string; branch: string; sessionId: string } | undefined {
+    return this.pendingMerges.get(automationId)
+  }
+
+  /** List all automations with pending merges */
+  listPendingMerges(): { automationId: string; branch: string; worktreePath: string }[] {
+    return [...this.pendingMerges.entries()].map(([automationId, info]) => ({
+      automationId,
+      branch: info.branch,
+      worktreePath: info.worktreePath,
+    }))
   }
 
   /** Update projects reference (when projects list changes) */
@@ -261,7 +333,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "sandboxLevel" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "requireMergeApproval" | "sandboxLevel" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -279,6 +351,7 @@ export class AutomationManager {
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
+    if (updates.requireMergeApproval !== undefined) auto.requireMergeApproval = updates.requireMergeApproval
     if (updates.sandboxLevel !== undefined) auto.sandboxLevel = updates.sandboxLevel
     if (updates.manifest !== undefined) auto.manifest = updates.manifest
 
@@ -420,10 +493,9 @@ export class AutomationManager {
 
     switch (auto.agentId) {
       case "claude": {
-        // claude --print reads from stdin, outputs to stdout — perfect for spawn + pipe
-        const args = ["--print"]
+        // Use -p with short instruction to read prompt file — avoids stdin pipe issues with long prompts
+        const args = ["-p", `Read and follow all instructions in this file: ${promptFilePath}`, "--dangerously-skip-permissions"]
         if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
-        if (auto.bypass) args.push("--dangerously-skip-permissions")
         return { bin: "claude", args, promptFilePath }
       }
       case "codex": {
@@ -442,9 +514,9 @@ export class AutomationManager {
   killAutomation(id: string): boolean {
     const proc = this.runningProcesses.get(id)
     if (!proc || proc.killed) return false
-    proc.kill("SIGTERM")
+    killProcessTree(proc)
     // Force kill after 5s if still running
-    setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL") }, 5000)
+    setTimeout(() => { if (!proc.killed) killProcessTree(proc) }, 5000)
     return true
   }
 
@@ -460,8 +532,10 @@ export class AutomationManager {
       return { ok: false, error: `Daily execution limit reached (max ${this.limits.maxDailyExecutions}). Upgrade for more.` }
     }
 
-    // Execute regardless of enabled state (manual trigger)
-    await this.executeAutomation(id, true)
+    // Execute in background — don't block the trigger response
+    this.executeAutomation(id, true).catch((err) => {
+      log.error(`[Automation] Background trigger failed for "${auto.name}": ${err?.message || err}`)
+    })
     return { ok: true }
   }
 
@@ -551,12 +625,13 @@ export class AutomationManager {
     // Worktree setup — create isolated worktree if runMode === "worktree"
     let worktree: { path: string; branch: string } | null = null
     let worktreeManager: WorktreeManager | null = null
+    let worktreeSessionId: string | null = null
     if (auto.runMode === "worktree") {
       try {
         worktreeManager = new WorktreeManager(project.cwd)
-        const sessionId = `automation_${id}_${Date.now()}`
+        worktreeSessionId = `automation_${id}_${Date.now()}`
         const slug = auto.name.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 30)
-        const wt = worktreeManager.create(sessionId, slug)
+        const wt = worktreeManager.create(worktreeSessionId, slug)
         worktree = { path: wt.path, branch: wt.branch }
         log.info(`[Automation] Created worktree for "${auto.name}" at ${wt.path} (branch: ${wt.branch})`)
       } catch (err) {
@@ -596,7 +671,7 @@ export class AutomationManager {
         onHalt: (reason) => {
           log.warn(`[Automation] Monitor halted "${auto.name}": ${reason}`)
           const proc = this.runningProcesses.get(id)
-          if (proc && !proc.killed) proc.kill("SIGTERM")
+          if (proc && !proc.killed) killProcessTree(proc)
         },
       })
 
@@ -617,17 +692,18 @@ export class AutomationManager {
           cwd: worktree?.path || execProject.cwd,
           env,
           stdio: ["pipe", "pipe", "pipe"],
+          // Detach on POSIX for process group isolation; skip on Windows (creates visible console)
+          ...(process.platform !== "win32" ? { detached: true } : {}),
           windowsHide: true,
         })
 
         this.runningProcesses.set(id, proc)
 
-        // Pipe prompt file content to stdin
-        const promptStream = createReadStream(built.promptFilePath, { encoding: "utf-8" })
-        promptStream.pipe(proc.stdin)
-        promptStream.on("error", () => { try { proc.stdin.end() } catch {} })
+        // Close stdin — prompt is passed via -p flag or agent reads from file
+        try { proc.stdin.end() } catch {}
+        proc.stdin.on("error", () => {})
 
-        // Collect stdout
+        // Collect stdout (with error handler to prevent daemon crash on broken pipe)
         proc.stdout.on("data", (data: Buffer) => {
           const text = data.toString()
           if (outputBytes < MAX_OUTPUT_CAPTURE) {
@@ -636,8 +712,9 @@ export class AutomationManager {
           }
           monitor.processOutput(text)
         })
+        proc.stdout.on("error", () => {})
 
-        // Collect stderr (merge into output)
+        // Collect stderr (merge into output, with error handler)
         proc.stderr.on("data", (data: Buffer) => {
           const text = data.toString()
           if (outputBytes < MAX_OUTPUT_CAPTURE) {
@@ -645,6 +722,7 @@ export class AutomationManager {
             outputBytes += text.length
           }
         })
+        proc.stderr.on("error", () => {})
 
         proc.on("close", (code) => {
           if (!resolved) {
@@ -667,8 +745,8 @@ export class AutomationManager {
           if (!resolved) {
             resolved = true
             this.runningProcesses.delete(id)
-            if (!proc.killed) proc.kill("SIGTERM")
-            setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL") }, 5000)
+            killProcessTree(proc)
+            setTimeout(() => { if (!proc.killed) killProcessTree(proc) }, 5000)
             resolve({ exitCode: null, timedOut: true, output: outputChunks.join("") })
           }
         }, TIMEOUT_MS)
@@ -725,6 +803,34 @@ export class AutomationManager {
         })
       } catch (err) {
         log.warn(`[Automation] Failed to write vault record: ${err}`)
+      }
+    }
+
+    // Worktree merge handling
+    if (worktree && worktreeManager && worktreeSessionId && status === "success") {
+      if (auto.requireMergeApproval) {
+        // Save pending merge for later approval
+        this.pendingMerges.set(id, {
+          projectCwd: project.cwd,
+          worktreePath: worktree.path,
+          branch: worktree.branch,
+          sessionId: worktreeSessionId,
+        })
+        resultEntry.pendingMerge = {
+          worktreePath: worktree.path,
+          branch: worktree.branch,
+          sessionId: worktreeSessionId,
+        }
+        log.info(`[Automation] Merge pending approval for "${auto.name}" (branch: ${worktree.branch})`)
+      } else {
+        // Auto-merge (default behavior)
+        const mergeResult = worktreeManager.merge(worktreeSessionId)
+        if (mergeResult.success) {
+          log.info(`[Automation] Auto-merged "${auto.name}": ${mergeResult.message}`)
+        } else {
+          log.warn(`[Automation] Auto-merge failed for "${auto.name}": ${mergeResult.message}`)
+          resultEntry.output += `\n\n--- Worktree Merge ---\nFailed: ${mergeResult.message}`
+        }
       }
     }
 

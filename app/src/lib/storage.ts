@@ -209,3 +209,12 @@ export function setApiKey(envVar: string, value: string) {
   }
   setApiKeys(keys)
 }
+
+// FCM Push Token — cached locally so we only send to daemon when it changes
+export function getFcmToken(): string | null {
+  return localStorage.getItem("agentrune_fcm_token")
+}
+
+export function setFcmToken(token: string) {
+  localStorage.setItem("agentrune_fcm_token", token)
+}
