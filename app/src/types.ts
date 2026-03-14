@@ -35,6 +35,7 @@ export type OpenClawProvider = "default" | "openai" | "anthropic" | "ollama" | "
 export type GeminiApprovalMode = "default" | "auto_edit" | "yolo" | "plan"
 export type CursorMode = "default" | "plan" | "ask"
 export type CursorSandbox = "default" | "enabled" | "disabled"
+export type ClaudeEffort = "default" | "low" | "medium" | "high" | "max"
 
 export interface ProjectSettings {
   model: "sonnet" | "opus" | "haiku"
@@ -42,6 +43,8 @@ export interface ProjectSettings {
   planMode: boolean
   autoEdit: boolean
   fastMode: boolean
+  claudeEffort: ClaudeEffort
+  claudeThinking: boolean
   codexModel: CodexModel
   codexMode: CodexMode
   codexReasoningEffort: CodexReasoningEffort
@@ -222,6 +225,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   planMode: false,
   autoEdit: false,
   fastMode: false,
+  claudeEffort: "default",
+  claudeThinking: false,
   codexModel: "default",
   codexMode: "default",
   codexReasoningEffort: "default",

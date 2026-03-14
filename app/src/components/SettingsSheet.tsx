@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { SpringOverlay } from "./SpringOverlay"
-import type { ProjectSettings, CodexMode, CodexModel, CodexReasoningEffort, AiderModel, OpenClawProvider, CursorMode, CursorSandbox } from "../types"
+import type { ProjectSettings, CodexMode, CodexModel, CodexReasoningEffort, ClaudeEffort, AiderModel, OpenClawProvider, CursorMode, CursorSandbox } from "../types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
 import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled, getWorktreeEnabled, setWorktreeEnabled, getAutoSaveKeysEnabled, setAutoSaveKeysEnabled, getAutoSaveKeysPath, setAutoSaveKeysPath, getNotificationsEnabled, setNotificationsEnabled, getAutoUpdateEnabled, setAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, setSkippedVersion } from "../lib/storage"
 import { App } from "@capacitor/app"
@@ -151,6 +151,13 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
     { value: "medium", label: t("settings.reasoningMedium") || "Medium", description: t("settings.reasoningMediumDesc") || "Balanced quality and speed" },
     { value: "high", label: t("settings.reasoningHigh") || "High", description: t("settings.reasoningHighDesc") || "More deliberate reasoning" },
     { value: "xhigh", label: t("settings.reasoningXHigh") || "X-High", description: t("settings.reasoningXHighDesc") || "Maximum reasoning depth (slowest)" },
+  ]
+  const claudeEfforts: { value: ClaudeEffort; label: string; description: string }[] = [
+    { value: "default", label: t("settings.effortDefault") || "Default", description: t("settings.effortDefaultDesc") || "Use Claude's default effort" },
+    { value: "low", label: t("settings.effortLow") || "Low", description: t("settings.effortLowDesc") || "Quick responses, less thinking" },
+    { value: "medium", label: t("settings.effortMedium") || "Medium", description: t("settings.effortMediumDesc") || "Balanced quality and speed" },
+    { value: "high", label: t("settings.effortHigh") || "High", description: t("settings.effortHighDesc") || "More thorough reasoning" },
+    { value: "max", label: t("settings.effortMax") || "Max", description: t("settings.effortMaxDesc") || "Maximum reasoning depth" },
   ]
   const aiderModels: { value: AiderModel; label: string }[] = [
     { value: "default", label: "Default" },
@@ -944,6 +951,54 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                     onChange={(v) => onChange({ ...settings, fastMode: v })}
                   />
                 )}
+                <ToggleCard
+                  label={t("settings.thinking") || "Thinking"}
+                  description={t("settings.thinkingDesc") || "Show extended thinking process"}
+                  icon={<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>}
+                  active={settings.claudeThinking}
+                  onChange={(v) => onChange({ ...settings, claudeThinking: v })}
+                />
+                {/* Claude Effort Level */}
+                <div style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  padding: "16px 20px",
+                  borderRadius: 20,
+                  border: "1px solid var(--glass-border)",
+                  background: "var(--card-bg)",
+                  backdropFilter: "blur(20px)",
+                  WebkitBackdropFilter: "blur(20px)",
+                  boxShadow: "var(--glass-shadow)",
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 2 }}>
+                    {t("settings.effort") || "Effort Level"}
+                  </div>
+                  {claudeEfforts.map((effort) => (
+                    <button
+                      key={effort.value}
+                      onClick={() => onChange({ ...settings, claudeEffort: effort.value })}
+                      style={{
+                        width: "100%",
+                        padding: "12px 14px",
+                        borderRadius: 14,
+                        border: settings.claudeEffort === effort.value
+                          ? "1.5px solid var(--accent-primary)"
+                          : "1px solid var(--glass-border)",
+                        background: settings.claudeEffort === effort.value
+                          ? "var(--accent-primary-bg)"
+                          : "var(--glass-bg)",
+                        color: settings.claudeEffort === effort.value ? "var(--accent-primary)" : "var(--text-primary)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+                      }}
+                    >
+                      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>{effort.label}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-secondary)", fontWeight: 500 }}>{effort.description}</div>
+                    </button>
+                  ))}
+                </div>
               </>
             )}
 
