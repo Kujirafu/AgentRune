@@ -1676,6 +1676,19 @@ export function App() {
   // Automation completion notifications
   useEffect(() => {
     if (!isCapacitor()) return
+    // Automation started notification (fire-and-forget feedback)
+    const unsubStarted = on("automation_started", (msg) => {
+      if (!getNotificationsEnabled()) return
+      const name = (msg.automationName as string) || "Automation"
+      LocalNotifications.schedule({
+        notifications: [{
+          id: Date.now(),
+          title: `${name}`,
+          body: msg.isCrew ? "Work chain started" : "Automation started",
+          smallIcon: "ic_launcher",
+        }],
+      }).catch(() => {})
+    })
     const unsub = on("automation_completed", (msg) => {
       if (!getNotificationsEnabled()) return
       const auto = msg.automation as { name?: string } | undefined
@@ -1697,7 +1710,7 @@ export function App() {
         }],
       }).catch(() => {})
     })
-    return () => unsub()
+    return () => { unsubStarted(); unsub() }
   }, [on])
 
   // Populate sessionEventsMap from session_activity broadcasts (for ProjectOverview summaries)

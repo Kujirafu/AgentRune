@@ -36,7 +36,7 @@ function killProcessTree(proc: ChildProcess): void {
 
 // --- Types ---
 
-export type ScheduleType = "daily" | "interval"
+export type ScheduleType = "daily" | "interval" | "manual"
 
 export interface AutomationSchedule {
   type: ScheduleType
@@ -68,6 +68,59 @@ export function expandTrustProfile(profile: TrustProfile): TrustProfileConfig | 
   return TRUST_PROFILE_PRESETS[profile]
 }
 
+// --- Crew types ---
+
+export interface CrewPersona {
+  tone: string
+  focus: string
+  style: string
+}
+
+export interface CrewRole {
+  id: string
+  nameKey: string
+  prompt: string
+  persona: CrewPersona
+  icon: string
+  color: string
+  skillChainSlug?: string
+  /** Pre-serialized skill chain workflow (injected by frontend from BUILTIN_CHAINS) */
+  skillChainWorkflow?: string
+  phase: number
+  estimatedTokens?: number
+}
+
+export interface CrewConfig {
+  roles: CrewRole[]
+  tokenBudget: number
+  targetBranch?: string
+  phaseDelayMinutes?: number
+}
+
+export interface CrewRoleResult {
+  roleId: string
+  roleName: string
+  icon: string
+  color: string
+  phase: number
+  status: "completed" | "failed" | "skipped" | "circuit_broken"
+  tokensUsed: number
+  durationMs: number
+  outputSummary: string
+  outputFull?: string
+}
+
+export interface CrewExecutionReport {
+  automationId: string
+  startedAt: number
+  completedAt: number
+  status: "completed" | "failed" | "circuit_broken"
+  totalTokensUsed: number
+  tokenBudget: number
+  targetBranch?: string
+  phases: { phase: number; roles: CrewRoleResult[] }[]
+}
+
 export interface AutomationConfig {
   id: string
   projectId: string
@@ -92,7 +145,9 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken"
+  // Crew execution
+  crew?: CrewConfig
 }
 
 export interface AutomationResult {
@@ -103,9 +158,10 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken"
   riskReport?: SkillRiskReport
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
+  crewReport?: CrewExecutionReport  // set for crew automation runs
 }
 
 // --- Locale detection ---
@@ -166,6 +222,7 @@ function writePromptFile(storageDir: string, automationId: string, prompt: strin
 // --- Manager ---
 
 export type AutomationEventCallback = (event:
+  | { type: "automation_started"; automationId: string; automationName: string; isCrew: boolean }
   | { type: "automation_completed"; automation: AutomationConfig; result: AutomationResult }
   | { type: "skill_confirmation_required"; automationId: string; skillId: string; riskReport: SkillRiskReport; manifest?: SkillManifest }
   | { type: "bypass_confirmation_required"; automationId: string; automationName: string }
@@ -375,7 +432,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -394,6 +451,7 @@ export class AutomationManager {
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
     if (updates.manifest !== undefined) auto.manifest = updates.manifest
+    if (updates.crew !== undefined) auto.crew = updates.crew
     // Trust Layer fields
     if (updates.trustProfile !== undefined) {
       auditLog("trust_profile_changed", { from: auto.trustProfile, to: updates.trustProfile }, { automationId: id, automationName: auto.name })
@@ -619,6 +677,46 @@ export class AutomationManager {
     return { ok: true }
   }
 
+  /** Fire-and-forget: create a temp automation with crew config and execute immediately */
+  async fireAndForget(projectId: string, name: string, crew: CrewConfig, sessionContext?: string): Promise<string> {
+    const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const auto: AutomationConfig = {
+      id,
+      projectId,
+      name,
+      prompt: sessionContext || "",
+      schedule: { type: "manual" },
+      enabled: false, // no scheduling
+      createdAt: Date.now(),
+      runMode: "local",
+      agentId: "claude",
+      trustProfile: "autonomous",
+      crew,
+    }
+    this.automations.set(id, auto)
+    this.results.set(id, [])
+
+    // Inject session context as handoff for first phase
+    if (sessionContext) {
+      auto.prompt = sessionContext
+    }
+
+    // Execute in background
+    this.executeAutomation(id, true).catch((err) => {
+      log.error(`[Automation] Fire-and-forget failed for "${name}": ${err?.message || err}`)
+    }).finally(() => {
+      // Clean up temp automation after a delay (keep for report access)
+      setTimeout(() => {
+        // Don't delete if still running
+        if (!this.running.has(id)) {
+          // Keep in memory for 1 hour for report access, then remove
+        }
+      }, 60 * 60 * 1000)
+    })
+
+    return id
+  }
+
   /** Execute an automation: open a PTY, launch agent, collect output */
   private async executeAutomation(id: string, manualTrigger = false) {
     const auto = this.automations.get(id)
@@ -632,6 +730,10 @@ export class AutomationManager {
     this.running.add(id)
 
     auditLog("automation_started", { trustProfile: auto.trustProfile, sandboxLevel: auto.sandboxLevel, manualTrigger }, { automationId: id, automationName: auto.name })
+
+    if (this.onEvent) {
+      this.onEvent({ type: "automation_started", automationId: id, automationName: auto.name, isCrew: !!auto.crew })
+    }
 
     try {
     // Daily rate limit check
@@ -743,6 +845,12 @@ export class AutomationManager {
       // "approve" or "approve_and_trust" → proceed
       log.info(`[Automation] Plan review approved for "${auto.name}"`)
       auditLog("plan_review_approved", {}, { automationId: id, automationName: auto.name })
+    }
+
+    // ── Crew execution path ──
+    if (auto.crew && auto.crew.roles.length > 0) {
+      await this.executeCrewAutomation(id, auto, project)
+      return
     }
 
     const built = this.buildAutomationCommand(auto)
@@ -998,6 +1106,341 @@ export class AutomationManager {
     } finally {
       this.running.delete(id)
     }
+  }
+
+  // --- Crew execution ---
+
+  /** Execute a crew automation: run roles phase-by-phase with circuit breaker and handoff */
+  private async executeCrewAutomation(id: string, auto: AutomationConfig, project: Project) {
+    const crew = auto.crew!
+    const startedAt = Date.now()
+    const report: CrewExecutionReport = {
+      automationId: id,
+      startedAt,
+      completedAt: 0,
+      status: "completed",
+      totalTokensUsed: 0,
+      tokenBudget: crew.tokenBudget,
+      targetBranch: crew.targetBranch,
+      phases: [],
+    }
+
+    log.info(`[Crew] Starting crew execution for "${auto.name}" — ${crew.roles.length} roles, budget ${crew.tokenBudget} tokens`)
+
+    // Create target branch if specified
+    let execCwd = project.cwd
+    if (crew.targetBranch) {
+      const branchName = crew.targetBranch.replace("YYYY-MM-DD", new Date().toISOString().slice(0, 10))
+      try {
+        execFileSync("git", ["checkout", "-b", branchName], { cwd: project.cwd, stdio: "pipe" })
+        report.targetBranch = branchName
+        log.info(`[Crew] Created target branch: ${branchName}`)
+      } catch (err) {
+        // Branch might already exist — try checkout
+        try {
+          execFileSync("git", ["checkout", branchName], { cwd: project.cwd, stdio: "pipe" })
+          report.targetBranch = branchName
+        } catch {
+          log.warn(`[Crew] Failed to create/checkout branch "${branchName}": ${err}`)
+        }
+      }
+    }
+
+    // Group roles by phase, sort phases ascending
+    const phaseMap = new Map<number, CrewRole[]>()
+    for (const role of crew.roles) {
+      const list = phaseMap.get(role.phase) || []
+      list.push(role)
+      phaseMap.set(role.phase, list)
+    }
+    const sortedPhases = [...phaseMap.keys()].sort((a, b) => a - b)
+
+    let handoffSummary = ""  // accumulated summary from previous phases
+    let circuitBroken = false
+
+    for (const phaseNum of sortedPhases) {
+      if (circuitBroken) break
+
+      const roles = phaseMap.get(phaseNum)!
+      log.info(`[Crew] Phase ${phaseNum}: executing ${roles.length} role(s) — ${roles.map(r => r.id).join(", ")}`)
+
+      // Circuit breaker check before phase starts
+      if (report.totalTokensUsed >= crew.tokenBudget) {
+        circuitBroken = true
+        log.warn(`[Crew] Circuit breaker: budget exceeded (${report.totalTokensUsed}/${crew.tokenBudget})`)
+        // Mark remaining roles as circuit_broken
+        const remainingPhases = sortedPhases.filter(p => p >= phaseNum)
+        for (const p of remainingPhases) {
+          const remainingRoles = phaseMap.get(p)!
+          report.phases.push({
+            phase: p,
+            roles: remainingRoles.map(r => ({
+              roleId: r.id,
+              roleName: r.nameKey,
+              icon: r.icon,
+              color: r.color,
+              phase: p,
+              status: "circuit_broken" as const,
+              tokensUsed: 0,
+              durationMs: 0,
+              outputSummary: "Circuit breaker: token budget exceeded",
+            })),
+          })
+        }
+        break
+      }
+
+      // Execute all roles in this phase concurrently
+      const roleResults = await Promise.all(
+        roles.map(role => this.executeCrewRole(auto, role, execCwd, handoffSummary))
+      )
+
+      const phaseResult = { phase: phaseNum, roles: roleResults }
+      report.phases.push(phaseResult)
+
+      // Accumulate tokens and build handoff
+      let phaseSummaries: string[] = []
+      for (const rr of roleResults) {
+        report.totalTokensUsed += rr.tokensUsed
+
+        if (rr.status === "completed") {
+          phaseSummaries.push(`[${rr.roleName}]: ${rr.outputSummary}`)
+        } else if (rr.status === "failed") {
+          phaseSummaries.push(`[${rr.roleName}]: FAILED — ${rr.outputSummary}`)
+        }
+
+        // Circuit breaker mid-phase check
+        if (report.totalTokensUsed >= crew.tokenBudget) {
+          circuitBroken = true
+          log.warn(`[Crew] Circuit breaker triggered mid-phase ${phaseNum} (${report.totalTokensUsed}/${crew.tokenBudget})`)
+        }
+      }
+
+      // Build handoff summary for next phase
+      handoffSummary += `\n\n--- Phase ${phaseNum} Results ---\n${phaseSummaries.join("\n\n")}`
+
+      // Phase delay
+      if (crew.phaseDelayMinutes && crew.phaseDelayMinutes > 0 && !circuitBroken) {
+        const delayMs = crew.phaseDelayMinutes * 60 * 1000
+        log.info(`[Crew] Phase delay: waiting ${crew.phaseDelayMinutes}m before next phase`)
+        await new Promise(resolve => setTimeout(resolve, delayMs))
+      }
+    }
+
+    report.completedAt = Date.now()
+    report.status = circuitBroken ? "circuit_broken" : report.phases.some(p => p.roles.every(r => r.status === "failed")) ? "failed" : "completed"
+
+    // Store crew report
+    this.storeCrewReport(id, report)
+
+    // Build overall automation result
+    const outputParts = report.phases.flatMap(p =>
+      p.roles.map(r => `[Phase ${r.phase}] ${r.roleName}: ${r.status} (${r.tokensUsed} tok, ${r.durationMs}ms)\n${r.outputSummary}`)
+    )
+    const output = outputParts.join("\n\n---\n\n")
+
+    const resultEntry: AutomationResult = {
+      id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      automationId: id,
+      startedAt,
+      finishedAt: report.completedAt,
+      exitCode: report.status === "completed" ? 0 : 1,
+      output: output.length > AutomationManager.MAX_OUTPUT_BYTES ? output.slice(-AutomationManager.MAX_OUTPUT_BYTES) : output,
+      summary: `Crew: ${report.status} — ${crew.roles.length} roles, ${report.totalTokensUsed}/${crew.tokenBudget} tokens`,
+      status: report.status === "circuit_broken" ? "circuit_broken" : report.status === "failed" ? "failed" : "success",
+      crewReport: report,
+    }
+
+    this.storeResult(id, resultEntry)
+
+    auto.lastRunAt = resultEntry.finishedAt
+    auto.lastRunStatus = resultEntry.status === "success" ? "success" : resultEntry.status === "circuit_broken" ? "circuit_broken" : "failed"
+    this.saveToDisk()
+
+    const durationMs = report.completedAt - startedAt
+    log.info(`[Crew] "${auto.name}" finished: ${report.status} (${durationMs}ms, ${report.totalTokensUsed}/${crew.tokenBudget} tokens)`)
+
+    // Broadcast completion
+    auditLog("automation_completed", { status: resultEntry.status, durationMs, crewStatus: report.status, totalTokens: report.totalTokensUsed }, { automationId: id, automationName: auto.name })
+    if (this.onEvent) {
+      this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
+    }
+  }
+
+  /** Execute a single crew role as an agent process */
+  private async executeCrewRole(auto: AutomationConfig, role: CrewRole, cwd: string, handoffSummary: string): Promise<CrewRoleResult> {
+    const roleStart = Date.now()
+    const locale = getSystemLocale()
+
+    // Build role-specific prompt with persona, handoff, and humanizer
+    let rolePrompt = ""
+
+    // Persona injection
+    rolePrompt += `[Your Role]\nYou are acting as: ${role.nameKey}\n`
+    rolePrompt += `Persona:\n- Tone: ${role.persona.tone}\n- Focus: ${role.persona.focus}\n- Style: ${role.persona.style}\n\n`
+
+    // Handoff from previous phases
+    if (handoffSummary) {
+      rolePrompt += `[Previous Phase Results]\nThe following work was completed in earlier phases. Build on these results:\n${handoffSummary}\n\n`
+    }
+
+    // Core task prompt
+    rolePrompt += `[Task]\n${role.prompt}\n\n`
+
+    // Skill chain workflow injection
+    if (role.skillChainWorkflow) {
+      rolePrompt += `[Workflow]\nFollow these steps in order:\n${role.skillChainWorkflow}\n\n`
+    }
+
+    // Humanizer injection based on locale
+    if (locale === "zh-TW" || locale.startsWith("zh")) {
+      rolePrompt += `[Output Style]\nWrite naturally in Traditional Chinese. Avoid AI-sounding patterns: no "在當今快速發展的時代", no "讓我們深入探討", no "值得注意的是". Use short sentences, casual tone, mix Chinese and English terms naturally.\n\n`
+    } else {
+      rolePrompt += `[Output Style]\nWrite naturally. Avoid AI-sounding patterns: no "In today's fast-paced world", no "Let's dive in", no "It's worth noting", no "leverage", no "robust". Use short sentences, direct tone.\n\n`
+    }
+
+    // Wrap with locale
+    const promptText = wrapPromptWithLocale(rolePrompt)
+
+    // Build agent protocol + write prompt file
+    const agentProtocol = buildAgentProtocol(locale)
+    const fullPrompt = `[System Instructions]\n${agentProtocol}\n\n[User Prompt]\n${promptText}`
+    const promptFilePath = writePromptFile(this.storageDir, `${auto.id}_${role.id}`, fullPrompt)
+
+    // Build agent args
+    const agentId = auto.agentId || "claude"
+    let bin: string
+    let args: string[]
+    switch (agentId) {
+      case "claude":
+        bin = "claude"
+        args = ["-p", `Read and follow all instructions in this file: ${promptFilePath}`, "--dangerously-skip-permissions"]
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
+        break
+      case "codex":
+        bin = "codex"
+        args = ["--full-auto", "-q", `Read and follow all instructions in ${promptFilePath}`]
+        if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
+        break
+      default:
+        bin = /^[a-zA-Z0-9_-]+$/.test(agentId) ? agentId : "claude"
+        args = ["--print"]
+        break
+    }
+
+    // Spawn process
+    const ROLE_TIMEOUT_MS = 10 * 60 * 1000
+    const env = { ...process.env }
+    delete (env as any).CLAUDECODE
+    delete (env as any).CLAUDE_CODE_ENTRYPOINT
+
+    try {
+      const result = await new Promise<{ exitCode: number | null; timedOut: boolean; output: string }>((resolve) => {
+        let resolved = false
+        const outputChunks: string[] = []
+        let outputBytes = 0
+        const MAX_OUTPUT = 100_000
+
+        const proc = spawn(bin, args, {
+          cwd,
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          ...(process.platform !== "win32" ? { detached: true } : {}),
+          windowsHide: true,
+        })
+
+        try { proc.stdin.end() } catch {}
+        proc.stdin.on("error", () => {})
+
+        proc.stdout.on("data", (data: Buffer) => {
+          const text = data.toString()
+          if (outputBytes < MAX_OUTPUT) {
+            outputChunks.push(text)
+            outputBytes += text.length
+          }
+        })
+        proc.stdout.on("error", () => {})
+
+        proc.stderr.on("data", (data: Buffer) => {
+          const text = data.toString()
+          if (outputBytes < MAX_OUTPUT) {
+            outputChunks.push(text)
+            outputBytes += text.length
+          }
+        })
+        proc.stderr.on("error", () => {})
+
+        proc.on("close", (code) => {
+          if (!resolved) { resolved = true; resolve({ exitCode: code, timedOut: false, output: outputChunks.join("") }) }
+        })
+        proc.on("error", (err) => {
+          if (!resolved) { resolved = true; resolve({ exitCode: 1, timedOut: false, output: `Spawn error: ${err.message}` }) }
+        })
+
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true
+            killProcessTree(proc)
+            setTimeout(() => { if (!proc.killed) killProcessTree(proc) }, 5000)
+            resolve({ exitCode: null, timedOut: true, output: outputChunks.join("") })
+          }
+        }, ROLE_TIMEOUT_MS)
+      })
+
+      const roleDuration = Date.now() - roleStart
+      const summary = AutomationManager.extractSummary(result.output, result.timedOut ? "timeout" : "success")
+
+      return {
+        roleId: role.id,
+        roleName: role.nameKey,
+        icon: role.icon,
+        color: role.color,
+        phase: role.phase,
+        status: result.timedOut ? "failed" : (result.exitCode === 0 || result.exitCode === null ? "completed" : "failed"),
+        tokensUsed: role.estimatedTokens || 2000,
+        durationMs: roleDuration,
+        outputSummary: summary,
+        outputFull: result.output.length > AutomationManager.MAX_OUTPUT_BYTES ? result.output.slice(-AutomationManager.MAX_OUTPUT_BYTES) : result.output,
+      }
+    } catch (err) {
+      return {
+        roleId: role.id,
+        roleName: role.nameKey,
+        icon: role.icon,
+        color: role.color,
+        phase: role.phase,
+        status: "failed",
+        tokensUsed: 0,
+        durationMs: Date.now() - roleStart,
+        outputSummary: err instanceof Error ? err.message : String(err),
+      }
+    }
+  }
+
+  /** Store a crew execution report */
+  private storeCrewReport(automationId: string, report: CrewExecutionReport): void {
+    const filePath = join(this.storageDir, `crew_report_${automationId}.json`)
+    // Keep last 10 reports
+    let reports: CrewExecutionReport[] = []
+    try {
+      if (existsSync(filePath)) {
+        reports = JSON.parse(readFileSync(filePath, "utf-8"))
+      }
+    } catch {}
+    reports.push(report)
+    if (reports.length > 10) reports.splice(0, reports.length - 10)
+    writeFileSync(filePath, JSON.stringify(reports, null, 2))
+  }
+
+  /** Get crew execution reports for an automation */
+  getCrewReports(automationId: string): CrewExecutionReport[] {
+    const filePath = join(this.storageDir, `crew_report_${automationId}.json`)
+    try {
+      if (existsSync(filePath)) {
+        return JSON.parse(readFileSync(filePath, "utf-8"))
+      }
+    } catch {}
+    return []
   }
 
   // --- Persistence ---

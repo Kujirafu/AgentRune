@@ -4,11 +4,45 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { useLocale } from "../lib/i18n"
 import { AGENTS } from "../types"
-import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS } from "../data/builtin-templates"
-import type { AutomationConfig, AutomationSchedule, AutomationResult, AutomationTemplate, TrustProfile, SandboxLevel } from "../data/automation-types"
+import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS, SUBGROUP_LABELS } from "../data/builtin-templates"
+import { BUILTIN_CREWS, CHAIN_TEMPLATES } from "../data/builtin-crews"
+import type { AutomationConfig, AutomationSchedule, AutomationResult, AutomationTemplate, TrustProfile, SandboxLevel, CrewConfig, CrewRole } from "../data/automation-types"
+import { BUILTIN_CHAINS, isParallelGroup, resolveChainText } from "../lib/skillChains"
+import type { SkillChainDef } from "../lib/skillChains"
 import { TRUST_PROFILE_PRESETS } from "../data/automation-types"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
+import CrewReportSheet from "./CrewReportSheet"
+// ChainBuilder import removed — chain editing moved to workflow tab direct access
+
+// --- Lucide-style SVG icons for crew role avatars (keyed by role.icon field) ---
+const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
+const CREW_ROLE_ICONS: Record<string, ReactNode> = {
+  target: <svg {..._s}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>,
+  code: <svg {..._s}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>,
+  "shield-check": <svg {..._s}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>,
+  lock: <svg {..._s}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>,
+  wrench: <svg {..._s}><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>,
+  megaphone: <svg {..._s}><path d="M3 11l18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 11-5.8-1.6"/></svg>,
+  "trending-up": <svg {..._s}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+  "layout-list": <svg {..._s}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
+  "pen-tool": <svg {..._s}><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>,
+  search: <svg {..._s}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
+  "check-circle": <svg {..._s}><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+  lightbulb: <svg {..._s}><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z"/></svg>,
+  boxes: <svg {..._s}><path d="M2.97 12.92A2 2 0 002 14.63v3.24a2 2 0 001.02 1.75l3.5 1.99a2 2 0 001.96.01l3.5-1.97a2 2 0 001.02-1.75v-3.24a2 2 0 00-.97-1.71L7.58 11a2 2 0 00-2.05.01z"/><path d="M13.97 12.92A2 2 0 0013 14.63v3.24a2 2 0 001.02 1.75l3.5 1.99a2 2 0 001.96.01l3.5-1.97A2 2 0 0024 17.9v-3.24a2 2 0 00-.97-1.71L18.58 11a2 2 0 00-2.05.01z"/><path d="M7.97 2.92A2 2 0 007 4.63v3.24a2 2 0 001.02 1.75l3.5 1.99a2 2 0 001.96.01l3.5-1.97A2 2 0 0018 7.9V4.63a2 2 0 00-.97-1.71L12.58 1a2 2 0 00-2.05.01z"/></svg>,
+  "file-text": <svg {..._s}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
+  rocket: <svg {..._s}><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 00-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 012-3.95A12.88 12.88 0 0122 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 01-4 2z"/></svg>,
+  "shield-alert": <svg {..._s}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  "test-tubes": <svg {..._s}><path d="M9 2v17.5A2.5 2.5 0 0111.5 22v0a2.5 2.5 0 002.5-2.5V2"/><path d="M20 2v17.5a2.5 2.5 0 01-2.5 2.5v0a2.5 2.5 0 01-2.5-2.5V2"/><path d="M3 2v17.5A2.5 2.5 0 005.5 22v0A2.5 2.5 0 008 19.5V2"/><line x1="3" y1="12" x2="8" y2="12"/><line x1="9" y1="14" x2="14" y2="14"/></svg>,
+  "clipboard-list": <svg {..._s}><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="12" y1="11" x2="12" y2="11.01"/><line x1="12" y1="16" x2="12" y2="16.01"/></svg>,
+  brain: <svg {..._s}><path d="M9.5 2A2.5 2.5 0 0112 4.5v15a2.5 2.5 0 01-4.96.44A2.5 2.5 0 012 17.5v0A2.5 2.5 0 014.5 15 2.5 2.5 0 012 12.5v0A2.5 2.5 0 014.5 10a2.5 2.5 0 01-2-4A2.5 2.5 0 019.5 2z"/><path d="M14.5 2A2.5 2.5 0 0012 4.5v15a2.5 2.5 0 004.96.44A2.5 2.5 0 0022 17.5v0a2.5 2.5 0 00-2.5-2.5A2.5 2.5 0 0022 12.5v0a2.5 2.5 0 00-2.5-2.5 2.5 2.5 0 002-4A2.5 2.5 0 0014.5 2z"/></svg>,
+  scale: <svg {..._s}><line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 8 4 8"/><polyline points="20 8 16 8"/><path d="M4 8l4 6H0L4 8z"/><path d="M20 8l4 6h-8l4-6z"/><line x1="4" y1="3" x2="20" y2="3"/></svg>,
+  bug: <svg {..._s}><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M2 10h4"/><path d="M18 10h4"/><path d="M2 14h4"/><path d="M18 14h4"/><path d="M6 6l-2-2"/><path d="M18 6l2-2"/></svg>,
+}
+function getCrewRoleIcon(iconName: string): ReactNode {
+  return CREW_ROLE_ICONS[iconName] || <svg {..._s}><circle cx="12" cy="12" r="10"/></svg>
+}
 
 // --- Lucide-style SVG icons for each template (by template id suffix) ---
 const TEMPLATE_ICONS: Record<string, ReactNode> = {
@@ -58,6 +92,23 @@ const GROUP_I18N: Record<string, string> = {
   learning: "Learn",
 }
 
+// --- Subgroup → icon circle color ---
+const SUBGROUP_COLORS: Record<string, string> = {
+  git: "#F59E0B",
+  ci: "#8B5CF6",
+  security: "#EF4444",
+  quality: "#37ACC0",
+  perf: "#F97316",
+  monitoring: "#64748B",
+  learning: "#22C55E",
+  docs_writing: "#3B82F6",
+  agentlore: "#6C8EBF",
+}
+/** Resolve icon circle color from a template's subgroup */
+function getTemplateColor(tmpl: AutomationTemplate): string {
+  return (tmpl.subgroup && SUBGROUP_COLORS[tmpl.subgroup]) || "#37ACC0"
+}
+
 interface AutomationSheetProps {
   open: boolean
   projectId: string
@@ -65,6 +116,8 @@ interface AutomationSheetProps {
   onClose: () => void
   /** When provided, open directly into edit mode for this automation */
   initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null
+  /** Launch a new session with a template prompt (prefilled into InputBar) */
+  onLaunchSession?: (prompt: string) => void
 }
 
 // --- Weekday labels ---
@@ -250,11 +303,37 @@ function useTemplateI18n() {
   const { t } = useLocale()
   return {
     tplName: (tmpl: AutomationTemplate) => {
+      // Chain templates: id = "chain_{slug}", i18n = "chain.{slug}.name"
+      if (tmpl.id.startsWith("chain_")) {
+        const slug = tmpl.id.replace("chain_", "")
+        const ck = `chain.${slug}.name`
+        const ct = t(ck)
+        return ct !== ck ? ct : slug
+      }
+      // Crew presets: id = "crew_{key}", i18n = "crew.preset.{key}"
+      if (tmpl.category === "crew") {
+        const presetKey = tmpl.id.replace("crew_", "").replace("custom_", "")
+        const ck = `crew.preset.${presetKey}`
+        const ct = t(ck)
+        return ct !== ck ? ct : tmpl.name
+      }
       const key = tmpl.id.replace("builtin_", "")
       const translated = t(`tpl.${key}`)
       return translated !== `tpl.${key}` ? translated : tmpl.name
     },
     tplDesc: (tmpl: AutomationTemplate) => {
+      if (tmpl.id.startsWith("chain_")) {
+        const slug = tmpl.id.replace("chain_", "")
+        const ck = `chain.${slug}.desc`
+        const ct = t(ck)
+        return ct !== ck ? ct : tmpl.description
+      }
+      if (tmpl.category === "crew") {
+        const presetKey = tmpl.id.replace("crew_", "").replace("custom_", "")
+        const ck = `crew.preset.${presetKey}.desc`
+        const ct = t(ck)
+        return ct !== ck ? ct : tmpl.description
+      }
       const key = tmpl.id.replace("builtin_", "")
       const translated = t(`tpl.${key}.desc`)
       return translated !== `tpl.${key}.desc` ? translated : tmpl.description
@@ -264,7 +343,7 @@ function useTemplateI18n() {
 
 // --- Main Component ---
 
-export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit }: AutomationSheetProps) {
+export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit, onLaunchSession }: AutomationSheetProps) {
   const { t } = useLocale()
   const { tplName, tplDesc } = useTemplateI18n()
   const [automations, setAutomations] = useState<AutomationConfig[]>([])
@@ -295,6 +374,12 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formDailyRunLimit, setFormDailyRunLimit] = useState(50)
   const [formPlanReviewTimeout, setFormPlanReviewTimeout] = useState(30)
   const [showCustomSettings, setShowCustomSettings] = useState(false)
+
+  // Crew mode
+  const [formCrew, setFormCrew] = useState<CrewConfig | null>(null)
+  const [expandedRoleId, setExpandedRoleId] = useState<string | null>(null)
+  // chainPickerRoleId/chainEditRoleId removed — skill chain selection simplified out
+  const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null)
   const [scanResult, setScanResult] = useState<{ blockedCount: number; conflicts: { detectedKey: string; categoryKey: string; blocked: boolean }[]; summaryKey: string; summaryParams: Record<string, string | number> } | null>(null)
   const [scanning, setScanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -302,6 +387,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   // Template browsing
   const [templateTab, setTemplateTab] = useState<"all" | "pinned" | "recommended">("all")
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
+  const toggleSection = (key: string) => setExpandedSections(prev => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next })
   const [templateSearch, setTemplateSearch] = useState("")
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("agentrune_pinned_templates") || "[]") } catch { return [] }
@@ -369,6 +456,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormDailyRunLimit((initialEdit as any).dailyRunLimit ?? 50)
         setFormPlanReviewTimeout((initialEdit as any).planReviewTimeoutMinutes ?? 30)
         setShowCustomSettings(tp === "custom")
+        setFormCrew((initialEdit as any).crew ? JSON.parse(JSON.stringify((initialEdit as any).crew)) : null)
         setScanResult(null)
         setPage("add")
       } else {
@@ -456,10 +544,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
   const openAddForm = (template?: AutomationTemplate) => {
     setEditId(null)
-    setFormName(template?.name || "")
+    // For crew templates, use i18n name; for others, use template name
+    const displayName = template?.category === "crew"
+      ? (t(`crew.preset.${template.id.replace("crew_", "")}`) || template.name)
+      : (template?.name || "")
+    setFormName(displayName)
     setFormPrompt(template?.prompt || "")
     setFormSkill(template?.skill || "")
     setFormTemplateId(template?.id || null)
+    setFormCrew(template?.crew ? JSON.parse(JSON.stringify(template.crew)) : null)
+    setExpandedRoleId(null)
     setFormScheduleType("daily")
     setFormTimeOfDay("09:00")
     setFormWeekdays([1, 2, 3, 4, 5])
@@ -472,7 +566,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   }
 
   const handleSubmit = async () => {
-    if (!formName.trim() || !formPrompt.trim()) return
+    // Crew mode doesn't need a prompt (roles have their own prompts)
+    if (!formName.trim() || (!formPrompt.trim() && !formCrew)) return
     setSubmitting(true)
 
     const schedule: AutomationSchedule = { type: formScheduleType }
@@ -499,6 +594,27 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       requireMergeApproval: formRequireMergeApproval,
       dailyRunLimit: formDailyRunLimit,
       planReviewTimeoutMinutes: formPlanReviewTimeout,
+      crew: formCrew ? {
+        ...formCrew,
+        roles: formCrew.roles.map(r => {
+          if (!r.skillChainSlug) return r
+          const chain = BUILTIN_CHAINS.find(c => c.slug === r.skillChainSlug)
+          if (!chain) return r
+          // Serialize chain steps as structured workflow text for the execution engine
+          const lines: string[] = []
+          let stepNum = 1
+          for (const node of chain.steps) {
+            if (isParallelGroup(node)) {
+              lines.push(`${stepNum}. [PARALLEL] ${node.branches.map(b => resolveChainText(b.labelKey, t)).join(" + ")}`)
+              stepNum++
+            } else {
+              lines.push(`${stepNum}. ${resolveChainText(node.labelKey, t)}${node.required ? "" : " (optional)"}`)
+              stepNum++
+            }
+          }
+          return { ...r, skillChainWorkflow: lines.join("\n") }
+        }),
+      } : undefined,
       enabled: true,
     }
 
@@ -548,28 +664,32 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   }
 
   const saveAsCustomTemplate = () => {
-    if (!formName.trim() || !formPrompt.trim()) return
+    if (!formName.trim() || (!formPrompt.trim() && !formCrew)) return
     const id = `custom_${Date.now()}`
+    const isCrew = !!formCrew
     const tmpl: AutomationTemplate = {
       id,
       name: formName.trim(),
-      description: formPrompt.trim().slice(0, 100) + (formPrompt.length > 100 ? "..." : ""),
+      description: isCrew
+        ? `${formCrew!.roles.length} roles crew template`
+        : formPrompt.trim().slice(0, 100) + (formPrompt.length > 100 ? "..." : ""),
       icon: "",
       prompt: formPrompt.trim(),
       skill: formSkill.trim() || undefined,
-      category: "custom",
+      category: isCrew ? "crew" : "custom",
+      crew: isCrew ? JSON.parse(JSON.stringify(formCrew)) : undefined,
       visibility: "private",
       rating: 0,
       ratingCount: 0,
       pinCount: 0,
       tags: [],
-      group: "custom",
+      group: isCrew ? "crew" : "custom",
       createdAt: Date.now(),
     }
     const next = [...customTemplates, tmpl]
     setCustomTemplates(next)
     localStorage.setItem("agentrune_custom_templates", JSON.stringify(next))
-    showToast(t("automation.templateSaved") || "Template saved")
+    showToast(t("automation.templateSaved") || "Workflow saved")
   }
 
   const deleteCustomTemplate = (id: string) => {
@@ -578,11 +698,11 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     localStorage.setItem("agentrune_custom_templates", JSON.stringify(next))
     // Also unpin if pinned
     if (pinnedIds.includes(id)) togglePin(id)
-    showToast(t("automation.templateDeleted") || "Template deleted")
+    showToast(t("automation.templateDeleted") || "Workflow deleted")
   }
 
-  // Merge builtin + custom for display
-  const allTemplates = [...BUILTIN_TEMPLATES, ...customTemplates]
+  // Merge builtin + crew + custom for display
+  const allTemplates = [...BUILTIN_TEMPLATES, ...BUILTIN_CREWS, ...CHAIN_TEMPLATES, ...customTemplates]
 
   // --- Formatters ---
 
@@ -650,32 +770,76 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               </div>
             </div>
 
-            {/* Manual create button — top entry */}
-            <button onClick={() => openAddForm()} style={{
-              display: "flex", alignItems: "center", gap: 12,
-              width: "100%", padding: "14px 16px", borderRadius: 14,
-              border: "1.5px dashed #c8bfb6", background: "transparent",
-              cursor: "pointer", textAlign: "left", marginBottom: 12,
-            }}>
-              <div style={{
-                width: 40, height: 40, borderRadius: 12,
-                background: "#ddd5cc", border: "1px solid #c8bfb6",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                color: "#64748b",
+            {/* Top entry buttons — manual + custom crew */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button onClick={() => openAddForm()} style={{
+                display: "flex", alignItems: "center", gap: 10, flex: 1,
+                padding: "12px 14px", borderRadius: 14,
+                border: "1.5px dashed #c8bfb6", background: "transparent",
+                cursor: "pointer", textAlign: "left",
               }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-              </div>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "#1e293b" }}>
-                  {t("automation.manualCreate") || "Manual"}
+                <div style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  background: "#ddd5cc", border: "1px solid #c8bfb6",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "#64748b", flexShrink: 0,
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
                 </div>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
-                  {t("automation.manualCreateDesc") || "Start from scratch"}
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>
+                    {t("automation.manualCreate") || "Manual"}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 1 }}>
+                    {t("automation.manualCreateDesc") || "Start from scratch"}
+                  </div>
                 </div>
-              </div>
-            </button>
+              </button>
+              <button onClick={() => {
+                setEditId(null)
+                setFormName("")
+                setFormPrompt("")
+                setFormSkill("")
+                setFormTemplateId(null)
+                setFormCrew({ roles: [{ id: `role_${Date.now()}`, nameKey: "crew.role.custom", prompt: "", persona: { tone: "", focus: "", style: "" }, icon: "lightbulb", color: "#37ACC0", phase: 1, estimatedTokens: 2000 }], tokenBudget: 10000, targetBranch: "crew/YYYY-MM-DD", phaseDelayMinutes: 0 })
+                setExpandedRoleId(null)
+                setFormScheduleType("daily")
+                setFormTimeOfDay("09:00")
+                setFormWeekdays([1, 2, 3, 4, 5])
+                setFormInterval("30")
+                setFormRunMode("local")
+                setFormAgentId("claude")
+                setFormModel("")
+                setFormBypass(false)
+                setPage("add")
+              }} style={{
+                display: "flex", alignItems: "center", gap: 10, flex: 1,
+                padding: "12px 14px", borderRadius: 14,
+                border: "1.5px dashed #37ACC0", background: "rgba(55,172,192,0.05)",
+                cursor: "pointer", textAlign: "left",
+              }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  background: "rgba(55,172,192,0.12)", border: "1px solid rgba(55,172,192,0.2)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "#37ACC0", flexShrink: 0,
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
+                  </svg>
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>
+                    {t("automation.customCrew") || "Custom Crew"}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 1 }}>
+                    {t("automation.customCrewDesc") || "Build your own role chain"}
+                  </div>
+                </div>
+              </button>
+            </div>
 
             {/* Search bar */}
             <div style={{ position: "relative", marginBottom: 10 }}>
@@ -733,7 +897,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   color: selectedGroup === g.key ? "#37ACC0" : "#64748b",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}>
-                  {t(`tplGroup.${g.key}`) !== `tplGroup.${g.key}` ? t(`tplGroup.${g.key}`) : g.label}
+                  {t(g.label) !== g.label ? t(g.label) : g.key}
                 </button>
               ))}
             </div>
@@ -789,20 +953,72 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         </div>
                       </div>
                     )}
-                    {/* Grouped display */}
+                    {/* Grouped display with subgroup headers */}
                     {TEMPLATE_GROUPS.map((g) => {
                       const items = filtered.filter((tmpl) => tmpl.group === g.key && tmpl.category !== "custom")
                       if (items.length === 0) return null
+                      // Collect unique subgroups in order
+                      const subgroups: string[] = []
+                      items.forEach(tmpl => {
+                        if (tmpl.subgroup && !subgroups.includes(tmpl.subgroup)) subgroups.push(tmpl.subgroup)
+                      })
+                      const renderItem = (tmpl: AutomationTemplate) => (
+                        tmpl.category === "crew"
+                          ? <CrewPickCard key={tmpl.id} tmpl={tmpl} t={t} onUse={() => openAddForm(tmpl)} pinned={pinnedIds.includes(tmpl.id)} onTogglePin={() => togglePin(tmpl.id)} onDelete={tmpl.id.startsWith("custom_") ? () => deleteCustomTemplate(tmpl.id) : undefined} />
+                          : <PickCard key={tmpl.id} tmpl={tmpl} tplName={tplName} tplDesc={tplDesc} onUse={() => openAddForm(tmpl)} icon={getTemplateIcon(tmpl)} pinned={pinnedIds.includes(tmpl.id)} onTogglePin={() => togglePin(tmpl.id)} />
+                      )
                       return (
-                        <div key={g.key} style={{ marginBottom: 8 }}>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
-                            {t(`tplGroup.${g.key}`) !== `tplGroup.${g.key}` ? t(`tplGroup.${g.key}`) : g.label}
+                        <div key={g.key} style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0", marginBottom: 8, letterSpacing: 0.5 }}>
+                            {t(g.label)}
                           </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            {items.map((tmpl) => (
-                              <PickCard key={tmpl.id} tmpl={tmpl} tplName={tplName} tplDesc={tplDesc} onUse={() => openAddForm(tmpl)} icon={getTemplateIcon(tmpl)} pinned={pinnedIds.includes(tmpl.id)} onTogglePin={() => togglePin(tmpl.id)} />
-                            ))}
-                          </div>
+                          {subgroups.length > 1 ? subgroups.map(sg => {
+                            const sgItems = items.filter(tmpl => tmpl.subgroup === sg)
+                            if (sgItems.length === 0) return null
+                            const sgLabel = SUBGROUP_LABELS[sg]
+                            const GP = 2
+                            const sgExpanded = expandedSections.has(sg)
+                            const sgVisible = sgExpanded ? sgItems : sgItems.slice(0, GP)
+                            const sgHidden = sgItems.length - GP
+                            return (
+                              <div key={sg} style={{ marginBottom: 8 }}>
+                                {sgLabel && (
+                                  <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4, marginLeft: 2, opacity: 0.7 }}>
+                                    {t(sgLabel)}
+                                  </div>
+                                )}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {sgVisible.map(renderItem)}
+                                  {sgHidden > 0 && !sgExpanded && (
+                                    <button onClick={() => toggleSection(sg)} style={{
+                                      background: "none", border: "1px dashed #c8bfb6", borderRadius: 10,
+                                      padding: "8px 0", color: "#64748b", fontSize: 12, cursor: "pointer",
+                                    }}>
+                                      {t("automation.showMore") || "Show more"} ({sgHidden})
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          }) : (() => {
+                            const GP = 2
+                            const gExpanded = expandedSections.has(g.key)
+                            const gVisible = gExpanded ? items : items.slice(0, GP)
+                            const gHidden = items.length - GP
+                            return (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {gVisible.map(renderItem)}
+                                {gHidden > 0 && !gExpanded && (
+                                  <button onClick={() => toggleSection(g.key)} style={{
+                                    background: "none", border: "1px dashed #c8bfb6", borderRadius: 10,
+                                    padding: "8px 0", color: "#64748b", fontSize: 12, cursor: "pointer",
+                                  }}>
+                                    {t("automation.showMore") || "Show more"} ({gHidden})
+                                  </button>
+                                )}
+                              </div>
+                            )
+                          })()}
                         </div>
                       )
                     })}
@@ -827,7 +1043,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   color: "var(--text-secondary)", fontSize: 12, fontWeight: 600, cursor: "pointer",
                 }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /></svg>
-                  {t("automation.templates") || "Templates"}
+                  {t("automation.templates") || "Workflows"}
                 </button>
                 <button onClick={() => openAddForm()} style={{
                   display: "flex", alignItems: "center", gap: 5,
@@ -869,7 +1085,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {automations.map((auto) => {
                   const isExpanded = expandedId === auto.id
-                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : (auto.lastRunStatus === "failed" || auto.lastRunStatus === "blocked_by_risk") ? "#ef4444" : auto.lastRunStatus === "skipped_no_confirmation" ? "#94a3b8" : undefined
+                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : auto.lastRunStatus === "circuit_broken" ? "#f59e0b" : (auto.lastRunStatus === "failed" || auto.lastRunStatus === "blocked_by_risk") ? "#ef4444" : auto.lastRunStatus === "skipped_no_confirmation" ? "#94a3b8" : undefined
+                  const hasCrew = !!(auto as any).crew
                   return (
                     <div key={auto.id} style={{
                       borderRadius: 16,
@@ -950,7 +1167,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const,
                             overflow: "hidden", lineHeight: 1.4,
                           }}>
-                            {auto.prompt || auto.command || "—"}
+                            {hasCrew
+                              ? t("crew.rolesCount").replace("{n}", String((auto as any).crew.roles.length))
+                              : (auto.prompt || auto.command || "—")}
                           </div>
                           {/* Last run status bar */}
                           {auto.lastRunAt && (
@@ -959,7 +1178,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             }}>
                               <StatusDot status={auto.lastRunStatus} />
                               <span style={{ color: statusColor, fontWeight: 600 }}>
-                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "blocked_by_risk" ? "Blocked" : auto.lastRunStatus === "skipped_no_confirmation" ? "Skipped" : auto.lastRunStatus === "failed" ? "Failed" : "—"}
+                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "circuit_broken" ? t("crew.report.status.circuit_broken") : auto.lastRunStatus === "blocked_by_risk" ? "Blocked" : auto.lastRunStatus === "skipped_no_confirmation" ? "Skipped" : auto.lastRunStatus === "failed" ? "Failed" : "—"}
                               </span>
                               <span style={{ color: "var(--text-secondary)", opacity: 0.6 }}>
                                 {formatTime(auto.lastRunAt)}
@@ -1027,6 +1246,17 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
                               {triggeringId === auto.id ? "..." : (t("automation.trigger") || "Trigger")}
                             </button>
+                            {hasCrew && (
+                              <button onClick={(e) => { e.stopPropagation(); setReportTarget({ id: auto.id, name: auto.name }) }} style={{
+                                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                padding: "8px 16px", borderRadius: 10,
+                                border: "1px solid rgba(155,89,182,0.3)", background: "rgba(155,89,182,0.08)",
+                                color: "#9B59B6", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                              }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                                {t("crew.report.viewReport")}
+                              </button>
+                            )}
                             <button onClick={(e) => {
                               e.stopPropagation()
                               setEditId(auto.id)
@@ -1042,6 +1272,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               setFormAgentId(auto.agentId || "claude")
                               setFormModel((auto as any).model || "")
                               setFormBypass(!!(auto as any).bypass)
+                              setFormCrew((auto as any).crew ? JSON.parse(JSON.stringify((auto as any).crew)) : null)
                               setPage("add")
                             }} style={{
                               flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
@@ -1138,7 +1369,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
                 </button>
                 <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>
-                  {t("automation.templates") || "Templates"}
+                  {t("automation.templates") || "Workflows"}
                 </div>
               </div>
             </div>
@@ -1207,7 +1438,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                   transition: "all 0.2s",
                 }}>
-                  {g.label}
+                  {t(g.label)}
                 </button>
               ))}
             </div>
@@ -1256,7 +1487,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         padding: "6px 2px 4px", borderBottom: "1px solid rgba(55, 172, 192, 0.1)",
                         marginBottom: 6,
                       }}>
-                        {g.label}
+                        {t(g.label)}
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {groupTemplates.map((tmpl) => (
@@ -1324,8 +1555,200 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               }}
             />
 
-            {/* 2. Prompt input — collapsed when template applied, full when manual */}
-            {formTemplateId ? (
+            {/* 2. Prompt input — crew mode shows role cards, template shows collapsed, manual shows textarea */}
+            {formCrew ? (
+              /* ---- CREW MODE: Role card list ---- */
+              <div style={{ width: "100%", marginBottom: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#64748b", marginBottom: 8 }}>
+                  {t("crew.rolesCount").replace("{n}", String(formCrew.roles.length))}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {formCrew.roles.map((role) => {
+                    const isExpanded = expandedRoleId === role.id
+                    const roleName = t(role.nameKey) !== role.nameKey ? t(role.nameKey) : role.id
+                    const phaseRoles = formCrew.roles.filter(r => r.phase === role.phase)
+                    const isParallel = phaseRoles.length > 1
+                    return (
+                      <div key={role.id} style={{
+                        borderRadius: 12, border: "1px solid rgba(0,0,0,0.08)",
+                        background: "rgba(255,255,255,0.6)", overflow: "hidden",
+                        borderLeft: `3px solid ${role.color}`,
+                      }}>
+                        <button
+                          onClick={() => setExpandedRoleId(isExpanded ? null : role.id)}
+                          style={{
+                            width: "100%", display: "flex", alignItems: "center", gap: 10,
+                            padding: "10px 12px", background: "none", border: "none",
+                            cursor: "pointer", textAlign: "left",
+                          }}
+                        >
+                          <div style={{
+                            width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+                            background: role.color,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                          }}>
+                            {getCrewRoleIcon(role.icon)}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{roleName}</div>
+                            <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>
+                              {t("crew.phase").replace("{n}", String(role.phase))}
+                              {isParallel && ` · ${t("crew.parallel")}`}
+                              {role.estimatedTokens ? ` · ~${role.estimatedTokens.toLocaleString()} tok` : ""}
+                            </div>
+                          </div>
+                          <IconChevron expanded={isExpanded} />
+                        </button>
+
+                        {isExpanded && (
+                          <div style={{ padding: "0 12px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+                            {/* Persona */}
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {[
+                                { label: t("crew.persona.tone"), value: role.persona.tone },
+                                { label: t("crew.persona.focus"), value: role.persona.focus },
+                                { label: t("crew.persona.style"), value: role.persona.style },
+                              ].map((p) => (
+                                <div key={p.label} style={{ fontSize: 10, color: "#64748b", background: "rgba(0,0,0,0.04)", borderRadius: 6, padding: "3px 7px" }}>
+                                  <span style={{ fontWeight: 600 }}>{p.label}:</span> {p.value}
+                                </div>
+                              ))}
+                            </div>
+                            {/* Prompt editor */}
+                            <textarea
+                              value={role.prompt}
+                              onChange={(e) => {
+                                const updated = { ...formCrew, roles: formCrew.roles.map(r => r.id === role.id ? { ...r, prompt: e.target.value } : r) }
+                                setFormCrew(updated)
+                              }}
+                              rows={4}
+                              style={{
+                                width: "100%", padding: "8px 10px", borderRadius: 8,
+                                border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.8)",
+                                color: "#1e293b", fontSize: 11, lineHeight: 1.5,
+                                outline: "none", boxSizing: "border-box", resize: "vertical",
+                                fontFamily: "inherit",
+                              }}
+                            />
+                            {/* Skill chain info (read-only, if pre-set) */}
+                            {role.skillChainSlug && (() => {
+                              const chain = BUILTIN_CHAINS.find(c => c.slug === role.skillChainSlug)
+                              if (!chain) return null
+                              const stepCount = chain.steps.reduce((n, node) => n + (isParallelGroup(node) ? node.branches.length : 1), 0)
+                              return (
+                                <div style={{
+                                  padding: "6px 10px", borderRadius: 8,
+                                  background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.15)",
+                                  display: "flex", alignItems: "center", gap: 6,
+                                }}>
+                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/>
+                                  </svg>
+                                  <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 500 }}>
+                                    {resolveChainText(chain.nameKey, t)}
+                                  </span>
+                                  <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>
+                                    {stepCount} {t("crew.chainSteps")}
+                                  </span>
+                                </div>
+                              )
+                            })()}
+                            {/* Phase selector */}
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span style={{ fontSize: 11, color: "#64748b" }}>{t("crew.phase").replace("{n}", "")}</span>
+                              <input
+                                type="number" min={1} max={10} value={role.phase}
+                                onChange={(e) => {
+                                  const updated = { ...formCrew, roles: formCrew.roles.map(r => r.id === role.id ? { ...r, phase: parseInt(e.target.value) || 1 } : r) }
+                                  setFormCrew(updated)
+                                }}
+                                style={{
+                                  width: 48, padding: "4px 8px", borderRadius: 6,
+                                  border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.8)",
+                                  fontSize: 12, textAlign: "center", outline: "none",
+                                }}
+                              />
+                              {/* Delete role */}
+                              <button
+                                onClick={() => {
+                                  if (formCrew.roles.length <= 1) return
+                                  setFormCrew({ ...formCrew, roles: formCrew.roles.filter(r => r.id !== role.id) })
+                                  setExpandedRoleId(null)
+                                }}
+                                style={{
+                                  marginLeft: "auto", padding: "4px 8px", borderRadius: 6,
+                                  border: "none", background: "rgba(239,68,68,0.1)",
+                                  color: "#ef4444", fontSize: 11, cursor: "pointer",
+                                }}
+                              >
+                                {t("crew.deleteRole")}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Add role button */}
+                <button
+                  onClick={() => {
+                    const maxPhase = Math.max(...formCrew.roles.map(r => r.phase))
+                    const newRole: CrewRole = {
+                      id: `role_${Date.now()}`,
+                      nameKey: "New Role",
+                      prompt: "",
+                      persona: { tone: "", focus: "", style: "" },
+                      icon: "circle",
+                      color: "#94a3b8",
+                      phase: maxPhase + 1,
+                      estimatedTokens: 2000,
+                    }
+                    setFormCrew({ ...formCrew, roles: [...formCrew.roles, newRole] })
+                    setExpandedRoleId(newRole.id)
+                  }}
+                  style={{
+                    width: "100%", padding: "8px 0", marginTop: 6,
+                    borderRadius: 10, border: "1.5px dashed rgba(0,0,0,0.15)",
+                    background: "transparent", color: "#64748b",
+                    fontSize: 12, cursor: "pointer", display: "flex",
+                    alignItems: "center", justifyContent: "center", gap: 6,
+                  }}
+                >
+                  <IconPlus /> {t("crew.addRole")}
+                </button>
+
+                {/* Token budget + target branch */}
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>{t("crew.tokenBudget")}</div>
+                    <input
+                      type="number" value={formCrew.tokenBudget}
+                      onChange={(e) => setFormCrew({ ...formCrew, tokenBudget: parseInt(e.target.value) || 10000 })}
+                      style={{
+                        width: "100%", padding: "8px 10px", borderRadius: 8,
+                        border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.6)",
+                        fontSize: 12, outline: "none", boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>{t("crew.targetBranch")}</div>
+                    <input
+                      type="text" value={formCrew.targetBranch || ""}
+                      onChange={(e) => setFormCrew({ ...formCrew, targetBranch: e.target.value || undefined })}
+                      placeholder="crew/YYYY-MM-DD"
+                      style={{
+                        width: "100%", padding: "8px 10px", borderRadius: 8,
+                        border: "1px solid rgba(0,0,0,0.1)", background: "rgba(255,255,255,0.6)",
+                        fontSize: 12, outline: "none", boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : formTemplateId ? (
               <div
                 onClick={() => setFormTemplateId(null)}
                 style={{
@@ -1816,12 +2239,30 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
             {/* 6. Buttons */}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={handleSubmit} disabled={!formName.trim() || !formPrompt.trim() || submitting} style={{
+              {/* Launch session now — only for pure-prompt templates (not crew) */}
+              {onLaunchSession && !formCrew && formPrompt.trim() && (
+                <button onClick={() => {
+                  localStorage.setItem("agentrune_session_prefill", formPrompt.trim())
+                  onLaunchSession(formPrompt.trim())
+                  onClose()
+                }} style={{
+                  flex: 1, padding: "12px 16px", borderRadius: 12,
+                  border: "none", background: "#37ACC0",
+                  color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                  {t("automation.runNow")}
+                </button>
+              )}
+              <button onClick={handleSubmit} disabled={!formName.trim() || (!formPrompt.trim() && !formCrew) || submitting} style={{
                 flex: 1, padding: "12px 16px", borderRadius: 12,
-                border: "none", background: "#37ACC0",
-                color: "#fff", fontSize: 14, fontWeight: 700,
-                cursor: formName.trim() && formPrompt.trim() ? "pointer" : "default",
-                opacity: formName.trim() && formPrompt.trim() ? 1 : 0.4,
+                border: onLaunchSession && !formCrew && formPrompt.trim() ? "1px solid rgba(55,172,192,0.3)" : "none",
+                background: onLaunchSession && !formCrew && formPrompt.trim() ? "rgba(55,172,192,0.08)" : "#37ACC0",
+                color: onLaunchSession && !formCrew && formPrompt.trim() ? "#37ACC0" : "#fff",
+                fontSize: 14, fontWeight: 700,
+                cursor: formName.trim() && (formPrompt.trim() || formCrew) ? "pointer" : "default",
+                opacity: formName.trim() && (formPrompt.trim() || formCrew) ? 1 : 0.4,
               }}>
                 {submitting ? (editId ? t("automation.saving") : t("automation.creating")) : (editId ? t("automation.save") : t("automation.create"))}
               </button>
@@ -1919,6 +2360,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           {toast}
         </div>
       )}
+
+      {/* Crew Execution Report overlay */}
+      <CrewReportSheet
+        open={!!reportTarget}
+        automationId={reportTarget?.id || ""}
+        automationName={reportTarget?.name || ""}
+        serverUrl={serverUrl}
+        onClose={() => setReportTarget(null)}
+      />
+
     </>
       )}
     </AnimatePresence>
@@ -1942,7 +2393,9 @@ function TemplateCard({ tmpl, isPinned, tplName, tplDesc, t, onPin, onUse }: {
       border: "1px solid var(--glass-border)",
       background: "var(--glass-bg)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
     }}>
-      <div style={{ flexShrink: 0, width: 32, display: "flex", alignItems: "center", justifyContent: "center", color: "#37ACC0" }}>{getTemplateIcon(tmpl)}</div>
+      <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: "50%", background: getTemplateColor(tmpl), display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
+        <div style={{ transform: "scale(0.78)", display: "flex", alignItems: "center", justifyContent: "center" }}>{getTemplateIcon(tmpl)}</div>
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
         <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as never }}>{tplDesc(tmpl)}</div>
@@ -1995,6 +2448,7 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
   onTogglePin?: () => void
   onDelete?: () => void
 }) {
+  const circleColor = getTemplateColor(tmpl)
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 0,
@@ -2006,12 +2460,110 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
         flex: 1, minWidth: 0, padding: "12px 8px 12px 14px",
         background: "none", border: "none", cursor: "pointer", textAlign: "left",
       }}>
-        <div style={{ flexShrink: 0, width: 36, height: 36, borderRadius: 10, background: "rgba(55,172,192,0.08)", display: "flex", alignItems: "center", justifyContent: "center", color: "#37ACC0" }}>
-          {icon || CUSTOM_TEMPLATE_ICON}
+        <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: "50%", background: circleColor, border: "2.5px solid #ddd5cc", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 0 }}>
+          <div style={{ transform: "scale(0.78)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {icon || CUSTOM_TEMPLATE_ICON}
+          </div>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{tplName(tmpl)}</div>
           <div style={{ fontSize: 11, color: "#64748b", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tplDesc(tmpl)}</div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+      {onTogglePin && (
+        <button onClick={(e) => { e.stopPropagation(); onTogglePin() }} style={{
+          flexShrink: 0, width: 36, height: "100%", padding: "0 8px 0 0",
+          background: "none", border: "none", cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: pinned ? "#37ACC0" : "#c8bfb6",
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill={pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+          </svg>
+        </button>
+      )}
+      {onDelete && (
+        <button onClick={(e) => { e.stopPropagation(); onDelete() }} style={{
+          flexShrink: 0, width: 32, height: "100%", padding: "0 6px 0 0",
+          background: "none", border: "none", cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#ef4444",
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+          </svg>
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Crew template pick card — shows role avatars and role count */
+function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
+  tmpl: AutomationTemplate
+  t: (key: string) => string
+  onUse: () => void
+  pinned?: boolean
+  onTogglePin?: () => void
+  onDelete?: () => void
+}) {
+  const roles = tmpl.crew?.roles || []
+  // Chain templates: chain.{slug}.name, Crew presets: crew.preset.{key}
+  let name: string, desc: string
+  if (tmpl.id.startsWith("chain_")) {
+    const slug = tmpl.id.replace("chain_", "")
+    const nk = `chain.${slug}.name`, dk = `chain.${slug}.desc`
+    name = t(nk) !== nk ? t(nk) : slug
+    desc = t(dk) !== dk ? t(dk) : tmpl.description
+  } else {
+    const presetKey = tmpl.id.replace("crew_", "").replace("custom_", "")
+    const nk = `crew.preset.${presetKey}`, dk = `crew.preset.${presetKey}.desc`
+    name = t(nk) !== nk ? t(nk) : tmpl.name
+    desc = t(dk) !== dk ? t(dk) : tmpl.description
+  }
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 0,
+      width: "100%", borderRadius: 14,
+      border: "1px solid #c8bfb6", background: "#ddd5cc",
+    }}>
+      <button onClick={onUse} style={{
+        display: "flex", alignItems: "center", gap: 12,
+        flex: 1, minWidth: 0, padding: "12px 8px 12px 14px",
+        background: "none", border: "none", cursor: "pointer", textAlign: "left",
+      }}>
+        {/* Role avatar row — Lucide icons */}
+        <div style={{ display: "flex", flexShrink: 0 }}>
+          {roles.slice(0, 4).map((r, i) => (
+            <div key={r.id} style={{
+              width: 30, height: 30, borderRadius: "50%",
+              background: r.color, border: "2.5px solid #ddd5cc",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              marginLeft: i === 0 ? 0 : -6, zIndex: 10 - i,
+            }}>
+              {getCrewRoleIcon(r.icon)}
+            </div>
+          ))}
+          {roles.length > 4 && (
+            <div style={{
+              width: 30, height: 30, borderRadius: "50%",
+              background: "#94a3b8", border: "2.5px solid #ddd5cc",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              marginLeft: -6, color: "#fff", fontSize: 10, fontWeight: 700,
+            }}>
+              +{roles.length - 4}
+            </div>
+          )}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{name}</div>
+          <div style={{ fontSize: 11, color: "#64748b", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>
+            {t("crew.rolesCount").replace("{n}", String(roles.length))} · {tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
+          </div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
           <polyline points="9 18 15 12 9 6" />

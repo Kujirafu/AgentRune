@@ -367,6 +367,7 @@ interface InputBarProps {
   checkUploading?: () => boolean
   hasPendingImages?: boolean
   onOpenBuilder?: () => void
+  onFireCrew?: () => void
 }
 
 // Module-level draft storage — survives unmount/remount
@@ -395,7 +396,7 @@ function useSentHistory(): [SentItem[], (item: SentItem) => void] {
   return [_sentHistory, pushSent]
 }
 
-export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading, hasPendingImages, onOpenBuilder }: InputBarProps) {
+export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onBrowse, onVoice, onInsight, autoFocus = true, slashCommands, prefill, onPrefillConsumed, draftKey, attachedFiles, onRemoveFile, disabled, disabledHint, isUploadingImage, checkUploading, hasPendingImages, onOpenBuilder, onFireCrew }: InputBarProps) {
   const { t, locale } = useLocale()
   const [input, setInputRaw] = useState(() => (draftKey ? _inputDrafts.get(draftKey) : null) || "")
   const setInput = useCallback((val: string | ((prev: string) => string)) => {
@@ -454,15 +455,16 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
   // Always show voice button — native Capacitor plugin handles speech recognition
   const hasSpeechSupport = typeof window !== "undefined"
 
-  // Android back button closes expanded editor
+  // Android back button closes expanded editor — capture phase to intercept before App.tsx navigation
   useEffect(() => {
     if (!expandedEditor) return
     const handler = (e: Event) => {
       e.preventDefault()
+      e.stopImmediatePropagation()
       setExpandedEditor(false)
     }
-    document.addEventListener("app:back", handler)
-    return () => document.removeEventListener("app:back", handler)
+    document.addEventListener("app:back", handler, true)
+    return () => document.removeEventListener("app:back", handler, true)
   }, [expandedEditor])
 
   // MCP skill search
@@ -1426,7 +1428,7 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M18 11V6a1 1 0 0 0-2 0V3a1 1 0 0 0-2 0v1a1 1 0 0 0-2 0v2a1 1 0 0 0-2 0v4l-1.8-1.8a1.42 1.42 0 0 0-2 2L10 15a5 5 0 0 0 5 5h1a5 5 0 0 0 5-5v-3a1 1 0 0 0-2 0" />
           </svg>
-          Interrupt
+          {t("input.interrupt") || "Interrupt"}
         </button>
 
         {/* Task toggle — one-shot */}
@@ -1451,7 +1453,7 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
           </svg>
-          Task
+          {t("input.task") || "Task"}
         </button>
       </div>
 
@@ -1550,32 +1552,6 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
               }}
             />
           </div>
-          {/* Clear input button — only when there's text */}
-          {input.length > 0 && (
-            <button
-              type="button"
-              onClick={() => { setInput(""); inputRef.current?.focus() }}
-              style={{
-                width: 24,
-                height: 24,
-                borderRadius: 12,
-                border: "none",
-                background: "rgba(127,127,127,0.15)",
-                color: "var(--text-secondary)",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                opacity: 0.6,
-                transition: "opacity 0.2s",
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          )}
           {/* Expand button — always visible for fullscreen editing */}
           <button
             type="button"
@@ -1734,6 +1710,23 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
             <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
               {t("input.placeholder")}
             </div>
+            <button
+              onClick={() => { if (input.length > 0) setInput(""); }}
+              style={{
+                width: 32, height: 32, borderRadius: 8,
+                border: input.length > 0 ? "1px solid rgba(239,68,68,0.3)" : "1px solid rgba(255,255,255,0.1)",
+                background: input.length > 0 ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.03)",
+                color: input.length > 0 ? "rgba(239,68,68,0.8)" : "rgba(255,255,255,0.2)",
+                cursor: input.length > 0 ? "pointer" : "default",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0,
+                transition: "all 0.2s",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+              </svg>
+            </button>
           </div>
           <textarea
             autoFocus

@@ -1,5 +1,12 @@
 import type { AutomationTemplate } from "./automation-types"
 
+/** Maps old fine-grained groups → new broad groups */
+const GROUP_MAP: Record<string, string> = {
+  git: "code", quality: "code", perf: "code",
+  ci: "ops", security: "ops", monitoring: "ops",
+  docs: "docs", learning: "docs", agentlore: "docs",
+}
+
 const t = (id: string, name: string, desc: string, icon: string, prompt: string, skill?: string, tags?: string[], group?: string): AutomationTemplate => ({
   id: `builtin_${id}`,
   name,
@@ -13,22 +20,37 @@ const t = (id: string, name: string, desc: string, icon: string, prompt: string,
   ratingCount: 0,
   pinCount: 0,
   tags,
-  group,
+  group: group ? (GROUP_MAP[group] || group) : undefined,
+  subgroup: group,
   createdAt: 0,
 })
 
-/** Display groups in order */
+/** Display groups in order. label = i18n key */
 export const TEMPLATE_GROUPS = [
-  { key: "git", label: "Git & Code Review" },
-  { key: "ci", label: "CI & Testing" },
-  { key: "security", label: "Dependencies & Security" },
-  { key: "quality", label: "Code Quality" },
-  { key: "docs", label: "Reports & Docs" },
-  { key: "perf", label: "Performance & Build" },
-  { key: "monitoring", label: "Monitoring" },
-  { key: "learning", label: "Learning & Release" },
-  { key: "agentlore", label: "AgentLore Knowledge" },
+  { key: "code", label: "tpl.group.code" },
+  { key: "ops", label: "tpl.group.ops" },
+  { key: "docs", label: "tpl.group.docs" },
 ]
+
+/** Subgroup labels for visual sub-headers within groups */
+export const SUBGROUP_LABELS: Record<string, string> = {
+  crew: "tpl.group.crew",
+  chain_dev: "tpl.group.chain_dev",
+  chain_api: "tpl.group.chain_api",
+  chain_mobile: "tpl.group.chain_mobile",
+  chain_ai: "tpl.group.chain_ai",
+  chain_devops: "tpl.group.chain_devops",
+  chain_security: "tpl.group.chain_security",
+  git: "tpl.group.git",
+  ci: "tpl.group.ci",
+  security: "tpl.group.security",
+  quality: "tpl.group.quality",
+  perf: "tpl.group.perf",
+  monitoring: "tpl.group.monitoring",
+  learning: "tpl.group.learning",
+  agentlore: "tpl.group.agentlore",
+  docs_writing: "tpl.group.docs",
+}
 
 export const BUILTIN_TEMPLATES: AutomationTemplate[] = [
   // --- Git & Code Review ---

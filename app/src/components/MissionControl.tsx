@@ -18,7 +18,6 @@ const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPane
 import { PlanPanel } from "./PlanPanel"
 import { PathBadge } from "./PathBadge"
 const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
-const FireCrewSheet = lazy(() => import("./FireCrewSheet"))
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
@@ -101,7 +100,6 @@ export function MissionControl({
   const [showSettings, setShowSettings] = useState(false)
   const [showBrowser, setShowBrowser] = useState(false)
   const [showInsight, setShowInsight] = useState(false)
-  const [showFireCrew, setShowFireCrew] = useState(false)
   const [showGit, setShowGit] = useState(false)
   const [previewFile, setPreviewFile] = useState<string | null>(null)
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null)
@@ -1137,6 +1135,21 @@ export function MissionControl({
     if (navigator.vibrate) navigator.vibrate(20)
   }, [])
 
+  // Auto-send prefill from AutomationSheet "Run Now"
+  const sessionPrefillRef = useRef<string | null>((() => {
+    const p = localStorage.getItem("agentrune_session_prefill")
+    if (p) localStorage.removeItem("agentrune_session_prefill")
+    return p
+  })())
+  useEffect(() => {
+    if (!initializing && sessionPrefillRef.current) {
+      const prompt = sessionPrefillRef.current
+      sessionPrefillRef.current = null
+      // Delay to ensure WS is ready after init
+      setTimeout(() => handleSendCommand(prompt), 500)
+    }
+  }, [initializing, handleSendCommand])
+
   // Stable callbacks for InputBar (avoid inline arrows)
   const openInsight = useCallback(() => setShowInsight(true), [])
   const openBrowser = useCallback(() => setShowBrowser(true), [])
@@ -1887,7 +1900,6 @@ return (
               checkUploading={checkUploading}
               hasPendingImages={hasPendingImages}
               onOpenBuilder={onOpenBuilder}
-              onFireCrew={() => setShowFireCrew(true)}
             />
           </div>
 
@@ -2142,15 +2154,6 @@ return (
         sessionId={sessionId}
       />}
 
-      {showFireCrew && <Suspense fallback={null}><FireCrewSheet
-        open={showFireCrew}
-        onClose={() => setShowFireCrew(false)}
-        t={t}
-        serverUrl={getApiBase()}
-        projectId={project.id}
-        sessionId={sessionId || null}
-        sessionSummary={events.length > 0 ? events.filter(e => e.title).slice(-5).map(e => e.title).join(" → ") : undefined}
-      /></Suspense>}
 
       {showBrowser && <FileBrowser
         open={showBrowser}

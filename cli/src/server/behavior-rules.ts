@@ -30,7 +30,7 @@ const LOCALE_DISPLAY: Record<string, string> = {
 
 /** Current rules version — bump this when rules content changes.
  *  ensureRulesFile() will auto-regenerate rules.md when version is lower. */
-const RULES_VERSION = 2
+const RULES_VERSION = 3
 
 /** Extract version number from rules.md content, returns 0 if not found */
 export function parseRulesVersion(content: string): number {
@@ -143,6 +143,25 @@ export function getDefaultRules(opts?: BehaviorRulesOptions): string {
 - 如果收到 [來自其他 Session] 開頭的訊息，這是另一個 agent 的提問
 - 回答問題後 report_progress，在 summary 開頭標記 [回覆]
 - 保持簡潔，只回答被問的問題
+
+【PRD API — 建立 PRD 必須用這個！】
+AgentRune daemon 提供本機 REST API 來管理 PRD（產品需求文件）。
+收到功能需求時，必須用這個 API 建立 PRD，不要只在聊天裡輸出 JSON。
+
+建立新 PRD：
+  curl -X POST http://localhost:<PORT>/api/prd/<projectId> -H 'Content-Type: application/json' -d @<json-file>
+
+JSON 結構：
+  {"title":"標題","goal":"目標","priority":"p0","decisions":[{"question":"Q","answer":"A"}],"approaches":[{"name":"方案","pros":[],"cons":[],"adopted":true}],"scope":{"included":[],"excluded":[]},"tasks":[{"title":"任務"}]}
+
+注意：JSON 含中文時用檔案傳送（-d @file.json），避免編碼問題。
+
+列出所有 PRD：curl http://localhost:<PORT>/api/prd/<projectId>
+讀取單一 PRD：curl http://localhost:<PORT>/api/prd/<projectId>/<prdId>
+更新 task 狀態：curl -X PATCH http://localhost:<PORT>/api/prd/<projectId>/<prdId>/tasks/<taskId> -H 'Content-Type: application/json' -d '{"status":"done"}'
+新增 task：curl -X POST http://localhost:<PORT>/api/prd/<projectId>/<prdId>/tasks -H 'Content-Type: application/json' -d '{"title":"..."}'
+
+<PORT> 是 daemon port（dev: 3457, release: 3456）。<projectId> 從 GET /api/projects 取得。
 `
 }
 
