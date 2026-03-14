@@ -5,7 +5,8 @@ import { motion, AnimatePresence } from "framer-motion"
 import { useLocale } from "../lib/i18n"
 import { AGENTS } from "../types"
 import { BUILTIN_TEMPLATES, TEMPLATE_GROUPS } from "../data/builtin-templates"
-import type { AutomationConfig, AutomationSchedule, AutomationResult, AutomationTemplate } from "../data/automation-types"
+import type { AutomationConfig, AutomationSchedule, AutomationResult, AutomationTemplate, TrustProfile, SandboxLevel } from "../data/automation-types"
+import { TRUST_PROFILE_PRESETS } from "../data/automation-types"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 
@@ -287,7 +288,13 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formAgentId, setFormAgentId] = useState("claude")
   const [formModel, setFormModel] = useState("")
   const [formBypass, setFormBypass] = useState(false)
-  const [formSandboxLevel, setFormSandboxLevel] = useState<"strict" | "moderate" | "permissive" | "none">("strict")
+  const [formSandboxLevel, setFormSandboxLevel] = useState<SandboxLevel>("strict")
+  const [formTrustProfile, setFormTrustProfile] = useState<TrustProfile>("supervised")
+  const [formRequirePlanReview, setFormRequirePlanReview] = useState(false)
+  const [formRequireMergeApproval, setFormRequireMergeApproval] = useState(false)
+  const [formDailyRunLimit, setFormDailyRunLimit] = useState(50)
+  const [formPlanReviewTimeout, setFormPlanReviewTimeout] = useState(30)
+  const [showCustomSettings, setShowCustomSettings] = useState(false)
   const [scanResult, setScanResult] = useState<{ blockedCount: number; conflicts: { detectedKey: string; categoryKey: string; blocked: boolean }[]; summaryKey: string; summaryParams: Record<string, string | number> } | null>(null)
   const [scanning, setScanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -346,7 +353,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
         setFormBypass(!!initialEdit.bypass)
+        const tp = (initialEdit as any).trustProfile || "supervised"
+        setFormTrustProfile(tp)
         setFormSandboxLevel((initialEdit as any).sandboxLevel || "strict")
+        setFormRequirePlanReview(!!(initialEdit as any).requirePlanReview)
+        setFormRequireMergeApproval(!!(initialEdit as any).requireMergeApproval)
+        setFormDailyRunLimit((initialEdit as any).dailyRunLimit ?? 50)
+        setFormPlanReviewTimeout((initialEdit as any).planReviewTimeoutMinutes ?? 30)
+        setShowCustomSettings(tp === "custom")
         setScanResult(null)
         setPage("add")
       } else {
@@ -471,7 +485,12 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       agentId: formAgentId,
       model: formModel || undefined,
       bypass: formBypass || undefined,
+      trustProfile: formTrustProfile,
       sandboxLevel: formSandboxLevel,
+      requirePlanReview: formRequirePlanReview,
+      requireMergeApproval: formRequireMergeApproval,
+      dailyRunLimit: formDailyRunLimit,
+      planReviewTimeoutMinutes: formPlanReviewTimeout,
       enabled: true,
     }
 
@@ -1612,48 +1631,144 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               </div>
             </label>
 
-            {/* 5.6 Sandbox Level */}
+            {/* 5.6 Trust Profile */}
             <div style={{ marginTop: 10 }}>
               <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6, fontWeight: 600 }}>
-                {t("sandbox.level") || "Sandbox Level"}
+                {t("trust.profile") || "Trust Profile"}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                {(["strict", "moderate", "permissive", "none"] as const).map((level) => {
-                  const active = formSandboxLevel === level
-                  const colors: Record<string, string> = { strict: "#ef4444", moderate: "#f59e0b", permissive: "#22c55e", none: "#94a3b8" }
+                {(["autonomous", "supervised", "guarded", "custom"] as const).map((profile) => {
+                  const active = formTrustProfile === profile
+                  const colors: Record<string, string> = { autonomous: "#22c55e", supervised: "#37ACC0", guarded: "#ef4444", custom: "#94a3b8" }
                   return (
-                    <button key={level} onClick={() => {
-                      setFormSandboxLevel(level)
+                    <button key={profile} onClick={() => {
+                      setFormTrustProfile(profile)
+                      if (profile !== "custom") {
+                        const preset = TRUST_PROFILE_PRESETS[profile]
+                        setFormSandboxLevel(preset.sandboxLevel)
+                        setFormRequirePlanReview(preset.requirePlanReview)
+                        setFormRequireMergeApproval(preset.requireMergeApproval)
+                        setFormDailyRunLimit(preset.dailyRunLimit)
+                        setFormPlanReviewTimeout(preset.planReviewTimeoutMinutes)
+                        setShowCustomSettings(false)
+                      } else {
+                        setShowCustomSettings(true)
+                      }
                       setScanResult(null)
-                      // Auto-scan if editing existing automation
-                      if (editId) handleScan(editId, level)
+                      if (editId) handleScan(editId, profile !== "custom" ? TRUST_PROFILE_PRESETS[profile].sandboxLevel : formSandboxLevel)
                     }} style={{
                       flex: 1, padding: "6px 8px", borderRadius: 8,
-                      border: active ? `1.5px solid ${colors[level]}` : "1px solid var(--glass-border)",
-                      background: active ? `${colors[level]}15` : "transparent",
-                      color: active ? colors[level] : "var(--text-secondary)",
+                      border: active ? `1.5px solid ${colors[profile]}` : "1px solid var(--glass-border)",
+                      background: active ? `${colors[profile]}15` : "transparent",
+                      color: active ? colors[profile] : "var(--text-secondary)",
                       fontSize: 11, fontWeight: 600, cursor: "pointer",
                     }}>
-                      {t(`sandbox.level.${level}`) || level}
+                      {t(`trust.profile.${profile}`) || profile}
                     </button>
                   )
                 })}
               </div>
-              {/* Scan button for new automations */}
-              {!editId && formPrompt.trim() && (
-                <button onClick={() => {
-                  // For new automations, we can't call scan-conflicts (no ID yet)
-                  // Show a hint instead
-                  showToast(t("sandbox.saveFirst") || "Save first, then scan")
-                }} style={{
-                  marginTop: 6, padding: "4px 10px", borderRadius: 6,
-                  border: "1px solid var(--glass-border)", background: "transparent",
-                  color: "var(--text-secondary)", fontSize: 10, cursor: "pointer",
+              {/* Profile description */}
+              <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 4 }}>
+                {t(`trust.profile.${formTrustProfile}.desc`) || ""}
+              </div>
+
+              {/* Custom settings panel */}
+              {showCustomSettings && (
+                <div style={{
+                  marginTop: 8, padding: "10px 12px", borderRadius: 10,
+                  border: "1px solid var(--glass-border)",
+                  background: "var(--glass-bg)",
                 }}>
-                  {t("sandbox.scanHint") || "Save first to scan conflicts"}
-                </button>
+                  {/* Sandbox Level */}
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 4, fontWeight: 600 }}>
+                      {t("sandbox.level") || "Sandbox Level"}
+                    </div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {(["strict", "moderate", "permissive", "none"] as const).map((level) => {
+                        const active = formSandboxLevel === level
+                        const colors: Record<string, string> = { strict: "#ef4444", moderate: "#f59e0b", permissive: "#22c55e", none: "#94a3b8" }
+                        return (
+                          <button key={level} onClick={() => { setFormSandboxLevel(level); setScanResult(null) }} style={{
+                            flex: 1, padding: "4px 6px", borderRadius: 6,
+                            border: active ? `1.5px solid ${colors[level]}` : "1px solid var(--glass-border)",
+                            background: active ? `${colors[level]}15` : "transparent",
+                            color: active ? colors[level] : "var(--text-secondary)",
+                            fontSize: 10, fontWeight: 600, cursor: "pointer",
+                          }}>
+                            {t(`sandbox.level.${level}`) || level}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Plan Review toggle */}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, cursor: "pointer" }}>
+                    <div style={{
+                      width: 16, height: 16, borderRadius: 4,
+                      border: formRequirePlanReview ? "none" : "1.5px solid var(--glass-border)",
+                      background: formRequirePlanReview ? "#37ACC0" : "transparent",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {formRequirePlanReview && (
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600 }}>{t("trust.requirePlanReview") || "Require Plan Review"}</span>
+                  </label>
+
+                  {/* Merge Approval toggle */}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, cursor: "pointer" }}>
+                    <div style={{
+                      width: 16, height: 16, borderRadius: 4,
+                      border: formRequireMergeApproval ? "none" : "1.5px solid var(--glass-border)",
+                      background: formRequireMergeApproval ? "#37ACC0" : "transparent",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {formRequireMergeApproval && (
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600 }}>{t("trust.requireMergeApproval") || "Require Merge Approval"}</span>
+                  </label>
+
+                  {/* Daily Run Limit */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, minWidth: 100 }}>{t("trust.dailyRunLimit") || "Daily Run Limit"}</span>
+                    <input type="number" value={formDailyRunLimit} min={0} onChange={(e) => setFormDailyRunLimit(parseInt(e.target.value) || 0)} style={{
+                      width: 60, padding: "3px 6px", borderRadius: 6,
+                      border: "1px solid var(--glass-border)", background: "transparent",
+                      color: "var(--text-primary)", fontSize: 11, textAlign: "center",
+                    }} />
+                    <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                      {formDailyRunLimit === 0 ? (t("trust.dailyRunLimit.unlimited") || "Unlimited") : ""}
+                    </span>
+                  </div>
+
+                  {/* Plan Review Timeout */}
+                  {formRequirePlanReview && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, minWidth: 100 }}>{t("trust.planReviewTimeout") || "Review Timeout"}</span>
+                      <input type="number" value={formPlanReviewTimeout} min={0} onChange={(e) => setFormPlanReviewTimeout(parseInt(e.target.value) || 0)} style={{
+                        width: 60, padding: "3px 6px", borderRadius: 6,
+                        border: "1px solid var(--glass-border)", background: "transparent",
+                        color: "var(--text-primary)", fontSize: 11, textAlign: "center",
+                      }} />
+                      <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                        {t("trust.planReviewTimeout.minutes", { count: String(formPlanReviewTimeout) }) || `${formPlanReviewTimeout} min`}
+                      </span>
+                    </div>
+                  )}
+                </div>
               )}
-              {/* Scan results */}
+
+              {/* Scan results (shown for all profiles) */}
               {scanning && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>{t("sandbox.scanning") || "Scanning..."}</div>}
               {scanResult && !scanning && (
                 <div style={{
@@ -1668,7 +1783,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   </div>
                   {scanResult.conflicts.filter(c => c.blocked).slice(0, 5).map((c, i) => (
                     <div key={i} style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 2 }}>
-                      • {t(c.detectedKey) || c.detectedKey} ({t(c.categoryKey) || c.categoryKey})
+                      {"\u2022"} {t(c.detectedKey) || c.detectedKey} ({t(c.categoryKey) || c.categoryKey})
                     </div>
                   ))}
                 </div>

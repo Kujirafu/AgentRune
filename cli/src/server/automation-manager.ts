@@ -8,6 +8,8 @@ import { log } from "../shared/logger.js"
 import { VaultSync } from "./vault-sync.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { type SkillManifest, createDefaultManifest, createManifestForLevel, buildSandboxInstructions, scanPromptForConflicts, type PromptScanResult } from "./skill-manifest.js"
+import { buildPlanningConstraints, formatConstraintsForPrompt } from "./planning-constraints.js"
+import { createFromTrustProfile, type AuthorityMap } from "./authority-map.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
@@ -43,6 +45,27 @@ export interface AutomationSchedule {
 }
 
 export type SandboxLevel = "strict" | "moderate" | "permissive" | "none"
+export type TrustProfile = "autonomous" | "supervised" | "guarded" | "custom"
+
+export interface TrustProfileConfig {
+  sandboxLevel: SandboxLevel
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
+  dailyRunLimit: number              // 0 = unlimited
+  planReviewTimeoutMinutes: number   // 0 = no timeout
+}
+
+export const TRUST_PROFILE_PRESETS: Record<Exclude<TrustProfile, "custom">, TrustProfileConfig> = {
+  autonomous: { sandboxLevel: "none", requirePlanReview: false, requireMergeApproval: false, dailyRunLimit: 0, planReviewTimeoutMinutes: 0 },
+  supervised: { sandboxLevel: "moderate", requirePlanReview: false, requireMergeApproval: false, dailyRunLimit: 50, planReviewTimeoutMinutes: 30 },
+  guarded:    { sandboxLevel: "strict", requirePlanReview: true, requireMergeApproval: true, dailyRunLimit: 10, planReviewTimeoutMinutes: 30 },
+}
+
+/** Expand a trust profile into concrete settings. Custom returns undefined (caller uses explicit fields). */
+export function expandTrustProfile(profile: TrustProfile): TrustProfileConfig | undefined {
+  if (profile === "custom") return undefined
+  return TRUST_PROFILE_PRESETS[profile]
+}
 
 export interface AutomationConfig {
   id: string
@@ -57,8 +80,13 @@ export interface AutomationConfig {
   agentId: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
-  requireMergeApproval?: boolean  // when true, worktree changes wait for manual approval instead of auto-merging (default: false)
-  sandboxLevel?: SandboxLevel  // "strict" (default) | "moderate" | "permissive" | "none"
+  // Trust Layer — trustProfile controls sandboxLevel, requireMergeApproval, requirePlanReview, dailyRunLimit
+  trustProfile?: TrustProfile        // default: "supervised"
+  requireMergeApproval?: boolean
+  requirePlanReview?: boolean
+  sandboxLevel?: SandboxLevel
+  dailyRunLimit?: number             // 0 = unlimited
+  planReviewTimeoutMinutes?: number  // 0 = no timeout
   manifest?: SkillManifest   // resource permissions declared by this skill
   enabled: boolean
   createdAt: number
@@ -74,7 +102,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit"
   riskReport?: SkillRiskReport
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
 }
@@ -140,6 +168,8 @@ export type AutomationEventCallback = (event:
   | { type: "automation_completed"; automation: AutomationConfig; result: AutomationResult }
   | { type: "skill_confirmation_required"; automationId: string; skillId: string; riskReport: SkillRiskReport; manifest?: SkillManifest }
   | { type: "bypass_confirmation_required"; automationId: string; automationName: string }
+  | { type: "daily_limit_reached"; automationId: string; automationName: string; limit: number; todayCount: number }
+  | { type: "plan_review_required"; automationId: string; automationName: string; timeoutMinutes: number }
 ) => void
 
 // --- Rate limiting ---
@@ -273,6 +303,16 @@ export class AutomationManager {
       createdAt: Date.now(),
       runMode: config.runMode || "local",
       agentId: config.agentId || "claude",
+      trustProfile: config.trustProfile || "supervised",
+    }
+    // Expand trust profile into concrete settings (unless custom)
+    const expanded = expandTrustProfile(automation.trustProfile!)
+    if (expanded) {
+      automation.sandboxLevel = automation.sandboxLevel ?? expanded.sandboxLevel
+      automation.requirePlanReview = automation.requirePlanReview ?? expanded.requirePlanReview
+      automation.requireMergeApproval = automation.requireMergeApproval ?? expanded.requireMergeApproval
+      automation.dailyRunLimit = automation.dailyRunLimit ?? expanded.dailyRunLimit
+      automation.planReviewTimeoutMinutes = automation.planReviewTimeoutMinutes ?? expanded.planReviewTimeoutMinutes
     }
     this.automations.set(id, automation)
     this.results.set(id, [])
@@ -333,7 +373,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "requireMergeApproval" | "sandboxLevel" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "manifest">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -351,9 +391,25 @@ export class AutomationManager {
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
-    if (updates.requireMergeApproval !== undefined) auto.requireMergeApproval = updates.requireMergeApproval
-    if (updates.sandboxLevel !== undefined) auto.sandboxLevel = updates.sandboxLevel
     if (updates.manifest !== undefined) auto.manifest = updates.manifest
+    // Trust Layer fields
+    if (updates.trustProfile !== undefined) {
+      auto.trustProfile = updates.trustProfile
+      const expanded = expandTrustProfile(updates.trustProfile)
+      if (expanded) {
+        auto.sandboxLevel = expanded.sandboxLevel
+        auto.requirePlanReview = expanded.requirePlanReview
+        auto.requireMergeApproval = expanded.requireMergeApproval
+        auto.dailyRunLimit = expanded.dailyRunLimit
+        auto.planReviewTimeoutMinutes = expanded.planReviewTimeoutMinutes
+      }
+    }
+    // Individual overrides (for custom profile or manual tweaks)
+    if (updates.sandboxLevel !== undefined) auto.sandboxLevel = updates.sandboxLevel
+    if (updates.requireMergeApproval !== undefined) auto.requireMergeApproval = updates.requireMergeApproval
+    if (updates.requirePlanReview !== undefined) auto.requirePlanReview = updates.requirePlanReview
+    if (updates.dailyRunLimit !== undefined) auto.dailyRunLimit = updates.dailyRunLimit
+    if (updates.planReviewTimeoutMinutes !== undefined) auto.planReviewTimeoutMinutes = updates.planReviewTimeoutMinutes
 
     const scheduleChanged = JSON.stringify(auto.schedule) !== oldSchedule
     const enabledChanged = wasEnabled !== auto.enabled
@@ -476,13 +532,34 @@ export class AutomationManager {
 
     // Inject sandbox instructions based on sandboxLevel
     const sandboxLevel = auto.sandboxLevel || "strict"
+    const project = this.projects.find(p => p.id === auto.projectId)
     if (sandboxLevel !== "none") {
       const manifest = auto.manifest || createManifestForLevel(auto.templateId || auto.id, sandboxLevel)
-      const project = this.projects.find(p => p.id === auto.projectId)
       if (project) {
         const sandboxBlock = buildSandboxInstructions(manifest, project.cwd)
         promptText = `${sandboxBlock}\n\n${promptText}`
       }
+    }
+
+    // Inject planning constraints (standards + sandbox + authority)
+    const authorityMap = createFromTrustProfile({
+      sessionId: auto.id,
+      automationId: auto.id,
+      sandboxLevel: auto.sandboxLevel,
+      requirePlanReview: auto.requirePlanReview,
+      requireMergeApproval: auto.requireMergeApproval,
+    })
+    const constraintSet = buildPlanningConstraints({
+      projectPath: project?.cwd,
+      sandboxLevel: auto.sandboxLevel || "strict",
+      manifest: auto.manifest,
+      authorityMap,
+      trustProfile: auto.trustProfile,
+      locale: getSystemLocale(),
+    })
+    const constraintsBlock = formatConstraintsForPrompt(constraintSet)
+    if (constraintsBlock) {
+      promptText = `${constraintsBlock}\n\n${promptText}`
     }
 
     // Write prompt (with agent protocol) to file
@@ -568,6 +645,27 @@ export class AutomationManager {
       }
     }
 
+    // Per-automation daily run limit (from Trust Profile)
+    if (auto.dailyRunLimit && auto.dailyRunLimit > 0) {
+      const results = this.results.get(id) || []
+      const todayStart = new Date(todayKey).getTime()
+      const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
+      if (todayRunCount >= auto.dailyRunLimit) {
+        log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
+        const result: AutomationResult = {
+          id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
+          exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
+          status: "skipped_daily_limit",
+        }
+        this.storeResult(id, result)
+        this.running.delete(id)
+        if (this.onEvent) {
+          this.onEvent({ type: "daily_limit_reached", automationId: id, automationName: auto.name, limit: auto.dailyRunLimit, todayCount: todayRunCount })
+        }
+        return
+      }
+    }
+
     const project = this.projects.find((p) => p.id === auto.projectId)
     if (!project) {
       log.warn(`[Automation] Project "${auto.projectId}" not found for automation "${auto.name}"`)
@@ -615,6 +713,28 @@ export class AutomationManager {
     }
 
     // bypass=true means user explicitly wants unattended execution — no confirmation needed
+
+    // ── Plan Review gate (Trust Layer) ──
+    if (auto.requirePlanReview && this.onEvent) {
+      const timeoutMinutes = auto.planReviewTimeoutMinutes || 30
+      log.info(`[Automation] Plan review required for "${auto.name}" (timeout: ${timeoutMinutes}m)`)
+      this.onEvent({ type: "plan_review_required", automationId: id, automationName: auto.name, timeoutMinutes })
+
+      const action = await this.waitForConfirmation(id, timeoutMinutes * 60 * 1000)
+      if (action === "deny") {
+        log.info(`[Automation] Plan review rejected for "${auto.name}"`)
+        const result: AutomationResult = {
+          id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
+          exitCode: null, output: "Skipped: plan review rejected by user",
+          status: "skipped_no_confirmation",
+        }
+        this.storeResult(id, result)
+        this.running.delete(id)
+        return
+      }
+      // "approve" or "approve_and_trust" → proceed
+      log.info(`[Automation] Plan review approved for "${auto.name}"`)
+    }
 
     const built = this.buildAutomationCommand(auto)
     if (!built) {
@@ -979,15 +1099,15 @@ export class AutomationManager {
   // --- Security helpers ---
 
   /** Wait for user confirmation via WebSocket, with 5-minute timeout (default: deny) */
-  private waitForConfirmation(automationId: string): Promise<"approve" | "approve_and_trust" | "deny"> {
+  private waitForConfirmation(automationId: string, timeoutMs?: number): Promise<"approve" | "approve_and_trust" | "deny"> {
     return new Promise((resolve) => {
-      const TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+      const ms = timeoutMs || 5 * 60 * 1000 // default 5 minutes
 
       const timer = setTimeout(() => {
         this.pendingConfirmations.delete(automationId)
         log.info(`[Automation] Confirmation timed out for "${automationId}" — defaulting to deny`)
         resolve("deny")
-      }, TIMEOUT_MS)
+      }, ms)
 
       this.pendingConfirmations.set(automationId, { resolve, timer })
     })

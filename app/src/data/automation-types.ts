@@ -2,6 +2,22 @@
 // Shared types for the scheduling system
 
 export type ScheduleType = "daily" | "interval"
+export type SandboxLevel = "strict" | "moderate" | "permissive" | "none"
+export type TrustProfile = "autonomous" | "supervised" | "guarded" | "custom"
+
+export interface TrustProfileConfig {
+  sandboxLevel: SandboxLevel
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
+  dailyRunLimit: number              // 0 = unlimited
+  planReviewTimeoutMinutes: number   // 0 = no timeout
+}
+
+export const TRUST_PROFILE_PRESETS: Record<Exclude<TrustProfile, "custom">, TrustProfileConfig> = {
+  autonomous: { sandboxLevel: "none", requirePlanReview: false, requireMergeApproval: false, dailyRunLimit: 0, planReviewTimeoutMinutes: 0 },
+  supervised: { sandboxLevel: "moderate", requirePlanReview: false, requireMergeApproval: false, dailyRunLimit: 50, planReviewTimeoutMinutes: 30 },
+  guarded:    { sandboxLevel: "strict", requirePlanReview: true, requireMergeApproval: true, dailyRunLimit: 10, planReviewTimeoutMinutes: 30 },
+}
 
 export interface AutomationSchedule {
   type: ScheduleType
@@ -31,6 +47,14 @@ export interface AutomationConfig {
   agentId: string
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode)
 
+  // Trust Layer
+  trustProfile?: TrustProfile          // default: "supervised"
+  sandboxLevel?: SandboxLevel
+  requirePlanReview?: boolean
+  requireMergeApproval?: boolean
+  dailyRunLimit?: number               // 0 = unlimited
+  planReviewTimeoutMinutes?: number    // 0 = no timeout
+
   enabled: boolean
   createdAt: number
   lastRunAt?: number
@@ -45,7 +69,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string  // human-readable summary of what the agent actually did
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit"
 }
 
 export interface AutomationTemplate {
