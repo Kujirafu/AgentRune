@@ -21,6 +21,7 @@ const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
+import { trackSessionStart, trackSettingsChange, trackAgentLaunch, trackSlashCommand, trackMessageSend } from "../lib/analytics"
 
 // iOS-like spring curve
 const SPRING = "cubic-bezier(0.32, 0.72, 0, 1)"
@@ -461,6 +462,7 @@ export function MissionControl({
   useEffect(() => {
     if (prevSessionIdRef.current !== sessionId) {
       prevSessionIdRef.current = sessionId
+      if (sessionId) trackSessionStart(agentId, project.id)
       setEvents([])
       setAgentStatus("idle")
       setInitializing(true) // Lock input until init_status:"done" or attached(resumed)
@@ -728,6 +730,13 @@ export function MissionControl({
     setSettings(newSettings)
     saveSettings(project.id, newSettings)
 
+    // Track changed fields
+    for (const key of Object.keys(newSettings) as (keyof ProjectSettings)[]) {
+      if (newSettings[key] !== prev[key]) {
+        trackSettingsChange(key, String(newSettings[key]))
+      }
+    }
+
     // Send settings changes to running Claude session
     if (agentId === "claude") {
       // Model change — clear current input first, then /model <name>
@@ -974,6 +983,12 @@ export function MissionControl({
       setTimeout(() => sendInput("\r"), 300)
     }
 
+    // Track message/slash command
+    if (isSlash) {
+      trackSlashCommand(text.split(" ")[0])
+    } else if (text.length > 1) {
+      trackMessageSend(agentId, !!(images?.length))
+    }
 
     // For TUI commands like /resume, re-attach ONCE after TUI renders to get scrollback.
     // Live ANSI parsing is unreliable due to cursor positioning.
