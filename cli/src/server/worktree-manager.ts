@@ -1,8 +1,11 @@
 // server/worktree-manager.ts
 // Manages git worktrees for session isolation
 import { execFileSync } from "node:child_process"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
+import { log } from "../shared/logger.js"
+
+const SESSION_META_FILE = ".agentrune-session.json"
 
 export interface Worktree {
   path: string
@@ -22,6 +25,64 @@ export class WorktreeManager {
 
   constructor(projectCwd: string) {
     this.projectCwd = projectCwd
+    this.restoreFromDisk()
+  }
+
+  /** Scan .worktrees/ directory and rebuild in-memory map from persisted session metadata */
+  private restoreFromDisk(): void {
+    const worktreesDir = join(this.projectCwd, ".worktrees")
+    if (!existsSync(worktreesDir)) return
+
+    try {
+      const dirs = readdirSync(worktreesDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+
+      for (const dir of dirs) {
+        const metaPath = join(worktreesDir, dir.name, SESSION_META_FILE)
+        if (!existsSync(metaPath)) continue
+
+        try {
+          const meta = JSON.parse(readFileSync(metaPath, "utf-8"))
+          if (!meta.sessionId || !meta.branch) continue
+
+          // Verify the worktree is still valid (git knows about it)
+          const wtPath = join(worktreesDir, dir.name)
+          const wt: Worktree = {
+            path: wtPath,
+            branch: meta.branch,
+            sessionId: meta.sessionId,
+            createdAt: meta.createdAt || 0,
+          }
+          this.worktrees.set(meta.sessionId, wt)
+          log.dim(`[Worktree] Restored: ${meta.sessionId} → ${dir.name}`)
+        } catch {
+          // Corrupted meta file — skip
+        }
+      }
+
+      if (this.worktrees.size > 0) {
+        log.info(`[Worktree] Restored ${this.worktrees.size} worktree(s) from disk`)
+      }
+    } catch {
+      // .worktrees dir unreadable — skip
+    }
+  }
+
+  /** Persist session metadata into the worktree directory */
+  private persistMeta(wt: Worktree): void {
+    try {
+      writeFileSync(
+        join(wt.path, SESSION_META_FILE),
+        JSON.stringify({
+          sessionId: wt.sessionId,
+          branch: wt.branch,
+          createdAt: wt.createdAt,
+        }),
+        "utf-8",
+      )
+    } catch {
+      // Non-critical — worktree still works without persisted meta
+    }
   }
 
   /** Create a new worktree for a session */
@@ -58,6 +119,7 @@ export class WorktreeManager {
       createdAt: Date.now(),
     }
     this.worktrees.set(sessionId, wt)
+    this.persistMeta(wt)
     return wt
   }
 
