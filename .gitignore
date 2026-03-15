@@ -6,9 +6,11 @@ dist-server/
 *.log
 .DS_Store
 
-# APK files (only public/agentrune.apk goes into releases)
+# APK files (use GitHub Releases, not repo)
 *.apk
-!public/agentrune.apk
+
+# Firebase/Google services config (contains API keys)
+**/google-services.json
 
 # Android build outputs
 android/app/build/
