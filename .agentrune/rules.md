@@ -43,12 +43,42 @@ You are working inside AgentRune. Read this file at the start of every session.
 - Examples: starting a feature → look for planning skills; fixing a bug → look for debugging skills; finishing work → look for commit/review skills
 - Don't memorize the skill list — query dynamically each time for the latest available skills
 
-## Daemon Development
-- After modifying any file under `cli/src/server/`, **always build first**: `cd cli && npm run build`
-- Build failure = **do not restart daemon** — fix the build first
-- Restart daemon using the safe restart script: `bash cli/safe-restart.sh`
-- **Never** taskkill + manual start, never restart without building, never run two daemons simultaneously
-- In ESM modules, `__dirname` / `__filename` can't be used directly — use `fileURLToPath(import.meta.url)`
+## Daemon Development (MANDATORY — Read Before ANY Server Work)
+
+### The #1 Rule: Always Use safe-restart.sh
+
+**After modifying ANY file under `cli/src/` you MUST follow this exact sequence:**
+
+```bash
+# Step 1: Build (mandatory, never skip)
+cd cli && npm run build
+
+# Step 2: If build fails → STOP. Fix the build. Do NOT restart.
+
+# Step 3: If build succeeds → restart daemon
+bash cli/safe-restart.sh
+
+# Step 4: Verify health (safe-restart.sh does this, but double-check)
+grep "heartbeat OK" ~/.agentrune/daemon.log | tail -1
+```
+
+### Forbidden Actions (Will Break User's Connection)
+
+- **NEVER** `taskkill //IM node.exe //F` without `safe-restart.sh` after
+- **NEVER** `npx tsx src/bin.ts start` without building first
+- **NEVER** start a second daemon while the old one is running
+- **NEVER** skip the restart after modifying server code — the user's phone will stay connected to the OLD code
+- **NEVER** restart without building — an import error will crash the daemon and the user loses connection
+
+### Why This Matters
+
+The user controls agents from their phone via this daemon. If you crash it or leave it running old code, the user has to physically walk to their computer to fix it. This is unacceptable. **Every daemon restart must be done by you, the agent, using `bash cli/safe-restart.sh`.**
+
+### ESM Module Rules
+
+- `__dirname` / `__filename` don't exist in ESM — use `fileURLToPath(import.meta.url)`
+- No `require()` — use dynamic `import()` if needed
+- Modify one server file at a time, build + verify between changes
 
 ## PRD Management (Must Use API!)
 - For feature requests that would take more than 30 minutes, follow the PRD workflow:
