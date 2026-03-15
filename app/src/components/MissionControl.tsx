@@ -15,16 +15,19 @@ const SettingsSheet = lazy(() => import("./SettingsSheet").then(m => ({ default:
 const FileBrowser = lazy(() => import("./FileBrowser").then(m => ({ default: m.FileBrowser })))
 const FilePreview = lazy(() => import("./FilePreview").then(m => ({ default: m.FilePreview })))
 const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPanel })))
-import { PlanPanel } from "./PlanPanel"
+const PlanPanel = lazy(() => import("./PlanPanel").then(m => ({ default: m.PlanPanel })))
 import { PathBadge } from "./PathBadge"
 const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
-import { trackSessionStart, trackSettingsChange, trackAgentLaunch, trackSlashCommand, trackMessageSend } from "../lib/analytics"
+import { trackSessionStart, trackSettingsChange, trackSlashCommand, trackMessageSend, trackDecision, trackVoiceInput, trackTabSwitch } from "../lib/analytics"
 
 // iOS-like spring curve
 const SPRING = "cubic-bezier(0.32, 0.72, 0, 1)"
+
+// Cap event array to prevent OOM in long sessions
+const MAX_EVENTS = 500
 
 // Module-level: attached files survive unmount/remount
 const _fileDrafts = new Map<string, string[]>()
@@ -91,7 +94,14 @@ export function MissionControl({
 }: MissionControlProps) {
   const { t, locale } = useLocale()
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
-  const [events, setEvents] = useState<AgentEvent[]>([])
+  const [events, setEventsRaw] = useState<AgentEvent[]>([])
+  // Capped setter: prevents unbounded event array growth in long sessions
+  const setEvents: typeof setEventsRaw = useCallback((action) => {
+    setEventsRaw(prev => {
+      const next = typeof action === "function" ? action(prev) : action
+      return next.length > MAX_EVENTS ? next.slice(-MAX_EVENTS) : next
+    })
+  }, [])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle")
   const [initializing, setInitializing] = useState(false)
   const injectingRef = useRef(false)  // true while rules are being injected — blocks prompt-based unlock
@@ -347,6 +357,7 @@ export function MissionControl({
     // Show raw text immediately, then clean in background
     setVoiceText(finalText)
     setVoicePhase("result")
+    trackVoiceInput()
 
     if (isEditMode && originalText) {
       // Fire cleanup in background — update when done
@@ -627,6 +638,7 @@ export function MissionControl({
         body: JSON.stringify({ action }),
       })
       setTrustEvents(prev => prev.filter((_, i) => i !== index))
+      trackDecision(action, agentId)
       showToast(action === "approve" ? (t("trust.planReviewApproved") || "Approved") : (t("trust.planReviewRejected") || "Rejected"))
     } catch {
       showToast("Failed to send response")
@@ -673,12 +685,14 @@ export function MissionControl({
     }
   }, [])
 
+  const PANEL_NAMES = ["events", "diff", "plan"]
   const goToPanel = useCallback((p: number) => {
     if (slideRef.current) {
       slideRef.current.style.transition = `transform 0.5s ${SPRING}`
       slideRef.current.style.transform = `translateX(${-p * 100}vw)`
     }
     setPanel(p)
+    trackTabSwitch(PANEL_NAMES[p] || String(p), "mission_control")
   }, [])
 
   // ?????? Swipe gesture handlers ??????
@@ -2125,7 +2139,9 @@ return (
 
             {/* Plan content: Tasks + Standards tabs */}
             <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-              <PlanPanel projectId={project.id} send={send} />
+              <Suspense fallback={null}>
+                <PlanPanel projectId={project.id} send={send} />
+              </Suspense>
             </div>
           </div>
 

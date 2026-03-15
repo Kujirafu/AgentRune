@@ -26,6 +26,11 @@ export default defineConfig(({ mode }) => {
             markdown: ["react-markdown", "remark-gfm", "remark-parse", "unified"],
             motion: ["framer-motion"],
             qrcode: ["html5-qrcode"],
+            capacitor: [
+              "@capacitor/core", "@capacitor/app", "@capacitor/browser",
+              "@capacitor/clipboard", "@capacitor/local-notifications",
+              "@capacitor/push-notifications",
+            ],
           },
         },
       },

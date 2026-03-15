@@ -96,15 +96,20 @@ export class EventStore {
   }
 
   private computeSummary(session: SessionRecord): SessionRecord["summary"] {
-    const events = session.events
+    let filesModified = 0, filesCreated = 0, testsRun = 0, testsPassed = 0, decisionsAsked = 0
+    for (const e of session.events) {
+      switch (e.type) {
+        case "file_edit": filesModified++; break
+        case "file_create": filesCreated++; break
+        case "test_result": testsRun++; if (e.status === "completed") testsPassed++; break
+        case "decision_request": decisionsAsked++; break
+      }
+    }
     return {
-      filesModified: events.filter(e => e.type === "file_edit").length,
-      filesCreated: events.filter(e => e.type === "file_create").length,
-      linesAdded: 0,
-      linesRemoved: 0,
-      testsRun: events.filter(e => e.type === "test_result").length || undefined,
-      testsPassed: events.filter(e => e.type === "test_result" && e.status === "completed").length || undefined,
-      decisionsAsked: events.filter(e => e.type === "decision_request").length,
+      filesModified, filesCreated, linesAdded: 0, linesRemoved: 0,
+      testsRun: testsRun || undefined,
+      testsPassed: testsPassed || undefined,
+      decisionsAsked,
       duration: (session.endedAt || Date.now()) - session.startedAt,
     }
   }
@@ -131,7 +136,7 @@ export class EventStore {
 
   getSessionEvents(sessionId: string): AgentEvent[] {
     const session = this.sessions.get(sessionId)
-    if (session) return session.events
+    if (session && session.events.length > 0) return session.events
 
     // Try loading from disk (handles both encrypted and legacy plaintext files)
     const path = this.sessionPath(sessionId)
@@ -140,10 +145,15 @@ export class EventStore {
         const raw = readEncryptedFile(path)
         if (raw) {
           const data = JSON.parse(raw)
-          return data.events || []
+          const events: AgentEvent[] = data.events || []
+          // Cache in memory so subsequent calls are fast
+          if (session && events.length > 0) {
+            session.events = events
+          }
+          return events
         }
       } catch {}
     }
-    return []
+    return session ? session.events : []
   }
 }
