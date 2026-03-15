@@ -1053,6 +1053,23 @@ export const en: Record<string, string> = {
   "chain.step.testRun": "Run Tests",
   "chain.step.testQuality": "Test Quality Review",
 
+  // /qa chain
+  "chain.qa.name": "QA & Release Gate",
+  "chain.qa.desc": "Detect stack, scaffold tests, run layered QA (smoke → unit → integration → E2E → security), auto-fix, and produce release readiness report",
+  "chain.step.qaDetect": "Project Detection",
+  "chain.step.qaScaffold": "Test Infrastructure",
+  "chain.step.qaSmoke": "Smoke Test",
+  "chain.step.qaSmokeFix": "Fix Smoke Issues",
+  "chain.step.qaUnit": "Unit Tests",
+  "chain.step.qaUnitFix": "Fix & Augment Unit Tests",
+  "chain.step.qaIntegration": "Integration Tests",
+  "chain.step.qaIntegrationFix": "Fix & Augment Integration Tests",
+  "chain.step.qaE2e": "End-to-End Tests",
+  "chain.step.qaE2eFix": "Fix E2E Issues",
+  "chain.step.qaSecurity": "Security & Stress Test",
+  "chain.step.qaSecurityFix": "Fix Security Issues",
+  "chain.step.qaReport": "Release Readiness Report",
+
   // Chain Builder
   "builder.namePlaceholder": "Chain name...",
   "builder.save": "Save",

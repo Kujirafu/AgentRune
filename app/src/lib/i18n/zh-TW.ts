@@ -1057,6 +1057,23 @@ export const zhTW: Record<string, string> = {
   "chain.step.testRun": "執行測試",
   "chain.step.testQuality": "測試品質審查",
 
+  // /qa chain
+  "chain.qa.name": "品質保證 & Release Gate",
+  "chain.qa.desc": "偵測技術棧、建立測試架構、逐層執行 QA（冒煙 → 單元 → 整合 → E2E → 安全）、自動修復、產出上版報告",
+  "chain.step.qaDetect": "偵測專案",
+  "chain.step.qaScaffold": "測試架構",
+  "chain.step.qaSmoke": "冒煙測試",
+  "chain.step.qaSmokeFix": "修復冒煙問題",
+  "chain.step.qaUnit": "單元測試",
+  "chain.step.qaUnitFix": "修復 & 補充單元測試",
+  "chain.step.qaIntegration": "整合測試",
+  "chain.step.qaIntegrationFix": "修復 & 補充整合測試",
+  "chain.step.qaE2e": "端對端測試",
+  "chain.step.qaE2eFix": "修復端對端問題",
+  "chain.step.qaSecurity": "安全 & 壓力測試",
+  "chain.step.qaSecurityFix": "修復安全問題",
+  "chain.step.qaReport": "上版準備報告",
+
   // Chain Builder
   "builder.namePlaceholder": "Chain 名稱...",
   "builder.save": "儲存",

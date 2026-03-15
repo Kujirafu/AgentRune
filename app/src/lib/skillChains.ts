@@ -80,7 +80,7 @@ export const FORCED_DEPTH_TAGS = [
 // High-complexity threshold (tokens) — show warning in UI
 export const HIGH_COMPLEXITY_THRESHOLD = 10000
 
-// ── 28 Built-in Chains ─────────────────────────────────
+// ── 29 Built-in Chains ─────────────────────────────────
 
 export const BUILTIN_CHAINS: SkillChainDef[] = [
   // 1. /feature — 新功能開發
@@ -1502,6 +1502,124 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
       },
     ],
   },
+  // 29. /qa — QA & Release Gate
+  // Detect stack → scaffold test infra → layered test+fix cycles → release report
+  // Depth: lite (smoke only, <2min), standard (+unit+integration, <10min), deep (full+security, unlimited)
+  {
+    slug: "qa",
+    nameKey: "chain.qa.name",
+    descKey: "chain.qa.desc",
+    tokenBudget: { lite: 1200, deep: 15000 },
+    forcedDepthTags: ["payment", "auth", "multi-tenant", "encryption", "user-data", "public-api", "ai-agent"],
+    steps: [
+      // ── Design phase: detect + scaffold ──
+      {
+        id: "s1", phase: "design", labelKey: "chain.step.qaDetect",
+        skillSelection: { lite: "qa-detect", standard: "qa-detect", deep: "qa-detect" },
+        required: true, defaultDepth: "lite",
+        hint: "Scan project manifests (package.json/go.mod/requirements.txt/Cargo.toml), find existing test config (vitest/jest/playwright/pytest), compute baseline coverage, find CI config. Output: stack, testRunner, e2eRunner, hasTestInfra, existingCoverage, missingAreas. If no manifest found, fall back to file-extension heuristics.",
+      },
+      {
+        id: "s2", phase: "design", labelKey: "chain.step.qaScaffold",
+        skillSelection: { lite: "qa-scaffold", standard: "qa-scaffold", deep: "qa-scaffold" },
+        required: false, defaultDepth: "lite",
+        contextFrom: ["s1"],
+        skipWhen: { type: "agentlore_has_pattern", hint: "Skip if detect reports hasTestInfra=true AND missingAreas is empty" },
+        hint: "Based on detect results, install missing test runner + E2E runner + CI config + coverage threshold. Do NOT modify existing configs. Commit: chore(test): scaffold test infrastructure",
+      },
+      // ── Verify+Implement: smoke (lite+) ──
+      {
+        id: "s3", phase: "verify", labelKey: "chain.step.qaSmoke",
+        skillSelection: { lite: "qa-smoke", standard: "qa-smoke", deep: "qa-smoke" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s1", "s2"],
+        hint: "Build check (tsc --noEmit / npm run build / go vet), lint check (errors only, warnings recorded), dead import + circular dependency scan, env var presence check. Do NOT run any tests. Only verify project can stand up.",
+      },
+      {
+        id: "s4", phase: "implement", labelKey: "chain.step.qaSmokeFix",
+        skillSelection: { lite: "qa-fix", standard: "qa-fix", deep: "qa-fix" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3"],
+        onFailure: { action: "retry", maxRetries: 2 },
+        hint: "Fix type errors (commit: fix: resolve type errors), lint errors (commit: style: fix lint errors), circular deps (commit: refactor: break circular dependency). Re-run smoke to confirm. On retry: compare failure sets — if new failures appeared, revert last commit and re-analyze.",
+      },
+      // ── Verify+Implement: unit (standard+) ──
+      {
+        id: "s5", phase: "verify", labelKey: "chain.step.qaUnit",
+        skillSelection: { lite: null, standard: "qa-unit", deep: "qa-unit-deep" },
+        required: true, defaultDepth: "standard",
+        contextFrom: ["s1", "s3"],
+        hint: "Run existing unit tests, collect pass/fail/skip. Run coverage analysis, find 0% files. Gap scan: find all exported functions + API route handlers, list those without corresponding tests. Deep: also check edge case coverage (error paths, boundary values, null) and mock drift (does mock match real interface).",
+      },
+      {
+        id: "s6", phase: "implement", labelKey: "chain.step.qaUnitFix",
+        skillSelection: { lite: null, standard: "qa-fix", deep: "qa-fix" },
+        required: true, defaultDepth: "standard",
+        contextFrom: ["s5"],
+        onFailure: { action: "retry", maxRetries: 2 },
+        hint: "Triggers on failures OR coverage gaps. Commit A: fix broken tests (fix(test): repair failing unit tests). Commit B: fix source bugs exposed by tests (fix: [description]). Commit C: write new tests for critical untested exports — prioritize API route handlers, auth, payment (test: add unit tests for [module]). Re-run to confirm.",
+      },
+      // ── Verify+Implement: integration (standard+) ──
+      {
+        id: "s7", phase: "verify", labelKey: "chain.step.qaIntegration",
+        skillSelection: { lite: null, standard: "qa-integration", deep: "qa-integration-deep" },
+        required: true, defaultDepth: "standard",
+        contextFrom: ["s1", "s5"],
+        hint: "API route smoke: hit every handler — valid request (expect 2xx), no auth (expect 401), bad input (expect 400). Cross-module: test auth→guard→handler chain, form→validation→DB chain. Deep: DB constraint tests, concurrency tests, external API mock shape validation.",
+      },
+      {
+        id: "s8", phase: "implement", labelKey: "chain.step.qaIntegrationFix",
+        skillSelection: { lite: null, standard: "qa-fix", deep: "qa-fix" },
+        required: true, defaultDepth: "standard",
+        contextFrom: ["s7"],
+        onFailure: { action: "retry", maxRetries: 2 },
+        hint: "Triggers on failures OR untested routes. Commit A: fix test issues. Commit B: fix source code. Commit C: add missing integration tests. Re-run to confirm.",
+      },
+      // ── Verify+Implement: E2E (deep) ──
+      {
+        id: "s9", phase: "verify", labelKey: "chain.step.qaE2e",
+        skillSelection: { lite: null, standard: null, deep: "qa-e2e" },
+        required: true, defaultDepth: "deep",
+        contextFrom: ["s1", "s7"],
+        hint: "Use test runner's built-in webServer config for server lifecycle. Run existing E2E specs. Scan page routes vs E2E coverage, identify untested critical journeys (visitor flow, user flow, admin flow). Write missing specs. Test error pages (404, permission denied). Screenshot on failure → artifacts/.",
+      },
+      {
+        id: "s10", phase: "implement", labelKey: "chain.step.qaE2eFix",
+        skillSelection: { lite: null, standard: null, deep: "qa-fix" },
+        required: true, defaultDepth: "deep",
+        contextFrom: ["s9"],
+        onFailure: { action: "retry", maxRetries: 2 },
+        hint: "Commit A: fix tests (stale selectors, timing, auth fixture). Commit B: fix source (broken pages, unconnected APIs, wrong routes). Re-run, attach failure screenshots to report.",
+      },
+      // ── Verify+Implement: security (deep) ──
+      {
+        id: "s11", phase: "verify", labelKey: "chain.step.qaSecurity",
+        skillSelection: { lite: null, standard: null, deep: "qa-security" },
+        required: true, defaultDepth: "deep",
+        contextFrom: ["s1", "s7"],
+        autoRemember: true,
+        hint: "Dependency audit (npm audit / pip audit / govulncheck). Injection tests on all user-input routes (SQLi, XSS, path traversal, oversized payload). Auth boundary (expired token, role escalation, missing auth → 401 not 500). Rate limit burst verification. Secret scan (grep .env, hardcoded keys, git history). Stress test: requires autocannon/k6/ab — if not installed, skip and note in report.",
+      },
+      {
+        id: "s12", phase: "implement", labelKey: "chain.step.qaSecurityFix",
+        skillSelection: { lite: null, standard: null, deep: "qa-fix" },
+        required: true, defaultDepth: "deep",
+        contextFrom: ["s11"],
+        autoRemember: true,
+        onFailure: { action: "retry", maxRetries: 2 },
+        hint: "Commit A: fix deps (fix(deps): patch security vulnerabilities). Commit B: fix source (fix(security): [description]). Commit C: add security tests (test(security): add injection and auth boundary tests). Re-run security scan.",
+      },
+      // ── Ship: report (all depths) ──
+      {
+        id: "s13", phase: "ship", labelKey: "chain.step.qaReport",
+        skillSelection: { lite: "qa-report", standard: "qa-report", deep: "qa-report" },
+        required: true, defaultDepth: "lite",
+        contextFrom: ["s3", "s5", "s7", "s9", "s11"],
+        autoRemember: true,
+        hint: "Aggregate all step handoffs. Sections for steps that did not run at current depth are omitted. Write report to docs/qa-report-[date].md. Commit: docs: QA report [date]. Report includes: Release Gate (PASS/FAIL), summary per layer, fixed this run (with commit hashes), remaining issues (non-blocking), blockers (if any). autoRemember saves coverage baseline + known issues for next /qa comparison.",
+      },
+    ],
+  },
 ]
 
 // ── Chain keyword map for natural language matching ─────
@@ -1537,6 +1655,7 @@ const CHAIN_KEYWORDS: Record<string, string[]> = {
   "i18n":            ["i18n", "internationalization", "translate", "locale", "multilingual", "國際化", "翻譯", "多語"],
   "perf":            ["performance", "optimize", "slow", "speed", "benchmark", "效能", "優化", "太慢", "加速"],
   "test":            ["test", "testing", "tdd", "unit test", "integration test", "e2e", "coverage", "quality", "pyramid", "diamond", "trophy", "測試", "品質", "覆蓋率", "測試策略"],
+  "qa":              ["qa", "quality assurance", "release gate", "smoke test", "regression", "release ready", "品質保證", "品管", "上版", "冒煙測試", "回歸測試", "能不能上版"],
 }
 
 // ── Helpers ──────────────────────────────────────────────
