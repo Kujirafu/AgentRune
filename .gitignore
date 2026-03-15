@@ -11,6 +11,18 @@ dist-server/
 
 # Firebase/Google services config (contains API keys)
 **/google-services.json
+**/firebase-adminsdk*.json
+
+# Keystore and certificate files
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# Environment files (all variants)
+.env.*
+!.env.example
 
 # Android build outputs
 android/app/build/

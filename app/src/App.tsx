@@ -1,21 +1,23 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
+import type { PhaseGateRequest, PhaseGateAction } from "./data/automation-types"
 import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified, getKilledSessionIds, addKilledSessionId, getFcmToken, setFcmToken } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { PushNotifications } from "@capacitor/push-notifications"
 import { LaunchPad } from "./components/LaunchPad"
 const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
-import { MissionControl } from "./components/MissionControl"
+const MissionControl = lazy(() => import("./components/MissionControl").then(m => ({ default: m.MissionControl })))
 const ProjectOverview = lazy(() => import("./components/ProjectOverview").then(m => ({ default: m.ProjectOverview })))
 const UnifiedPanel = lazy(() => import("./components/UnifiedPanel").then(m => ({ default: m.UnifiedPanel })))
 const DiffPanel = lazy(() => import("./components/DiffPanel").then(m => ({ default: m.DiffPanel })))
 const ChainBuilder = lazy(() => import("./components/ChainBuilder").then(m => ({ default: m.ChainBuilder })))
+const PhaseGateSheet = lazy(() => import("./components/PhaseGateSheet"))
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
-import { motion, AnimatePresence } from "framer-motion"
-import { identifyUser, trackLogin, trackSessionStart } from "./lib/analytics"
+// framer-motion deferred to lazy-loaded components only (saves ~133 KB initial load)
+import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch } from "./lib/analytics"
 
 // ─── Error Boundary ──────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -83,6 +85,22 @@ function getDeviceName(): string {
   if (/Mac/i.test(ua)) return "Mac"
   if (/Windows/i.test(ua)) return "Windows"
   return "Device"
+}
+
+// Simple string hash for stable notification IDs (Java hashCode algorithm)
+// Uses >>> 0 to ensure unsigned 32-bit result (Math.abs fails on -2147483648)
+function hashCode(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0
+  }
+  return h >>> 0
+}
+
+// CSS page transition — GPU-friendly tween, replaces framer-motion AnimatePresence
+const PAGE_STYLE: React.CSSProperties = {
+  position: "fixed", inset: 0,
+  animation: "pageEnter 220ms cubic-bezier(0.25, 0.1, 0.25, 1)",
 }
 
 // ─── Auth hook ───────────────────────────────────────────────────
@@ -1336,14 +1354,25 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>(IS_DEV_PREVIEW ? [
     { id: "demo", name: "Demo Project", cwd: "/home/user/project" },
   ] : [])
-  const [screen, setScreen] = useState<Screen>("overview")
+  const [screen, setScreenRaw] = useState<Screen>("overview")
+  const prevScreenRef = useRef<Screen>("overview")
+  const setScreen = useCallback((next: Screen) => {
+    const from = prevScreenRef.current
+    prevScreenRef.current = next
+    setScreenRaw(next)
+    trackScreenView(next, from)
+  }, [])
   // Auto-switch to overview when sessions load
   const [initialScreenSet, setInitialScreenSet] = useState(false)
   const [selectedProject, setSelectedProject] = useState<string | null>(IS_DEV_PREVIEW ? "demo" : null)
   const [activeAgentId, setActiveAgentId] = useState<string>("terminal")
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [resumeSessionId, setResumeSessionId] = useState<string | undefined>(undefined)
-  const [viewMode, setViewMode] = useState<"board" | "terminal">("board")
+  const [viewMode, setViewModeRaw] = useState<"board" | "terminal">("board")
+  const setViewMode = useCallback((mode: "board" | "terminal") => {
+    setViewModeRaw(mode)
+    trackViewModeChange(mode)
+  }, [])
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
   const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
   const [allDiffEvents, setAllDiffEvents] = useState<AgentEvent[]>([])
@@ -1354,6 +1383,7 @@ export function App() {
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
   const { connect, send, on, wsConnected } = useWs()
+  const [pendingPhaseGate, setPendingPhaseGate] = useState<PhaseGateRequest | null>(null)
 
   // ─── Auto Update Check ─────────────────────────────────────────
   // Flow: detect new release → record timestamp → 12h later push notification
@@ -1673,16 +1703,24 @@ export function App() {
     return () => { unsub(); window.removeEventListener("notificationsChanged", onEnable) }
   }, [on, t])
 
-  // Automation completion notifications
+  // Automation completion notifications (local only — FCM push handles background separately)
   useEffect(() => {
     if (!isCapacitor()) return
-    // Automation started notification (fire-and-forget feedback)
+    // Track already-notified automation IDs to prevent duplicates from WS reconnections
+    const notifiedIds = new Set<string>()
+
     const unsubStarted = on("automation_started", (msg) => {
       if (!getNotificationsEnabled()) return
+      if (document.visibilityState === "visible") return // In foreground — user sees it in-app
+      const autoId = msg.automationId as string
+      if (autoId && notifiedIds.has(`start_${autoId}`)) return
+      if (autoId) notifiedIds.add(`start_${autoId}`)
       const name = (msg.automationName as string) || "Automation"
+      // Use stable ID so duplicate notifications replace instead of stacking
+      const notifId = autoId ? Math.abs(hashCode(`start_${autoId}`)) % 2147483647 : Date.now()
       LocalNotifications.schedule({
         notifications: [{
-          id: Date.now(),
+          id: notifId,
           title: `${name}`,
           body: msg.isCrew ? "Work chain started" : "Automation started",
           smallIcon: "ic_launcher",
@@ -1691,17 +1729,23 @@ export function App() {
     })
     const unsub = on("automation_completed", (msg) => {
       if (!getNotificationsEnabled()) return
-      const auto = msg.automation as { name?: string } | undefined
-      const result = msg.result as { status?: string; finishedAt?: number; startedAt?: number } | undefined
+      if (document.visibilityState === "visible") return // In foreground — user sees it in-app
+      const auto = msg.automation as { name?: string; id?: string } | undefined
+      const result = msg.result as { status?: string; finishedAt?: number; startedAt?: number; automationId?: string } | undefined
       if (!auto || !result) return
+      const autoId = (auto.id || result.automationId || "") as string
+      if (autoId && notifiedIds.has(`done_${autoId}`)) return
+      if (autoId) notifiedIds.add(`done_${autoId}`)
       const name = auto.name || "Automation"
       const duration = result.startedAt && result.finishedAt
         ? Math.round((result.finishedAt - result.startedAt) / 1000)
         : 0
       const durationStr = duration > 60 ? `${Math.floor(duration / 60)}m ${duration % 60}s` : `${duration}s`
+      // Use stable ID based on automation ID — duplicate notifications replace instead of stacking
+      const notifId = autoId ? Math.abs(hashCode(`done_${autoId}`)) % 2147483647 : Date.now()
       LocalNotifications.schedule({
         notifications: [{
-          id: Date.now(),
+          id: notifId,
           title: result.status === "success" ? `${name} completed` : `${name} failed`,
           body: result.status === "success"
             ? `Finished in ${durationStr}`
@@ -1712,6 +1756,44 @@ export function App() {
     })
     return () => { unsubStarted(); unsub() }
   }, [on])
+
+  // Phase Gate notifications + state management
+  useEffect(() => {
+    const unsub = on("phase_gate_waiting", (msg) => {
+      const gate = msg.gate as PhaseGateRequest | undefined
+      if (!gate) return
+      setPendingPhaseGate(gate)
+
+      // Local notification (always — phase gate needs attention)
+      if (isCapacitor() && getNotificationsEnabled()) {
+        const name = gate.automationName || "Crew"
+        const notifId = Math.abs(hashCode(`gate_${gate.automationId}_${gate.completedPhase}`)) % 2147483647
+        LocalNotifications.schedule({
+          notifications: [{
+            id: notifId,
+            title: t("phaseGate.notification.title").replace("{name}", name).replace("{n}", String(gate.completedPhase)),
+            body: t("phaseGate.notification.body"),
+            smallIcon: "ic_launcher",
+          }],
+        }).catch(() => {})
+      }
+    })
+    const unsubAck = on("phase_gate_ack", () => {
+      // Gate resolved — sheet will be closed by handlePhaseGateRespond
+    })
+    return () => { unsub(); unsubAck() }
+  }, [on, t])
+
+  const handlePhaseGateRespond = useCallback((action: PhaseGateAction, instructions?: string) => {
+    if (!pendingPhaseGate) return
+    send({
+      type: "phase_gate_response",
+      automationId: pendingPhaseGate.automationId,
+      action,
+      instructions: instructions || undefined,
+    })
+    setPendingPhaseGate(null)
+  }, [pendingPhaseGate, send])
 
   // Populate sessionEventsMap from session_activity broadcasts (for ProjectOverview summaries)
   useEffect(() => {
@@ -1932,10 +2014,15 @@ export function App() {
     }
   }
 
+  // Session timing for session_end tracking
+  const sessionStartTimeRef = useRef<number>(0)
+
   // Launch handler — creates a new session
   // Optional resumeAgentSessionId: Claude Code session ID to resume (--resume <id>)
   const handleLaunch = (projectId: string, agentId: string, resumeAgentSessionId?: string) => {
     trackSessionStart(agentId, projectId)
+    trackAgentLaunch(agentId, projectId)
+    sessionStartTimeRef.current = Date.now()
     const sessionId = `${projectId}_${Date.now()}`
     setSelectedProject(projectId)
     setActiveAgentId(agentId)
@@ -2025,44 +2112,25 @@ export function App() {
 
   // Back to project overview
   const handleBack = () => {
+    // Track session duration
+    if (sessionStartTimeRef.current > 0) {
+      trackSessionEnd(activeAgentId, Date.now() - sessionStartTimeRef.current)
+      sessionStartTimeRef.current = 0
+    }
     setScreen("overview")
   }
 
-  // Compute screen content for AnimatePresence transitions
   const sessionProject = selectedProject ? projects.find((p) => p.id === selectedProject) : null
   const isSessionReady = screen === "session" && !!sessionProject
 
-  // Determine screen key for AnimatePresence
-  let screenKey: string = screen
-  if (screen === "session" && !sessionProject) screenKey = "overview"
-
-  // Page transition — GPU-friendly tween, tuned for mobile WebView
-  const pageEnter = { duration: 0.22, ease: [0.25, 0.1, 0.25, 1] as const }
-  const pageExit = { duration: 0.12, ease: [0.4, 0, 1, 1] as const }
-
   return (
     <ErrorBoundary>
-      <AnimatePresence mode="wait">
         {screen === "builder" ? (
-          <motion.div
-            key="builder"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8, transition: pageExit }}
-            transition={pageEnter}
-            style={{ position: "fixed", inset: 0 }}
-          >
+          <div key="builder" style={PAGE_STYLE}>
             <Suspense fallback={null}><ChainBuilder onBack={() => setScreen("overview")} t={t} /></Suspense>
-          </motion.div>
+          </div>
         ) : isSessionReady ? (
-          <motion.div
-            key="session"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8, transition: pageExit }}
-            transition={pageEnter}
-            style={{ position: "fixed", inset: 0 }}
-          >
+          <div key="session" style={PAGE_STYLE}>
             {/* Always keep TerminalView mounted to preserve xterm content.
                 When in board mode, push it behind MissionControl with lower z-index
                 and visibility:hidden so xterm keeps its layout dimensions. */}
@@ -2089,30 +2157,32 @@ export function App() {
               position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh",
               visibility: "hidden", zIndex: 0,
             } : undefined}>
-              <MissionControl
-                project={sessionProject!}
-                agentId={activeAgentId}
-                sessionId={currentSessionId || undefined}
-                sessionToken={sessionToken}
-                send={send}
-                on={on}
-                onBack={() => { setScreen("overview"); setViewMode("board") }}
-                onOpenTerminal={() => setViewMode("terminal")}
-                viewMode={viewMode}
-                projects={projects}
-                activeSessions={activeSessions}
-                onSwitchSession={handleResume}
-                onKillSession={handleKill}
-                onOpenSessionTerminal={handleOpenSessionTerminal}
-                theme={theme}
-                toggleTheme={toggleTheme}
-                onEventDiff={(e) => setDiffEvent(e)}
-                onDiffEventsChange={setAllDiffEvents}
-                onRequestVoiceRef={requestVoiceRef}
-                wsConnected={wsConnected}
-                onLaunchSession={handleLaunch}
-                onOpenBuilder={() => setScreen("builder")}
-              />
+              <Suspense fallback={null}>
+                <MissionControl
+                  project={sessionProject!}
+                  agentId={activeAgentId}
+                  sessionId={currentSessionId || undefined}
+                  sessionToken={sessionToken}
+                  send={send}
+                  on={on}
+                  onBack={() => { setScreen("overview"); setViewMode("board") }}
+                  onOpenTerminal={() => setViewMode("terminal")}
+                  viewMode={viewMode}
+                  projects={projects}
+                  activeSessions={activeSessions}
+                  onSwitchSession={handleResume}
+                  onKillSession={handleKill}
+                  onOpenSessionTerminal={handleOpenSessionTerminal}
+                  theme={theme}
+                  toggleTheme={toggleTheme}
+                  onEventDiff={(e) => setDiffEvent(e)}
+                  onDiffEventsChange={setAllDiffEvents}
+                  onRequestVoiceRef={requestVoiceRef}
+                  wsConnected={wsConnected}
+                  onLaunchSession={handleLaunch}
+                  onOpenBuilder={() => setScreen("builder")}
+                />
+              </Suspense>
               <Suspense fallback={null}><DiffPanel
                 event={diffEvent}
                 allDiffEvents={allDiffEvents}
@@ -2127,16 +2197,9 @@ export function App() {
                 onVoiceInput={(cb, label) => requestVoiceRef.current?.(cb, label)}
               /></Suspense>
             </div>
-          </motion.div>
+          </div>
         ) : (screen === "overview" || screen === "session") ? (
-          <motion.div
-            key="overview"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8, transition: pageExit }}
-            transition={pageEnter}
-            style={{ position: "fixed", inset: 0 }}
-          >
+          <div key="overview" style={PAGE_STYLE}>
             <Suspense fallback={null}><UnifiedPanel
               activeSessions={activeSessions}
               sessionEvents={sessionEventsMap}
@@ -2188,16 +2251,9 @@ export function App() {
                 recheckAuth()
               }}
             /></Suspense>
-          </motion.div>
+          </div>
         ) : (
-          <motion.div
-            key="launchpad"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8, transition: pageExit }}
-            transition={pageEnter}
-            style={{ position: "fixed", inset: 0 }}
-          >
+          <div key="launchpad" style={PAGE_STYLE}>
             {cliUpdate && (
               <div style={{
                 position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
@@ -2266,9 +2322,18 @@ export function App() {
                 recheckAuth()
               }}
             />
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
+      {/* Phase Gate overlay — global, shown whenever a crew is waiting for human decision */}
+      {pendingPhaseGate && (
+        <Suspense fallback={null}>
+          <PhaseGateSheet
+            gate={pendingPhaseGate}
+            onRespond={handlePhaseGateRespond}
+            t={t}
+          />
+        </Suspense>
+      )}
     </ErrorBoundary>
   )
 }

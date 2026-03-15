@@ -14,6 +14,7 @@ import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 import CrewReportSheet from "./CrewReportSheet"
 // ChainBuilder import removed — chain editing moved to workflow tab direct access
+import { trackScheduleCreate, trackAutomationTrigger } from "../lib/analytics"
 
 // --- Lucide-style SVG icons for crew role avatars (keyed by role.icon field) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -497,6 +498,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [triggeringId, setTriggeringId] = useState<string | null>(null)
   const handleTrigger = async (id: string) => {
     setTriggeringId(id)
+    trackAutomationTrigger(id, "manual")
     try {
       const res = await fetch(`${serverUrl}/api/automations/${projectId}/${id}/trigger`, { method: "POST" })
       if (res.ok) {
@@ -605,10 +607,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           let stepNum = 1
           for (const node of chain.steps) {
             if (isParallelGroup(node)) {
-              lines.push(`${stepNum}. [PARALLEL] ${node.branches.map(b => resolveChainText(b.labelKey, t)).join(" + ")}`)
+              const branchTexts = node.branches.map(b => {
+                const label = resolveChainText(b.labelKey, t)
+                return b.hint ? `${label} [${b.hint}]` : label
+              })
+              lines.push(`${stepNum}. [PARALLEL] ${branchTexts.join(" + ")}`)
               stepNum++
             } else {
-              lines.push(`${stepNum}. ${resolveChainText(node.labelKey, t)}${node.required ? "" : " (optional)"}`)
+              const suffix = node.required ? "" : " (optional)"
+              const hint = node.hint ? `\n   Checklist: ${node.hint}` : ""
+              lines.push(`${stepNum}. ${resolveChainText(node.labelKey, t)}${suffix}${hint}`)
               stepNum++
             }
           }
@@ -641,6 +649,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         if (res.ok) {
           const auto = await res.json()
           setAutomations((prev) => [...prev, auto])
+          trackScheduleCreate(formTemplateId || "custom", formScheduleType === "daily" ? `daily@${formTimeOfDay}` : `interval@${formInterval}m`)
           showToast(t("automation.created") || "Schedule created")
           onClose()
         } else {
@@ -1798,6 +1807,44 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     </span>
                   </button>
                 </div>
+
+                {/* Phase Gate toggle */}
+                <button
+                  onClick={() => setFormCrew({ ...formCrew, phaseGate: !formCrew.phaseGate })}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    width: "100%", padding: "10px 12px", marginTop: 8, borderRadius: 10,
+                    border: `1px solid ${formCrew.phaseGate ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
+                    background: formCrew.phaseGate ? "rgba(55,172,192,0.06)" : "var(--glass-bg)",
+                    cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.phaseGate ? "#37ACC0" : "var(--text-secondary)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: formCrew.phaseGate ? "#37ACC0" : "var(--text-primary)" }}>
+                      {t("crew.phaseGate")}
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
+                      {t("crew.phaseGateDesc")}
+                    </div>
+                  </div>
+                  {/* Toggle indicator */}
+                  <div style={{
+                    width: 34, height: 20, borderRadius: 10, padding: 2,
+                    background: formCrew.phaseGate ? "#37ACC0" : "rgba(0,0,0,0.15)",
+                    transition: "background 0.2s",
+                    display: "flex", alignItems: "center",
+                  }}>
+                    <div style={{
+                      width: 16, height: 16, borderRadius: "50%", background: "#fff",
+                      transform: formCrew.phaseGate ? "translateX(14px)" : "translateX(0)",
+                      transition: "transform 0.2s",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+                    }} />
+                  </div>
+                </button>
               </div>
             ) : formTemplateId ? (
               <div

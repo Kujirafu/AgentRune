@@ -62,6 +62,15 @@ You are working inside AgentRune. Read this file at the start of every session.
   7. Update task status via API during implementation (pending → in_progress → done)
 - Simple requests (change button color, etc.) can skip this
 
+## Release & Secret Safety
+- **APK 檔案絕對不 commit 進 repo** — 只透過 GitHub Releases 上傳
+- **google-services.json 不可 commit** — 已在 .gitignore，但 APK build 會嵌入，所以 APK 也不能 commit
+- **Firebase Admin SDK 金鑰 (firebase-adminsdk*.json) 不可 commit** — 放 ~/.agentrune/secrets/
+- **build.gradle 的 keystore 密碼** — 應改用 local.properties 或環境變數，不要明文寫在 build.gradle
+- **Release 前檢查**：確認 APK 內嵌的 API key 有設定 Android 限制（SHA-1 + package name）
+- **git history 無法輕易清除** — 一旦 secret 被 commit，唯一可靠做法是輪換 key
+- **教訓（2026-03-15）**：google-services.json 的 API key 透過 .gitignore 例外的 APK 檔案洩漏到 GitHub，被 Google 掃到通報。26 個 release 全部受影響，需刪除重發
+
 ## Voice Commands
 - Messages starting with [Voice Command] → understand the intent, execute directly, don't ask for clarification
 

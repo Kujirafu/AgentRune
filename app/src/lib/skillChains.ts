@@ -31,6 +31,8 @@ export interface ChainStepDef {
   contextFrom?: string[] // step IDs to inherit handoff from
   autoRemember?: boolean
   agentConfig?: StepAgentConfig
+  /** Inline checklist hint injected into serialized workflow text (English, not i18n — for AI agent consumption only) */
+  hint?: string
 }
 
 export interface StepAgentConfig {
@@ -265,19 +267,34 @@ export const BUILTIN_CHAINS: SkillChainDef[] = [
     slug: "secure",
     nameKey: "chain.secure.name",
     descKey: "chain.secure.desc",
-    tokenBudget: { lite: 650, deep: 9500 },
+    tokenBudget: { lite: 900, deep: 12000 },
     steps: [
       {
-        id: "s1", phase: "verify", labelKey: "chain.step.security",
-        skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
-        required: true, defaultDepth: "lite",
-        autoRemember: true,
+        type: "parallel", id: "p0", phase: "verify",
+        labelKey: "chain.step.parallelAudit",
+        branches: [
+          {
+            id: "s1a", phase: "verify", labelKey: "chain.step.codeAudit",
+            skillSelection: { lite: "security", standard: "security-auditor", deep: "security-auditor" },
+            required: true, defaultDepth: "lite",
+            autoRemember: true,
+            hint: "Source code vulnerabilities: injection (command/SQL/XSS), auth bypass, input validation, error message leakage, CORS/CSP headers, session management, hardcoded secrets in source files",
+          },
+          {
+            id: "s1b", phase: "verify", labelKey: "chain.step.supplyChainAudit",
+            skillSelection: { lite: "secrets-scan", standard: "supply-chain-audit", deep: "supply-chain-audit" },
+            required: true, defaultDepth: "lite",
+            autoRemember: true,
+            hint: "Supply chain & secrets: (1) .gitignore audit — dangerous ! exceptions allowing binaries/configs, missing entries for credential files; (2) git log -- *.apk *.keystore *.jks *.pem *.key *secret* *credential* — secrets/binaries in git history; (3) build configs (build.gradle, Dockerfile, CI YAML) for plaintext passwords/tokens; (4) credential files in project dir (firebase-adminsdk*, service-account*, *.keystore); (5) npm audit / dependency CVEs; (6) build pipeline secret flow — does any config file get embedded into a binary that is then committed or published?; (7) CI/CD workflow files (.github/workflows/) — secrets exposure, workflow injection via pull_request_target, unsafe uses of github.event inputs; (8) Android build hardening — check minifyEnabled/proguardFiles (false = APK fully decompilable, all source code and embedded configs extractable by apktool/jadx)",
+          },
+        ],
+        joinStrategy: "all",
       },
       {
         id: "s2", phase: "implement", labelKey: "chain.step.fix",
         skillSelection: { lite: "fix", standard: "fix", deep: "backend-security-coder" },
         required: true, defaultDepth: "lite",
-        contextFrom: ["s1"],
+        contextFrom: ["s1a", "s1b"],
       },
       {
         type: "parallel", id: "p1", phase: "verify",

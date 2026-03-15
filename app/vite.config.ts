@@ -21,6 +21,8 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: {
+            // Vendor: stable deps that rarely change → long-lived cache
+            vendor: ["react", "react-dom"],
             // Split heavy deps into separate lazy-loadable chunks
             xterm: ["@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"],
             markdown: ["react-markdown", "remark-gfm", "remark-parse", "unified"],

@@ -1081,6 +1081,28 @@ export function MissionControl({
     // Special actions: open URL in phone browser or copy URL
     if (input.startsWith("__open_url__")) {
       const url = input.slice("__open_url__".length)
+      // Security: only open URLs from known auth domains
+      const ALLOWED_AUTH_DOMAINS = [
+        "anthropic.com", "console.anthropic.com",
+        "openai.com", "platform.openai.com",
+        "google.com", "accounts.google.com", "cloud.google.com",
+        "github.com", "github.dev",
+        "microsoft.com", "login.microsoftonline.com",
+        "aider.chat",
+        "cursor.com", "cursor.sh",
+        "firebase.google.com",
+        "agentlore.app",
+      ]
+      try {
+        const hostname = new URL(url).hostname
+        const isAllowed = ALLOWED_AUTH_DOMAINS.some(d => hostname === d || hostname.endsWith("." + d))
+        if (!isAllowed) {
+          console.warn(`[security] Blocked URL open for untrusted domain: ${hostname}`)
+          return
+        }
+      } catch {
+        return // invalid URL
+      }
       import("@capacitor/browser").then(({ Browser }) => {
         Browser.open({ url }).catch(() => window.open(url, "_blank"))
       }).catch(() => window.open(url, "_blank"))
@@ -1900,7 +1922,7 @@ return (
               onImagePaste={handleImagePaste}
               onVoice={mcStartVoice}
               onInsight={openInsight}
-              autoFocus={isMobile}
+              autoFocus={false}
               slashCommands={agent?.slashCommands}
               onBrowse={openBrowser}
               prefill={quotedText}

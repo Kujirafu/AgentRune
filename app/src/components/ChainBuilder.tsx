@@ -4,6 +4,7 @@ import type { ChainNode, ChainStepDef, ParallelGroup, ChainPhase, StepAgentConfi
 import { isParallelGroup, BUILTIN_CHAINS, resolveChainText, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
+import { trackChainExecute } from "../lib/analytics"
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -772,6 +773,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
       setSaveResult({ ok: false, msg: t("builder.saveFirst") })
       return
     }
+    trackChainExecute(draft.slug)
     setExecutionError(null)
     setExecutionStatus("QUEUED")
     setExecutionStep(0)

@@ -4,6 +4,7 @@ import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 import { SpringOverlay } from "./SpringOverlay"
+import { trackGitAction } from "../lib/analytics"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 const COLORS = {
@@ -187,6 +188,7 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
   // Commit
   const handleCommit = useCallback(() => {
     if (!commitMsg.trim()) return
+    trackGitAction("commit", projectId)
     setCommitting(true)
     setCommitResult(null)
     fetch(`${api}/api/git/commit`, {
@@ -231,6 +233,7 @@ export function GitPanel({ open, projectId, onClose, onNewSession }: GitPanelPro
   }, [projectId, fetchBranches, api, t])
 
   const handleCheckout = useCallback((branchName: string) => {
+    trackGitAction("checkout", projectId)
     setBranchAction(branchName)
     fetch(`${api}/api/git/branch-checkout`, {
       method: "POST",

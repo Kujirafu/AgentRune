@@ -1,13 +1,22 @@
 /**
  * authority-map.ts
- * Tracks session-level permissions, marks inherited permissions for checkpoint on resume,
- * and feeds constraints to planning-constraints.ts.
+ * Tracks session-level permissions with TTL expiry, marks inherited permissions
+ * for checkpoint on resume, and feeds constraints to planning-constraints.ts.
  *
  * Phase 1: data structure + session inheritance + planning constraint output.
- * Runtime enforcement is Phase 4.
+ * Phase 2 (AR-F01+F05): TTL expiry + noExpiry bypass + grantPermission + runtime enforcement.
  */
 
+// ── TTL defaults (milliseconds) ──
+
+/** Critical operations (rm, ssh, wallet): 5 minutes */
+const TTL_CRITICAL = 5 * 60 * 1000
+/** Warning operations (file write, curl): 30 minutes */
+const TTL_WARNING = 30 * 60 * 1000
+
 // ── Types ──
+
+export type PermissionSeverity = "critical" | "warning"
 
 export interface AuthorityPermission {
   key: string
@@ -18,6 +27,12 @@ export interface AuthorityPermission {
   timestamp: number
   /** Human-readable reason */
   reason?: string
+  /** When this permission expires (undefined = use default TTL from severity) */
+  expiresAt?: number
+  /** If true, this permission never expires within the session */
+  noExpiry?: boolean
+  /** Severity level — determines default TTL */
+  severity?: PermissionSeverity
 }
 
 export interface AuthorityMap {
@@ -48,6 +63,7 @@ export function createFromTrustProfile(opts: {
     granted: level !== "strict",
     inherited: false,
     timestamp: now,
+    severity: "warning",
     reason: level === "strict" ? "Strict sandbox: write restricted" : undefined,
   })
 
@@ -56,6 +72,7 @@ export function createFromTrustProfile(opts: {
     granted: level === "none" || level === "permissive",
     inherited: false,
     timestamp: now,
+    severity: "warning",
     reason: level === "strict" || level === "moderate" ? `${level} sandbox: network restricted` : undefined,
   })
 
@@ -64,6 +81,7 @@ export function createFromTrustProfile(opts: {
     granted: level === "none",
     inherited: false,
     timestamp: now,
+    severity: "critical",
     reason: level !== "none" ? `${level} sandbox: shell commands restricted` : undefined,
   })
 
@@ -72,6 +90,7 @@ export function createFromTrustProfile(opts: {
     granted: !opts.requireMergeApproval,
     inherited: false,
     timestamp: now,
+    severity: "warning",
     reason: opts.requireMergeApproval ? "Merge approval required" : undefined,
   })
 
@@ -80,6 +99,7 @@ export function createFromTrustProfile(opts: {
     granted: !opts.requirePlanReview,
     inherited: false,
     timestamp: now,
+    severity: "warning",
     reason: opts.requirePlanReview ? "Plan review required before execution" : undefined,
   })
 
@@ -91,7 +111,7 @@ export function createFromTrustProfile(opts: {
   }
 }
 
-/** Create an inherited AuthorityMap for session resume — marks all permissions as inherited */
+/** Create an inherited AuthorityMap for session resume — marks all permissions as inherited, clears TTL */
 export function inheritForResume(prev: AuthorityMap, newSessionId: string): AuthorityMap {
   return {
     sessionId: newSessionId,
@@ -99,6 +119,9 @@ export function inheritForResume(prev: AuthorityMap, newSessionId: string): Auth
     permissions: prev.permissions.map(p => ({
       ...p,
       inherited: true,
+      // Inherited permissions lose their TTL — must be re-granted
+      expiresAt: undefined,
+      noExpiry: false,
     })),
     createdAt: Date.now(),
   }
@@ -114,8 +137,73 @@ export function getInheritedPermissions(map: AuthorityMap): AuthorityPermission[
   return map.permissions.filter(p => p.inherited)
 }
 
-/** Check if a specific permission is granted */
+/** Check if a specific permission is granted AND not expired */
 export function hasPermission(map: AuthorityMap, key: string): boolean {
   const perm = map.permissions.find(p => p.key === key)
-  return perm?.granted ?? false
+  if (!perm || !perm.granted) return false
+
+  // noExpiry bypass — always valid within this session
+  if (perm.noExpiry) return true
+
+  // Check TTL expiry
+  if (perm.expiresAt !== undefined) {
+    if (Date.now() > perm.expiresAt) return false
+  }
+
+  return true
+}
+
+/** Get the default TTL for a severity level */
+export function getDefaultTTL(severity: PermissionSeverity): number {
+  return severity === "critical" ? TTL_CRITICAL : TTL_WARNING
+}
+
+/**
+ * Grant (or re-grant) a permission with TTL.
+ * Mutates the AuthorityMap in place.
+ */
+export function grantPermission(map: AuthorityMap, key: string, opts?: {
+  noExpiry?: boolean
+  severity?: PermissionSeverity
+  reason?: string
+}): void {
+  const now = Date.now()
+  const severity = opts?.severity || "warning"
+  const noExpiry = opts?.noExpiry || false
+  const expiresAt = noExpiry ? undefined : now + getDefaultTTL(severity)
+
+  const existing = map.permissions.find(p => p.key === key)
+  if (existing) {
+    existing.granted = true
+    existing.inherited = false
+    existing.timestamp = now
+    existing.expiresAt = expiresAt
+    existing.noExpiry = noExpiry
+    existing.severity = severity
+    if (opts?.reason !== undefined) existing.reason = opts.reason
+  } else {
+    map.permissions.push({
+      key,
+      granted: true,
+      inherited: false,
+      timestamp: now,
+      expiresAt,
+      noExpiry,
+      severity,
+      reason: opts?.reason,
+    })
+  }
+}
+
+/**
+ * Map a skill-monitor violation type to the corresponding authority permission key.
+ */
+export function violationTypeToPermissionKey(type: "filesystem" | "network" | "shell" | "wallet" | "env"): string {
+  switch (type) {
+    case "filesystem": return "filesystem.write"
+    case "network": return "network"
+    case "shell": return "shell.unrestricted"
+    case "wallet": return "wallet"
+    case "env": return "env"
+  }
 }

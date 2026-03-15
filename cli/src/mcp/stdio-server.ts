@@ -236,17 +236,31 @@ Call get_knowledge_guide first if unsure about the format.`,
     }
   )
 
+  // Allowlisted binaries for run_command (defense-in-depth)
+  const ALLOWED_BINS = new Set([
+    "git", "node", "npm", "npx", "ls", "cat", "head", "tail", "echo", "pwd",
+    "find", "grep", "rg", "wc", "sort", "uniq", "diff", "which", "env",
+    "date", "whoami", "hostname", "uname", "df", "du", "free", "top",
+    "curl", "wget", "jq", "python", "python3", "pip", "pip3",
+    "tsc", "eslint", "prettier", "vitest", "jest",
+  ])
+
   server.tool(
     "run_command",
-    "Run a shell command on the local machine via AgentRune",
+    "Run an allowlisted command on the local machine via AgentRune. Only pre-approved binaries are permitted.",
     {
-      command: z.string().describe("Shell command to run"),
+      command: z.string().describe("Binary name (must be allowlisted)"),
+      args: z.array(z.string()).optional().describe("Command arguments"),
       cwd: z.string().optional().describe("Working directory"),
     },
-    async ({ command, cwd }) => {
-      const { execSync } = await import("node:child_process")
+    async ({ command, args, cwd }) => {
+      const { execFileSync } = await import("node:child_process")
+      const bin = command.split("/").pop()?.split("\\").pop() || command
+      if (!ALLOWED_BINS.has(bin)) {
+        return { content: [{ type: "text" as const, text: `Error: Binary "${bin}" is not allowlisted. Allowed: ${[...ALLOWED_BINS].join(", ")}` }] }
+      }
       try {
-        const output = execSync(command, {
+        const output = execFileSync(command, args || [], {
           cwd: cwd || process.cwd(),
           encoding: "utf-8",
           timeout: 30000,
@@ -254,8 +268,7 @@ Call get_knowledge_guide first if unsure about the format.`,
         })
         return { content: [{ type: "text" as const, text: output }] }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Command failed"
-        return { content: [{ type: "text" as const, text: `Error: ${message}` }] }
+        return { content: [{ type: "text" as const, text: "Error: Command execution failed" }] }
       }
     }
   )

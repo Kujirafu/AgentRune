@@ -13,6 +13,7 @@ import type { AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
+import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
 
@@ -137,6 +138,11 @@ function isLabelNoise(title: string): boolean {
   if (/^Session (started|ended|resumed)/i.test(title)) return true
   if (/^Permission requested/i.test(title)) return true
   if (/^Agent is requesting/i.test(title)) return true
+  if (/^Compacting context/i.test(title)) return true
+  if (/^HANDOFF/i.test(title)) return true
+  if (/^Claude Code is compress/i.test(title)) return true
+  if (/^\.{2,}$/.test(title)) return true
+  if (/^Waiting/i.test(title)) return true
   return false
 }
 
@@ -276,7 +282,11 @@ export function UnifiedPanel({
 
   // --- Core state ---
   const [now, setNow] = useState(Date.now())
-  const [activeTab, setActiveTab] = useState<"projects" | "schedules" | "templates">("projects")
+  const [activeTab, setActiveTabRaw] = useState<"projects" | "schedules" | "templates">("projects")
+  const setActiveTab = useCallback((tab: "projects" | "schedules" | "templates") => {
+    setActiveTabRaw(tab)
+    trackTabSwitch(tab, "unified_panel")
+  }, [])
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [summaryCache, setSummaryCache] = useState<Map<string, { text: string; timestamp: number }>>(new Map())
   const [summaryLoading, setSummaryLoading] = useState<Set<string>>(new Set())
@@ -412,12 +422,20 @@ export function UnifiedPanel({
   // --- Auto-label sessions ---
   const labels = getSessionLabels()
   const autoLabels = getAutoLabels()
+  const prevAutoLabelStatusRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
+    const prevStatuses = prevAutoLabelStatusRef.current
     for (const s of activeSessions) {
       if (labels[s.id]) continue
-      const existing = autoLabels[s.id]
-      if (existing && !isLabelNoise(existing)) continue
       const events = sessionEvents.get(s.id) || []
+      const status = getSessionStatus(events)
+      const prevStatus = prevStatuses.get(s.id)
+      const sessionJustFinished = prevStatus === "working" && (status === "idle" || status === "done")
+      prevStatuses.set(s.id, status)
+
+      const existing = autoLabels[s.id]
+      // Update if: no label yet, or session just finished (refresh with latest)
+      if (existing && !isLabelNoise(existing) && !sessionJustFinished) continue
       const summary = getSessionLabel(events)
       if (summary && summary.length > 3) {
         const autoLabel = summary.length > 40 ? summary.slice(0, 40) + "..." : summary
@@ -511,15 +529,49 @@ export function UnifiedPanel({
   const fetchSummaryRef = useRef(fetchSummary)
   fetchSummaryRef.current = fetchSummary
 
-  // Fetch summaries when projects tab is active AND projects/sessions have loaded
+  // Fetch summaries once when projects tab first loads, then only on-demand (refresh button)
   const sessionCount = activeSessions.length
+  const summaryFetchedRef = useRef(false)
   useEffect(() => {
     if (activeTab !== "projects") return
     if (projects.length === 0) return
+    if (summaryFetchedRef.current) return
+    summaryFetchedRef.current = true
     for (const p of projects) {
       fetchSummaryRef.current(p.id)
     }
-  }, [activeTab, projects.length, sessionCount])
+  }, [activeTab, projects.length])
+
+  // Track sessions that finished while user wasn't looking, fetch summary when app resumes
+  const prevSessionStatusRef = useRef<Map<string, string>>(new Map())
+  const pendingSummaryProjects = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const prev = prevSessionStatusRef.current
+    for (const s of activeSessions) {
+      const events = sessionEvents.get(s.id) || []
+      const status = getSessionStatus(events)
+      const prevStatus = prev.get(s.id)
+      if (prevStatus === "working" && (status === "idle" || status === "done")) {
+        pendingSummaryProjects.current.add(s.projectId)
+      }
+      prev.set(s.id, status)
+    }
+  }, [activeSessions, sessionEvents])
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden) return
+      const pending = pendingSummaryProjects.current
+      if (pending.size === 0) return
+      for (const pid of pending) {
+        setSummaryCache(c => { const n = new Map(c); n.delete(pid); return n })
+        fetchSummaryRef.current(pid)
+      }
+      pending.clear()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [])
 
   // --- Voice system ---
   const voiceCleanup = () => {
@@ -1108,7 +1160,7 @@ export function UnifiedPanel({
                       </button>
                       {/* [...] button */}
                       <button
-                        onClick={() => setContextProjectId(project.id)}
+                        onClick={() => { trackProjectSwitch(project.id); setContextProjectId(project.id) }}
                         style={{
                           width: 30, height: 30, borderRadius: 8,
                           background: "transparent",

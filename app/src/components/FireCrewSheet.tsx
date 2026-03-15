@@ -5,6 +5,7 @@ import { BUILTIN_CREWS } from "../data/builtin-crews"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText } from "../lib/skillChains"
 import type { CrewConfig } from "../data/automation-types"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
+import { trackCrewStart } from "../lib/analytics"
 
 interface FireCrewSheetProps {
   open: boolean
@@ -55,6 +56,7 @@ const PlayIcon = () => (
 export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, sessionId, sessionSummary }: FireCrewSheetProps) {
   const [firing, setFiring] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [phaseGate, setPhaseGate] = useState(false)
   const { sheetRef, handlers } = useSwipeToDismiss({ onDismiss: onClose })
 
   const handleFire = async (crew: CrewConfig, templateName: string) => {
@@ -64,6 +66,7 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
     // Serialize skill chain workflows for each role
     const serializedCrew: CrewConfig = {
       ...crew,
+      phaseGate,
       roles: crew.roles.map(r => {
         if (!r.skillChainSlug) return r
         const chain = BUILTIN_CHAINS.find(c => c.slug === r.skillChainSlug)
@@ -72,9 +75,15 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
         let stepNum = 1
         for (const node of chain.steps) {
           if (isParallelGroup(node)) {
-            lines.push(`${stepNum}. [PARALLEL] ${node.branches.map(b => resolveChainText(b.labelKey, t)).join(" + ")}`)
+            const branchTexts = node.branches.map(b => {
+              const label = resolveChainText(b.labelKey, t)
+              return b.hint ? `${label} [${b.hint}]` : label
+            })
+            lines.push(`${stepNum}. [PARALLEL] ${branchTexts.join(" + ")}`)
           } else {
-            lines.push(`${stepNum}. ${resolveChainText(node.labelKey, t)}${node.required ? "" : " (optional)"}`)
+            const suffix = node.required ? "" : " (optional)"
+            const hint = node.hint ? `\n   Checklist: ${node.hint}` : ""
+            lines.push(`${stepNum}. ${resolveChainText(node.labelKey, t)}${suffix}${hint}`)
           }
           stepNum++
         }
@@ -93,6 +102,7 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
         }),
       })
       if (res.ok) {
+        trackCrewStart(templateName, crew.roles.length, crew.tokenBudget)
         setResult({ ok: true, msg: t("fireCrew.success") })
         setTimeout(onClose, 1500)
       } else {
@@ -163,8 +173,45 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
           </div>
         )}
 
-        {/* Template list */}
+        {/* Phase Gate toggle + Template list */}
         <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 16px" }}>
+          {/* Phase Gate toggle */}
+          <button
+            onClick={() => setPhaseGate(!phaseGate)}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, width: "100%",
+              padding: "10px 12px", marginBottom: 10, borderRadius: 10,
+              border: `1px solid ${phaseGate ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
+              background: phaseGate ? "rgba(55,172,192,0.06)" : "var(--glass-bg)",
+              cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={phaseGate ? "#37ACC0" : "var(--text-secondary)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: phaseGate ? "#37ACC0" : "var(--text-primary)" }}>
+                {t("crew.phaseGate")}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
+                {t("crew.phaseGateDesc")}
+              </div>
+            </div>
+            <div style={{
+              width: 34, height: 20, borderRadius: 10, padding: 2,
+              background: phaseGate ? "#37ACC0" : "rgba(0,0,0,0.15)",
+              transition: "background 0.2s",
+              display: "flex", alignItems: "center",
+            }}>
+              <div style={{
+                width: 16, height: 16, borderRadius: "50%", background: "#fff",
+                transform: phaseGate ? "translateX(14px)" : "translateX(0)",
+                transition: "transform 0.2s",
+                boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+              }} />
+            </div>
+          </button>
+
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {BUILTIN_CREWS.map((tmpl) => {
               // tmpl.name is raw id like "overnight_sprint", tmpl.crew has the CrewConfig

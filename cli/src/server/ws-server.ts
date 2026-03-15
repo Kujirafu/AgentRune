@@ -945,6 +945,18 @@ export function createServer(portOverride?: number) {
           automationId: event.automationId,
           type: "plan_review_required",
         }).catch(() => {})
+      } else if (event.type === "reauth_required") {
+        sendPushNotification(alCfg, `${event.automationName} needs reauth`, `Critical operation blocked: ${event.violationDescription}. Approve or deny in the app.`, {
+          automationId: event.automationId,
+          type: "reauth_required",
+          permissionKey: event.permissionKey,
+        }).catch(() => {})
+      } else if (event.type === "phase_gate_waiting") {
+        sendPushNotification(alCfg, `${event.gate.automationName} — Phase ${event.gate.completedPhase} done`, `Waiting for your decision to continue (${event.gate.totalTokensUsed}/${event.gate.tokenBudget} tokens)`, {
+          automationId: event.gate.automationId,
+          type: "phase_gate_waiting",
+          completedPhase: String(event.gate.completedPhase),
+        }).catch(() => {})
       }
     }
   }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS })
@@ -1097,10 +1109,22 @@ export function createServer(portOverride?: number) {
     const { name, cwd } = req.body
     if (!name || !cwd) return res.status(400).json({ error: "Missing name or cwd" })
 
+    // Validate CWD: must exist, be a directory, and be within user's home directory
+    const resolvedCwd = resolve(cwd)
+    if (!isWithinDir(resolvedCwd, userHome)) {
+      return res.status(400).json({ error: "Project path must be within user home directory" })
+    }
+    try {
+      const stat = statSync(resolvedCwd)
+      if (!stat.isDirectory()) return res.status(400).json({ error: "Path is not a directory" })
+    } catch {
+      return res.status(400).json({ error: "Path does not exist" })
+    }
+
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-")
     if (projects.find((p) => p.id === id)) return res.status(409).json({ error: "Project exists" })
 
-    const project = { id, name, cwd }
+    const project = { id, name, cwd: resolvedCwd }
     projects.push(project)
 
     writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
@@ -2189,11 +2213,17 @@ export function createServer(portOverride?: number) {
     const proj = projects.find((p) => p.id === projectId)
     if (!proj || !wtPath) return res.status(400).json({ error: "Missing project or path" })
     if (typeof wtPath !== "string" || wtPath.startsWith("-")) return res.status(400).json({ error: "Invalid worktree path" })
+    // Validate worktree path is within project directory or its parent
+    const resolvedWt = resolve(wtPath)
+    const projectParent = resolve(proj.cwd, "..")
+    if (!isWithinDir(resolvedWt, projectParent)) {
+      return res.status(400).json({ error: "Invalid worktree path" })
+    }
 
     try {
       const args = ["worktree", "remove"]
       if (force) args.push("--force")
-      args.push(wtPath)
+      args.push(resolvedWt)
       execFileSync("git", args, { cwd: proj.cwd, encoding: "utf-8", timeout: 10000 })
       res.json({ ok: true })
     } catch (err: unknown) {
@@ -2491,10 +2521,13 @@ export function createServer(portOverride?: number) {
       })
       const concatenated = eventLines.join("\n")
 
+      log.info(`[project-summary] sessions=${projectSessions.length} events=${allEvents.length} textLen=${concatenated.length}`)
+
       // Try LLM-based summary with dedicated summarization prompt
       try {
         const { callLlmForSummary } = await import("./llm-summary.js")
         const summary = await callLlmForSummary(concatenated)
+        log.info(`[project-summary] LLM result: ${summary ? summary.slice(0, 80) : "(null)"}`)
         if (summary) {
           return res.json({ summary })
         }
@@ -3079,6 +3112,27 @@ export function createServer(portOverride?: number) {
     res.json(automationManager.listPendingMerges())
   })
 
+  // --- Reauth API ---
+
+  app.get("/api/automations/pending-reauths", (_req, res) => {
+    res.json(automationManager.listPendingReauths())
+  })
+
+  app.post("/api/automations/:projectId/:id/reauth", express.json(), async (req, res) => {
+    try {
+      const { action, noExpiry } = req.body
+      if (!action || !["approve", "deny"].includes(action)) {
+        return res.status(400).json({ error: "action must be 'approve' or 'deny'" })
+      }
+      const result = await automationManager.resolveReauth(req.params.id, action, { noExpiry: noExpiry === true })
+      if (!result.success) return res.status(404).json({ error: result.message })
+      res.json(result)
+    } catch (err) {
+      log.error(`[automation/reauth] ${err instanceof Error ? err.message : err}`)
+      res.status(500).json({ error: "Reauth resolution failed" })
+    }
+  })
+
   // --- Skill security API ---
 
   app.post("/api/skill-analyze", express.json(), (req, res) => {
@@ -3153,6 +3207,11 @@ export function createServer(portOverride?: number) {
   const clientEngines = new Map<WebSocket, ParseEngine>()
   const clientEventSessions = new Map<WebSocket, string>()
 
+  // --- WS rate limiting (per-client) ---
+  const WS_RATE_LIMIT = 120 // max messages per window
+  const WS_RATE_WINDOW = 1000 // 1 second window
+  const wsRateMap = new WeakMap<WebSocket, { count: number; resetAt: number }>()
+
   // Per-PTY-session state (survives WS reconnects)
   const sessionEngines = new Map<string, ParseEngine>()
   const sessionRecentEvents = new Map<string, AgentEvent[]>()
@@ -3183,7 +3242,7 @@ export function createServer(portOverride?: number) {
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
-    log.info(`WS connection from ${req.socket.remoteAddress} token=${(new URL(req.url || "/", "http://localhost").searchParams.get("token") || "").substring(0, 8)}...`)
+    log.info(`WS connection from ${req.socket.remoteAddress} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
 
     // Push CLI update notification to app
     if (updateInfo) {
@@ -3225,7 +3284,24 @@ export function createServer(portOverride?: number) {
       daemonDeviceId: agentloreCfg?.deviceId || undefined,
     }))
 
+    // Send pending phase gates on reconnect (state recovery)
+    const pendingGates = automationManager.listPendingPhaseGates()
+    for (const gate of pendingGates) {
+      ws.send(JSON.stringify({ type: "phase_gate_waiting", gate }))
+    }
+
     ws.on("message", (raw) => {
+      // Rate limiting
+      const now = Date.now()
+      const rate = wsRateMap.get(ws) || { count: 0, resetAt: now + WS_RATE_WINDOW }
+      if (now > rate.resetAt) { rate.count = 0; rate.resetAt = now + WS_RATE_WINDOW }
+      rate.count++
+      wsRateMap.set(ws, rate)
+      if (rate.count > WS_RATE_LIMIT) {
+        ws.send(JSON.stringify({ type: "error", message: "Rate limit exceeded" }))
+        return
+      }
+
       let msg: { type: string; [key: string]: unknown }
       try {
         msg = JSON.parse(raw.toString())
@@ -3985,6 +4061,37 @@ export function createServer(portOverride?: number) {
           break
         }
 
+        case "reauth_resolve": {
+          const automationId = msg.automationId as string
+          const action = (msg.action as "approve" | "deny") || "deny"
+          const noExpiry = msg.noExpiry === true
+          if (automationId) {
+            automationManager.resolveReauth(automationId, action, { noExpiry }).then(result => {
+              ws.send(JSON.stringify({ type: "reauth_ack", automationId, ...result }))
+            }).catch(() => {
+              ws.send(JSON.stringify({ type: "reauth_ack", automationId, success: false, message: "Reauth resolution failed" }))
+            })
+            log.info(`[WS] reauth_resolve: automationId=${automationId} action=${action} noExpiry=${noExpiry}`)
+          }
+          break
+        }
+
+        case "phase_gate_response": {
+          const automationId = msg.automationId as string
+          const action = msg.action as string
+          const validActions = ["proceed", "proceed_with_instructions", "retry", "retry_with_instructions", "abort"]
+          if (automationId && action && validActions.includes(action)) {
+            const resolved = automationManager.resolvePhaseGate(automationId, {
+              automationId,
+              action: action as any,
+              instructions: (msg.instructions as string) || undefined,
+            })
+            log.info(`[WS] phase_gate_response: automationId=${automationId} action=${action} resolved=${resolved}`)
+            ws.send(JSON.stringify({ type: "phase_gate_ack", automationId, resolved }))
+          }
+          break
+        }
+
         case "resize": {
           const sid = clientSessions.get(ws)
           if (sid) sessions.resize(sid, msg.cols as number, msg.rows as number)
@@ -4040,14 +4147,18 @@ export function createServer(portOverride?: number) {
           const storeSid = msg.sessionId as string
           const storeEvt = msg.event as AgentEvent | undefined
           const clientOwnedSession = clientSessions.get(ws)
-          if (storeSid && storeEvt && (clientOwnedSession === storeSid || isLocal)) {
-            const list = sessionRecentEvents.get(storeSid)
-            if (list) {
-              list.push(storeEvt)
-              if (list.length > 200) list.splice(0, list.length - 200)
-            } else {
-              sessionRecentEvents.set(storeSid, [storeEvt])
-            }
+          if (!storeSid || !storeEvt || (!isLocal && clientOwnedSession !== storeSid)) break
+          // Validate event structure
+          if (typeof storeEvt.id !== "string" || typeof storeEvt.type !== "string") break
+          // Cap field sizes to prevent memory/disk abuse
+          if (storeEvt.title && typeof storeEvt.title === "string" && storeEvt.title.length > 500) storeEvt.title = storeEvt.title.slice(0, 500)
+          if (storeEvt.detail && typeof storeEvt.detail === "string" && storeEvt.detail.length > 5000) storeEvt.detail = storeEvt.detail.slice(0, 5000)
+          const list = sessionRecentEvents.get(storeSid)
+          if (list) {
+            list.push(storeEvt)
+            if (list.length > 200) list.splice(0, list.length - 200)
+          } else {
+            sessionRecentEvents.set(storeSid, [storeEvt])
           }
           break
         }
@@ -4272,13 +4383,27 @@ export function createServer(portOverride?: number) {
           const toSid = msg.toSessionId as string
           const question = msg.question as string
           if (!fromSid || !toSid || !question) break
-          const toSession = sessions.get(toSid)
-          if (toSession) {
-            sessions.write(toSid, `\n[來自其他 Session ${fromSid.slice(0, 8)} 的提問] ${question}\n請回答後 report_progress，在 summary 開頭加上 [回覆 ${fromSid.slice(0, 8)}]\n`)
-            ws.send(JSON.stringify({ type: "swarm_sent", toSessionId: toSid, message: `Question sent to ${toSid.slice(0, 8)}` }))
-          } else {
-            ws.send(JSON.stringify({ type: "swarm_sent", error: "Target session not found" }))
+          // Security: verify the requesting client owns the fromSession (prevent cross-session injection)
+          const swarmOwnerSid = clientSessions.get(ws)
+          if (!isLocal && swarmOwnerSid !== fromSid) {
+            ws.send(JSON.stringify({ type: "swarm_sent", error: "Not authorized: you don't own the source session" }))
+            break
           }
+          // Verify both sessions belong to the same project
+          const fromSession = sessions.get(fromSid)
+          const toSession = sessions.get(toSid)
+          if (!fromSession || !toSession) {
+            ws.send(JSON.stringify({ type: "swarm_sent", error: "Target session not found" }))
+            break
+          }
+          if (fromSession.project.id !== toSession.project.id) {
+            ws.send(JSON.stringify({ type: "swarm_sent", error: "Cross-project swarm not allowed" }))
+            break
+          }
+          // Sanitize question: strip control characters
+          const sanitizedQ = question.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 2000)
+          sessions.write(toSid, `\n[來自其他 Session ${fromSid.slice(0, 8)} 的提問] ${sanitizedQ}\n請回答後 report_progress，在 summary 開頭加上 [回覆 ${fromSid.slice(0, 8)}]\n`)
+          ws.send(JSON.stringify({ type: "swarm_sent", toSessionId: toSid, message: `Question sent to ${toSid.slice(0, 8)}` }))
           break
         }
 
@@ -4923,5 +5048,5 @@ export function createServer(portOverride?: number) {
     }
   })
 
-  return server
+  return { server, automationManager }
 }

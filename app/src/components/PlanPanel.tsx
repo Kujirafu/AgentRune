@@ -4,6 +4,7 @@ import { getApiBase } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { PrdItem, PrdSummary, PrdPriority, Task } from "../types"
 import { StandardsContent } from "./StandardsPage"
+import { trackPrdAction, trackPlanCreate, trackTabSwitch } from "../lib/analytics"
 
 const SPRING = "cubic-bezier(0.16, 1, 0.3, 1)"
 
@@ -33,7 +34,11 @@ const isFinished = (status: string) => isDone(status) || status === "skipped"
 export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: PlanPanelProps) {
   const { t } = useLocale()
   const isDark = document.documentElement.classList.contains("dark")
-  const [activeTab, setActiveTab] = useState<"prd" | "tasks" | "standards">("prd")
+  const [activeTab, setActiveTabRaw] = useState<"prd" | "tasks" | "standards">("prd")
+  const setActiveTab = useCallback((tab: "prd" | "tasks" | "standards") => {
+    setActiveTabRaw(tab)
+    trackTabSwitch(tab, "plan_panel")
+  }, [])
 
   // ── PRD list ──
   const [prdList, setPrdList] = useState<PrdSummary[]>([])
@@ -189,6 +194,8 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
 
   const handleCreatePrd = useCallback(() => {
     if (!createGoal.trim() || !send) return
+    trackPlanCreate(projectId, createPriority)
+    trackPrdAction("create", projectId)
     setProcessing(true)
     const prompt = `I want to build: ${createGoal.trim()}\n\nPlease create a PRD (Product Requirements Document) for this. Ask me clarifying questions one at a time to refine the requirements, then generate a structured plan with tasks. Set priority to ${createPriority}.`
     send({ type: "input", data: prompt })
