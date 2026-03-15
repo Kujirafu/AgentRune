@@ -13,6 +13,7 @@ import type { AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
+import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
 
@@ -137,6 +138,11 @@ function isLabelNoise(title: string): boolean {
   if (/^Session (started|ended|resumed)/i.test(title)) return true
   if (/^Permission requested/i.test(title)) return true
   if (/^Agent is requesting/i.test(title)) return true
+  if (/^Compacting context/i.test(title)) return true
+  if (/^HANDOFF/i.test(title)) return true
+  if (/^Claude Code is compress/i.test(title)) return true
+  if (/^\.{2,}$/.test(title)) return true
+  if (/^Waiting/i.test(title)) return true
   return false
 }
 
@@ -276,7 +282,11 @@ export function UnifiedPanel({
 
   // --- Core state ---
   const [now, setNow] = useState(Date.now())
-  const [activeTab, setActiveTab] = useState<"projects" | "schedules" | "templates">("projects")
+  const [activeTab, setActiveTabRaw] = useState<"projects" | "schedules" | "templates">("projects")
+  const setActiveTab = useCallback((tab: "projects" | "schedules" | "templates") => {
+    setActiveTabRaw(tab)
+    trackTabSwitch(tab, "unified_panel")
+  }, [])
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [summaryCache, setSummaryCache] = useState<Map<string, { text: string; timestamp: number }>>(new Map())
   const [summaryLoading, setSummaryLoading] = useState<Set<string>>(new Set())
@@ -412,12 +422,20 @@ export function UnifiedPanel({
   // --- Auto-label sessions ---
   const labels = getSessionLabels()
   const autoLabels = getAutoLabels()
+  const prevAutoLabelStatusRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
+    const prevStatuses = prevAutoLabelStatusRef.current
     for (const s of activeSessions) {
       if (labels[s.id]) continue
-      const existing = autoLabels[s.id]
-      if (existing && !isLabelNoise(existing)) continue
       const events = sessionEvents.get(s.id) || []
+      const status = getSessionStatus(events)
+      const prevStatus = prevStatuses.get(s.id)
+      const sessionJustFinished = prevStatus === "working" && (status === "idle" || status === "done")
+      prevStatuses.set(s.id, status)
+
+      const existing = autoLabels[s.id]
+      // Update if: no label yet, or session just finished (refresh with latest)
+      if (existing && !isLabelNoise(existing) && !sessionJustFinished) continue
       const summary = getSessionLabel(events)
       if (summary && summary.length > 3) {
         const autoLabel = summary.length > 40 ? summary.slice(0, 40) + "..." : summary
@@ -511,15 +529,49 @@ export function UnifiedPanel({
   const fetchSummaryRef = useRef(fetchSummary)
   fetchSummaryRef.current = fetchSummary
 
-  // Fetch summaries when projects tab is active AND projects/sessions have loaded
+  // Fetch summaries once when projects tab first loads, then only on-demand (refresh button)
   const sessionCount = activeSessions.length
+  const summaryFetchedRef = useRef(false)
   useEffect(() => {
     if (activeTab !== "projects") return
     if (projects.length === 0) return
+    if (summaryFetchedRef.current) return
+    summaryFetchedRef.current = true
     for (const p of projects) {
       fetchSummaryRef.current(p.id)
     }
-  }, [activeTab, projects.length, sessionCount])
+  }, [activeTab, projects.length])
+
+  // Track sessions that finished while user wasn't looking, fetch summary when app resumes
+  const prevSessionStatusRef = useRef<Map<string, string>>(new Map())
+  const pendingSummaryProjects = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const prev = prevSessionStatusRef.current
+    for (const s of activeSessions) {
+      const events = sessionEvents.get(s.id) || []
+      const status = getSessionStatus(events)
+      const prevStatus = prev.get(s.id)
+      if (prevStatus === "working" && (status === "idle" || status === "done")) {
+        pendingSummaryProjects.current.add(s.projectId)
+      }
+      prev.set(s.id, status)
+    }
+  }, [activeSessions, sessionEvents])
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden) return
+      const pending = pendingSummaryProjects.current
+      if (pending.size === 0) return
+      for (const pid of pending) {
+        setSummaryCache(c => { const n = new Map(c); n.delete(pid); return n })
+        fetchSummaryRef.current(pid)
+      }
+      pending.clear()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [])
 
   // --- Voice system ---
   const voiceCleanup = () => {
@@ -1108,7 +1160,7 @@ export function UnifiedPanel({
                       </button>
                       {/* [...] button */}
                       <button
-                        onClick={() => setContextProjectId(project.id)}
+                        onClick={() => { trackProjectSwitch(project.id); setContextProjectId(project.id) }}
                         style={{
                           width: 30, height: 30, borderRadius: 8,
                           background: "transparent",
@@ -1941,20 +1993,6 @@ export function UnifiedPanel({
                         </div>
                         {/* Inline action buttons */}
                         <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-                          {/* Run Now */}
-                          <button onClick={async (e) => {
-                            e.stopPropagation()
-                            const crew = tmpl.crew!
-                            const svr = localStorage.getItem("agentrune_server") || ""
-                            const pid = automationProjectId || (projects.length > 0 ? projects[0].id : "")
-                            try { await fetch(`${svr}/api/automations/${pid}/fire`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ crew, name: tplName(tmpl) }) }) } catch { /* */ }
-                          }} style={{
-                            width: 30, height: 30, borderRadius: 8, border: "none",
-                            background: "rgba(55,172,192,0.1)", color: "#37ACC0",
-                            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
-                          }}>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                          </button>
                           {/* Schedule */}
                           <button onClick={(e) => {
                             e.stopPropagation()
@@ -2123,46 +2161,9 @@ export function UnifiedPanel({
 
                           {/* Action buttons */}
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                            {/* Run Now */}
-                            {isMultiCrew ? (
-                              <button onClick={async () => {
-                                const crew = tmpl.crew!
-                                const svr = localStorage.getItem("agentrune_server") || ""
-                                const pid = automationProjectId || (projects.length > 0 ? projects[0].id : "")
-                                try {
-                                  await fetch(`${svr}/api/automations/${pid}/fire`, {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ crew, name: tplName(tmpl) }),
-                                  })
-                                } catch { /* ignore */ }
-                                setExpandedTemplateId(null)
-                              }} style={{
-                                padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                {t("automation.runNow")}
-                              </button>
-                            ) : tmpl.prompt ? (
-                              <button onClick={() => {
-                                localStorage.setItem("agentrune_session_prefill", tmpl.prompt)
-                                setExpandedTemplateId(null)
-                                onLaunch(automationProjectId || selectedProject || (projects.length > 0 ? projects[0].id : ""), "claude")
-                              }} style={{
-                                padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                {t("automation.runNow")}
-                              </button>
-                            ) : null}
                             {/* Edit */}
-                            <button onClick={() => {
+                            <button onClick={(e) => {
+                              e.stopPropagation()
                               setExpandedTemplateId(null)
                               if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
                               const editData: any = {
@@ -2185,9 +2186,19 @@ export function UnifiedPanel({
                               {t("templates.edit")}
                             </button>
                             {/* Schedule */}
-                            <button onClick={() => {
+                            <button onClick={(e) => {
+                              e.stopPropagation()
                               setExpandedTemplateId(null)
                               if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+                              const schedData: any = {
+                                id: "__new__", name: tplName(tmpl), prompt: tmpl.prompt || "",
+                                templateId: tmpl.id, enabled: true,
+                                schedule: { type: "daily", timeOfDay: "03:00" },
+                              }
+                              if (isMultiCrew && tmpl.crew) {
+                                schedData.crew = JSON.parse(JSON.stringify(tmpl.crew))
+                              }
+                              setEditingAutomation(schedData as typeof projectAutomations[0])
                               setShowAutomation(true)
                             }} style={{
                               padding: "6px 12px", borderRadius: 8,
@@ -2973,7 +2984,7 @@ export function UnifiedPanel({
       {/* AutomationSheet */}
       <AutomationSheet
         open={showAutomation}
-        projectId={automationProjectId || ""}
+        projectId={automationProjectId || selectedProject || (projects.length > 0 ? projects[0].id : "")}
         serverUrl={localStorage.getItem("agentrune_server") || ""}
         onClose={() => { setShowAutomation(false); setEditingAutomation(null) }}
         initialEdit={editingAutomation}

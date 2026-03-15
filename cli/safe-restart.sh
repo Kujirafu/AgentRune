@@ -2,7 +2,8 @@
 # safe-restart.sh — 安全重啟 dev daemon
 # 1. 先 build CLI，確認編譯通過才重啟
 # 2. 失敗就中止，不會殺掉正在跑的 daemon
-# 3. 成功才 kill 所有舊 process（含 watchdog）、啟動新的
+# 3. 成功才 kill 所有舊 process（含 watchdog）、透過 watchdog 啟動新的
+# 4. Watchdog 會在 daemon 掛掉時自動重啟，不需要人工介入
 #
 # Usage: bash cli/safe-restart.sh
 # 從專案根目錄執行，或任何目錄（腳本會自動定位）
@@ -57,16 +58,16 @@ if [ -n "$PID2" ]; then
   sleep 2
 fi
 
-# ── Step 3: Start ──
-echo "[safe-restart] Step 3/3: Starting daemon..."
+# ── Step 3: Start via watchdog ──
+echo "[safe-restart] Step 3/3: Starting daemon via watchdog..."
 
 # Clear log for clean output (old file descriptor issues)
 > "$LOG_FILE"
 
 cd "$CLI_DIR"
-npx tsx src/bin.ts start --foreground --port "$PORT" >> "$LOG_FILE" 2>&1 &
-DAEMON_PID=$!
-echo "[safe-restart] Daemon started (PID $DAEMON_PID), waiting for health check..."
+bash "$CLI_DIR/dev-daemon.sh" >> "$LOG_FILE" 2>&1 &
+WATCHDOG_PID=$!
+echo "[safe-restart] Watchdog started (PID $WATCHDOG_PID), waiting for daemon health check..."
 
 # Wait up to 20s for daemon to respond
 for i in $(seq 1 20); do

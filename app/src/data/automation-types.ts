@@ -52,6 +52,28 @@ export interface CrewConfig {
   tokenBudget: number           // 熔斷閾值（總 token 上限）
   targetBranch?: string         // trial 分支名稱（空 = 不切分支）
   phaseDelayMinutes?: number    // 階段間延遲（預設 0）
+  phaseGate?: boolean           // 階段間人類介入關卡（預設 false）
+}
+
+// --- Phase Gate ---
+
+export type PhaseGateAction = "proceed" | "proceed_with_instructions" | "retry" | "retry_with_instructions" | "abort"
+
+export interface PhaseGateRequest {
+  automationId: string
+  automationName: string
+  completedPhase: number
+  nextPhase: number
+  phaseResults: { roleId: string; roleName: string; icon: string; color: string; status: string; outputSummary: string }[]
+  totalTokensUsed: number
+  tokenBudget: number
+  timestamp: number
+}
+
+export interface PhaseGateResponse {
+  automationId: string
+  action: PhaseGateAction
+  instructions?: string       // 補充指示（proceed_with_instructions / retry_with_instructions）
 }
 
 export interface CrewRoleResult {
@@ -60,7 +82,7 @@ export interface CrewRoleResult {
   icon: string
   color: string
   phase: number
-  status: "completed" | "failed" | "skipped" | "circuit_broken"
+  status: "completed" | "failed" | "skipped" | "circuit_broken" | "aborted"
   tokensUsed: number
   durationMs: number
   outputSummary: string
@@ -71,7 +93,7 @@ export interface CrewExecutionReport {
   automationId: string
   startedAt: number
   completedAt: number
-  status: "completed" | "failed" | "circuit_broken"
+  status: "completed" | "failed" | "circuit_broken" | "aborted"
   totalTokensUsed: number
   tokenBudget: number
   targetBranch?: string
@@ -106,6 +128,7 @@ export interface AutomationConfig {
   requireMergeApproval?: boolean
   dailyRunLimit?: number               // 0 = unlimited
   planReviewTimeoutMinutes?: number    // 0 = no timeout
+  timeoutMinutes?: number             // execution timeout per run (default 30)
 
   enabled: boolean
   createdAt: number

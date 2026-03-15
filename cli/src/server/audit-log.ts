@@ -28,6 +28,11 @@ export type AuditAction =
   | "merge_approval_requested"
   | "merge_approved"
   | "merge_denied"
+  | "reauth_required"
+  | "reauth_approved"
+  | "reauth_denied"
+  | "phase_gate_waiting"
+  | "phase_gate_response"
 
 export interface AuditEntry {
   timestamp: number

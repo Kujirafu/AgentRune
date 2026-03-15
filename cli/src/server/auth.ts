@@ -10,6 +10,7 @@ import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
 interface TokenEntry {
   deviceId: string
   createdAt: number
+  clientIp?: string // Bound IP — reject if request comes from a different IP
 }
 
 interface DeviceEntry {
@@ -81,19 +82,23 @@ loadFromDisk()
 
 // ── Session tokens (short-lived, 24h) ───────────────────────
 
-export function createSessionToken(deviceId: string): string {
+export function createSessionToken(deviceId: string, clientIp?: string): string {
   const token = randomBytes(32).toString("hex")
-  sessionTokens.set(token, { deviceId, createdAt: Date.now() })
+  sessionTokens.set(token, { deviceId, createdAt: Date.now(), clientIp })
   saveToDisk()
   return token
 }
 
-export function validateSessionToken(token: string): string | null {
+export function validateSessionToken(token: string, clientIp?: string): string | null {
   const entry = sessionTokens.get(token)
   if (!entry) return null
   if (Date.now() - entry.createdAt > SESSION_EXPIRY) {
     sessionTokens.delete(token)
     saveToDisk()
+    return null
+  }
+  // IP binding: if token was created with a bound IP, reject mismatches
+  if (entry.clientIp && clientIp && entry.clientIp !== clientIp) {
     return null
   }
   return entry.deviceId

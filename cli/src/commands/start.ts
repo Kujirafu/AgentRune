@@ -50,9 +50,9 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
 
   if (opts.foreground) {
     // Run server in foreground with self-healing
-    setupSelfHealing()
     const { createServer } = await import("../server/ws-server.js")
-    createServer(port)
+    const { automationManager } = createServer(port)
+    setupSelfHealing(automationManager)
     return
   }
 
@@ -115,7 +115,7 @@ export async function startCommand(opts: { port?: string; foreground?: boolean }
 }
 
 /** Self-healing: catch uncaught errors so the server process doesn't crash */
-function setupSelfHealing() {
+function setupSelfHealing(automationManager?: import("../server/automation-manager.js").AutomationManager) {
   process.on("uncaughtException", (err) => {
     log.error(`[Self-heal] Uncaught exception: ${err.message}`)
     if (err.stack) log.dim(err.stack)
@@ -130,10 +130,15 @@ function setupSelfHealing() {
   process.on("exit", (code) => {
     log.error(`[Self-heal] Process exiting with code ${code} (memory: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB)`)
   })
-  process.on("SIGTERM", () => {
-    log.warn(`[Self-heal] Received SIGTERM`)
-  })
-  process.on("SIGINT", () => {
-    log.warn(`[Self-heal] Received SIGINT`)
-  })
+
+  // Graceful shutdown: save automation state before exit
+  const shutdown = async (signal: string) => {
+    log.warn(`[Self-heal] Received ${signal}`)
+    if (automationManager) {
+      await automationManager.gracefulShutdown()
+    }
+    process.exit(0)
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"))
+  process.on("SIGINT", () => shutdown("SIGINT"))
 }

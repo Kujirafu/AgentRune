@@ -9,6 +9,7 @@
 
 import type { SkillManifest } from "./skill-manifest.js"
 import { log } from "../shared/logger.js"
+import { type AuthorityMap, hasPermission, violationTypeToPermissionKey } from "./authority-map.js"
 
 // ── Types ──
 
@@ -29,6 +30,12 @@ export interface MonitorConfig {
   onViolation?: (violation: MonitorViolation) => void
   /** Callback to kill the PTY session */
   onHalt?: (reason: string) => void
+  /** Authority map for permission-based enforcement (resumed sessions) */
+  authorityMap?: AuthorityMap
+  /** Is this a resumed session? If true, critical violations with expired/inherited permissions trigger halt */
+  isResumedSession?: boolean
+  /** Callback when a reauth is needed — violation that requires user re-authorization */
+  onReauthRequired?: (violation: MonitorViolation, permissionKey: string) => void
 }
 
 export interface MonitorStats {
@@ -166,6 +173,19 @@ export class SkillMonitor {
         // Notify callback
         if (this.config.onViolation) {
           try { this.config.onViolation(violation) } catch {}
+        }
+
+        // Resumed session enforcement: critical violation + no valid permission → halt for reauth
+        if (pattern.severity === "critical" && this.config.isResumedSession && this.config.authorityMap) {
+          const permKey = violationTypeToPermissionKey(pattern.type)
+          if (!hasPermission(this.config.authorityMap, permKey)) {
+            log.warn(`[skill-monitor] Resumed session: critical violation "${permKey}" — no valid permission, requesting reauth`)
+            if (this.config.onReauthRequired) {
+              try { this.config.onReauthRequired(violation, permKey) } catch {}
+            }
+            this.halt(`Reauth required: ${violation.type} violation — ${violation.description}`)
+            return
+          }
         }
 
         // Auto-halt on critical violations (if enabled) or too many violations

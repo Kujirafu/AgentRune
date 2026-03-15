@@ -12,6 +12,13 @@ vi.mock("../lib/storage", () => ({
   getApiBase: () => "",
 }))
 
+// Mock analytics
+vi.mock("../lib/analytics", () => ({
+  trackPrdAction: vi.fn(),
+  trackPlanCreate: vi.fn(),
+  trackTabSwitch: vi.fn(),
+}))
+
 describe("PlanPanel", () => {
   beforeEach(() => {
     vi.mocked(global.fetch).mockReset()
@@ -118,7 +125,7 @@ describe("PlanPanel", () => {
     const user = userEvent.setup()
 
     await waitFor(() => {
-      expect(screen.getByText("PRD")).toBeInTheDocument()
+      expect(screen.getByText("Plans")).toBeInTheDocument()
     })
 
     // Click Tasks tab
@@ -131,75 +138,66 @@ describe("PlanPanel", () => {
     expect(screen.getByTestId("standards-content")).toBeInTheDocument()
 
     // Back to PRD
-    await user.click(screen.getByText("PRD"))
+    await user.click(screen.getByText("Plans"))
     expect(screen.getByText(/Plan before you build|先規劃/)).toBeInTheDocument()
   })
 
   // ── Tasks Tab ──
 
-  it("shows progressive empty state in Tasks tab", async () => {
+  it("shows empty state in Tasks tab", async () => {
     renderWithProviders(<PlanPanel projectId="test-project" />)
     const user = userEvent.setup()
 
     await waitFor(() => {
-      expect(screen.getByText("PRD")).toBeInTheDocument()
+      expect(screen.getByText("Plans")).toBeInTheDocument()
     })
 
     await user.click(screen.getByText(/^Tasks/))
 
-    // Should show 2 action buttons, not a textarea
-    expect(screen.getByText(/AI Breakdown|AI 拆解/)).toBeInTheDocument()
-    expect(screen.getByText(/Import JSON|匯入 JSON/)).toBeInTheDocument()
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument()
+    // Should show empty state message
+    expect(screen.getByText(/No tasks yet|還沒有/)).toBeInTheDocument()
   })
 
-  it("clicking AI Breakdown reveals textarea", async () => {
+  it("Tasks tab shows instruction text", async () => {
     renderWithProviders(<PlanPanel projectId="test-project" />)
     const user = userEvent.setup()
 
     await waitFor(() => {
-      expect(screen.getByText("PRD")).toBeInTheDocument()
+      expect(screen.getByText("Plans")).toBeInTheDocument()
     })
 
     await user.click(screen.getByText(/^Tasks/))
-    await user.click(screen.getByText(/AI Breakdown|AI 拆解/))
 
-    expect(screen.getByRole("textbox")).toBeInTheDocument()
-    expect(screen.getByText(/Generate Tasks|產生任務/)).toBeInTheDocument()
+    expect(screen.getByText(/task button|任務按鈕/)).toBeInTheDocument()
   })
 
   // ── PRD with data ──
 
-  it("renders PRD content when data exists", async () => {
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({
-        projectId: "test",
-        requirement: "test",
-        tasks: [
-          { id: 1, title: "Task One", status: "done", description: "desc" },
-          { id: 2, title: "Task Two", status: "pending", description: "desc" },
-        ],
-        prd: {
-          goal: "Build a test feature",
-          decisions: [{ question: "Framework?", answer: "React" }],
-          approaches: [],
-          scope: { included: ["Unit tests"], excluded: ["E2E"] },
-        },
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      }),
-    } as Response)
+  it("renders PRD list when data exists", async () => {
+    // Mount triggers: fetchPrdList + fetchAllTasks (2 parallel fetches)
+    const prdListResponse = [
+      { id: "prd-1", title: "Build a test feature", priority: "p1", status: "active", createdAt: Date.now() },
+    ]
+
+    vi.mocked(global.fetch).mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes("/api/prd/")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(prdListResponse),
+        } as Response)
+      }
+      // tasks / other fetches
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([]),
+      } as Response)
+    })
 
     renderWithProviders(<PlanPanel projectId="test-project" />)
 
     await waitFor(() => {
       expect(screen.getByText("Build a test feature")).toBeInTheDocument()
     })
-
-    expect(screen.getByText("1/2")).toBeInTheDocument() // progress
-    expect(screen.getByText("Q: Framework?")).toBeInTheDocument()
-    expect(screen.getByText("A: React")).toBeInTheDocument()
-    expect(screen.getByText("Unit tests")).toBeInTheDocument()
   })
 })

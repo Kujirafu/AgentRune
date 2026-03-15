@@ -1,7 +1,9 @@
 // server/automation-manager.ts
 // Manages scheduled automations — runs agent commands on intervals/cron/events
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream, chmodSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream, chmodSync, statSync, renameSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
+import { randomBytes } from "node:crypto"
+import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
 import { spawn, execSync, execFileSync, type ChildProcess } from "node:child_process"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
@@ -9,7 +11,7 @@ import { VaultSync } from "./vault-sync.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { type SkillManifest, createDefaultManifest, createManifestForLevel, buildSandboxInstructions, scanPromptForConflicts, type PromptScanResult } from "./skill-manifest.js"
 import { buildPlanningConstraints, formatConstraintsForPrompt } from "./planning-constraints.js"
-import { createFromTrustProfile, inheritForResume, hasPermission, type AuthorityMap } from "./authority-map.js"
+import { createFromTrustProfile, inheritForResume, hasPermission, grantPermission, violationTypeToPermissionKey, type AuthorityMap, type PermissionSeverity } from "./authority-map.js"
 import { auditLog, pruneAuditLogs } from "./audit-log.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
@@ -23,7 +25,7 @@ function killProcessTree(proc: ChildProcess): void {
   try {
     if (process.platform === "win32") {
       // taskkill /T kills child tree; windowsHide prevents CMD flash
-      execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore", windowsHide: true })
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { stdio: "ignore", windowsHide: true })
     } else {
       // Kill process group (negative PID) — works because detached=true on POSIX
       process.kill(-proc.pid, "SIGTERM")
@@ -31,6 +33,74 @@ function killProcessTree(proc: ChildProcess): void {
   } catch {
     // Fallback: kill just the process
     try { proc.kill("SIGTERM") } catch {}
+  }
+}
+
+/** Extract activity log from Claude JSONL session file (fallback when stdout is empty on Windows pipe buffering) */
+function extractJSONLActivity(projectCwd: string, startedAt: number): string | null {
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || ""
+    const slug = projectCwd.replace(/[^a-zA-Z0-9-]/g, "-")
+    const claudeProjectDir = join(home, ".claude", "projects", slug)
+    if (!existsSync(claudeProjectDir)) return null
+
+    // Find JSONL files modified after startedAt (5s tolerance for startup delay)
+    const files = readdirSync(claudeProjectDir)
+      .filter(f => f.endsWith(".jsonl"))
+      .map(f => {
+        const fullPath = join(claudeProjectDir, f)
+        const stat = statSync(fullPath)
+        return { path: fullPath, mtime: stat.mtimeMs }
+      })
+      .filter(f => f.mtime >= startedAt - 5000)
+      .sort((a, b) => b.mtime - a.mtime)
+
+    if (files.length === 0) return null
+
+    const content = readFileSync(files[0].path, "utf-8")
+    const lines = content.split("\n").filter(Boolean)
+    const activities: string[] = []
+    let totalOutputTokens = 0
+    let cost: number | null = null
+
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line)
+        if (obj.type === "assistant") {
+          const blocks = obj.message?.content || []
+          const usage = obj.message?.usage
+          if (usage?.output_tokens) totalOutputTokens += usage.output_tokens
+
+          for (const c of blocks) {
+            if (c.type === "text" && c.text) {
+              activities.push(`[text] ${c.text.slice(0, 200)}`)
+            } else if (c.type === "tool_use") {
+              const inp = c.input || {}
+              switch (c.name) {
+                case "Read": activities.push(`[Read] ${inp.file_path || "?"}`); break
+                case "Edit": activities.push(`[Edit] ${inp.file_path || "?"}`); break
+                case "Write": activities.push(`[Write] ${inp.file_path || "?"}`); break
+                case "Bash": activities.push(`[Bash] ${(inp.command || "?").slice(0, 100)}`); break
+                case "Glob": activities.push(`[Glob] ${inp.pattern || "?"}`); break
+                case "Grep": activities.push(`[Grep] ${inp.pattern || "?"}`); break
+                default: activities.push(`[${c.name}]`); break
+              }
+            }
+          }
+        } else if (obj.type === "result") {
+          cost = obj.costUSD ?? null
+        }
+      } catch {}
+    }
+
+    if (activities.length === 0) return null
+
+    const header = `--- Activity Log (${activities.length} actions, ${totalOutputTokens} output tokens${cost != null ? `, $${cost.toFixed(3)}` : ""}) ---\n`
+    const body = activities.join("\n")
+    const maxLen = 50_000
+    return header + (body.length > maxLen ? body.slice(-maxLen) : body)
+  } catch {
+    return null
   }
 }
 
@@ -95,6 +165,26 @@ export interface CrewConfig {
   tokenBudget: number
   targetBranch?: string
   phaseDelayMinutes?: number
+  phaseGate?: boolean
+}
+
+export type PhaseGateAction = "proceed" | "proceed_with_instructions" | "retry" | "retry_with_instructions" | "abort"
+
+export interface PhaseGateRequest {
+  automationId: string
+  automationName: string
+  completedPhase: number
+  nextPhase: number
+  phaseResults: { roleId: string; roleName: string; icon: string; color: string; status: string; outputSummary: string }[]
+  totalTokensUsed: number
+  tokenBudget: number
+  timestamp: number
+}
+
+export interface PhaseGateResponse {
+  automationId: string
+  action: PhaseGateAction
+  instructions?: string
 }
 
 export interface CrewRoleResult {
@@ -103,7 +193,7 @@ export interface CrewRoleResult {
   icon: string
   color: string
   phase: number
-  status: "completed" | "failed" | "skipped" | "circuit_broken"
+  status: "completed" | "failed" | "skipped" | "circuit_broken" | "aborted"
   tokensUsed: number
   durationMs: number
   outputSummary: string
@@ -114,7 +204,7 @@ export interface CrewExecutionReport {
   automationId: string
   startedAt: number
   completedAt: number
-  status: "completed" | "failed" | "circuit_broken"
+  status: "completed" | "failed" | "circuit_broken" | "aborted"
   totalTokensUsed: number
   tokenBudget: number
   targetBranch?: string
@@ -141,11 +231,12 @@ export interface AutomationConfig {
   sandboxLevel?: SandboxLevel
   dailyRunLimit?: number             // 0 = unlimited
   planReviewTimeoutMinutes?: number  // 0 = no timeout
+  timeoutMinutes?: number            // execution timeout per run (default 30)
   manifest?: SkillManifest   // resource permissions declared by this skill
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
   // Crew execution
   crew?: CrewConfig
 }
@@ -158,7 +249,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken" | "interrupted" | "pending_reauth"
   riskReport?: SkillRiskReport
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
   crewReport?: CrewExecutionReport  // set for crew automation runs
@@ -219,7 +310,66 @@ function writePromptFile(storageDir: string, automationId: string, prompt: strin
   return filePath
 }
 
+// --- Atomic write + save queue ---
+
+/** Write to a temp file then rename — prevents partial writes on crash/kill.
+ *  Encrypts with AES-256-GCM (same scheme as vault keys and auth tokens). */
+function writeAtomic(filePath: string, data: string): void {
+  const tmpPath = `${filePath}.${randomBytes(4).toString("hex")}.tmp`
+  try {
+    writeEncryptedFile(tmpPath, data)
+    renameSync(tmpPath, filePath)
+  } catch (err) {
+    // Clean up temp file on failure
+    try { unlinkSync(tmpPath) } catch {}
+    throw err
+  }
+}
+
+/** Read a file, decrypting if encrypted. Auto-migrates plaintext files. */
+function readAtomicEncrypted(filePath: string): string | null {
+  if (!existsSync(filePath)) return null
+  const content = readEncryptedFile(filePath)
+  if (content === null) return null
+  // Auto-migrate: if file was plaintext, re-encrypt on read
+  const raw = readFileSync(filePath, "utf-8")
+  if (!isEncrypted(raw)) {
+    writeEncryptedFile(filePath, content)
+  }
+  return content
+}
+
+/** Promise queue that serializes saveToDisk calls — prevents concurrent read-modify-write */
+class SaveQueue {
+  private queue: Promise<void> = Promise.resolve()
+
+  enqueue(fn: () => void): void {
+    this.queue = this.queue.then(() => {
+      try { fn() } catch (err) {
+        log.error(`[SaveQueue] ${err instanceof Error ? err.message : err}`)
+      }
+    })
+  }
+
+  /** Wait for all pending saves to complete (used in shutdown) */
+  async flush(): Promise<void> {
+    await this.queue
+  }
+}
+
 // --- Manager ---
+
+/** Context saved when an automation is killed for reauth */
+export interface PendingReauth {
+  automationId: string
+  automationName: string
+  sessionId: string
+  violationType: string
+  violationDescription: string
+  permissionKey: string
+  authorityMap: AuthorityMap
+  killedAt: number
+}
 
 export type AutomationEventCallback = (event:
   | { type: "automation_started"; automationId: string; automationName: string; isCrew: boolean }
@@ -228,6 +378,8 @@ export type AutomationEventCallback = (event:
   | { type: "bypass_confirmation_required"; automationId: string; automationName: string }
   | { type: "daily_limit_reached"; automationId: string; automationName: string; limit: number; todayCount: number }
   | { type: "plan_review_required"; automationId: string; automationName: string; timeoutMinutes: number }
+  | { type: "reauth_required"; automationId: string; automationName: string; permissionKey: string; violationType: string; violationDescription: string }
+  | { type: "phase_gate_waiting"; gate: PhaseGateRequest }
 ) => void
 
 // --- Rate limiting ---
@@ -247,6 +399,7 @@ export class AutomationManager {
   private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
   private runningProcesses = new Map<string, ChildProcess>()  // for killing running automations
   private results = new Map<string, AutomationResult[]>()
+  private _resultsLoadFailed = new Set<string>()
   private running = new Set<string>()  // prevent duplicate concurrent executions
   private dailyExecCount = new Map<string, number>()  // "YYYY-MM-DD" → count
   private storageDir: string
@@ -260,16 +413,27 @@ export class AutomationManager {
   private pendingConfirmations = new Map<string, { resolve: (action: "approve" | "approve_and_trust" | "deny") => void; timer: NodeJS.Timeout }>()
   /** Pending worktree merges: automationId → { worktree info for deferred merge } */
   private pendingMerges = new Map<string, { projectCwd: string; worktreePath: string; branch: string; sessionId: string }>()
+  private saveQueue = new SaveQueue()
+  private shuttingDown = false
+  /** Pending reauth: automationId → context for user decision */
+  private pendingReauths = new Map<string, PendingReauth>()
+  /** Authority maps for running automations (persisted across reauth cycles) */
+  private authorityMaps = new Map<string, AuthorityMap>()
+  /** Pending phase gates: automationId → { resolve, request } */
+  private pendingPhaseGates = new Map<string, { resolve: (response: PhaseGateResponse) => void; request: PhaseGateRequest }>()
 
   private static MAX_RESULTS_PER_AUTOMATION = 20
   private static MAX_OUTPUT_BYTES = 50_000
 
-  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits }) {
+  private schedulingEnabled: boolean
+
+  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits; schedulingEnabled?: boolean }) {
     this.ptyManager = ptyManager
     this.projects = projects
     this.onEvent = onEvent
     this.vaultPath = opts?.vaultPath
     this.limits = opts?.limits || FREE_LIMITS
+    this.schedulingEnabled = opts?.schedulingEnabled !== false // default true
     this.whitelist = new SkillWhitelist()
     this.storageDir = join(getConfigDir(), "automations")
     mkdirSync(this.storageDir, { recursive: true })
@@ -288,6 +452,84 @@ export class AutomationManager {
     this.pendingConfirmations.delete(automationId)
     pending.resolve(action)
     return true
+  }
+
+  /** Resolve a pending phase gate from the client */
+  resolvePhaseGate(automationId: string, response: PhaseGateResponse): boolean {
+    const pending = this.pendingPhaseGates.get(automationId)
+    if (!pending) return false
+    this.pendingPhaseGates.delete(automationId)
+    pending.resolve(response)
+    return true
+  }
+
+  /** List all pending phase gates (for WS reconnection state recovery) */
+  listPendingPhaseGates(): PhaseGateRequest[] {
+    return [...this.pendingPhaseGates.values()].map(p => p.request)
+  }
+
+  /** Get pending reauth requests */
+  listPendingReauths(): PendingReauth[] {
+    return [...this.pendingReauths.values()]
+  }
+
+  /** Get a specific pending reauth */
+  getPendingReauth(automationId: string): PendingReauth | undefined {
+    return this.pendingReauths.get(automationId)
+  }
+
+  /**
+   * Resolve a pending reauth: approve (with optional noExpiry) or deny.
+   * Approve → grant permission + re-trigger automation.
+   * Deny → mark automation as blocked, no re-trigger.
+   */
+  async resolveReauth(automationId: string, action: "approve" | "deny", opts?: { noExpiry?: boolean }): Promise<{ success: boolean; message: string }> {
+    const pending = this.pendingReauths.get(automationId)
+    if (!pending) return { success: false, message: "No pending reauth found" }
+
+    this.pendingReauths.delete(automationId)
+
+    if (action === "deny") {
+      // Mark automation status as blocked
+      const auto = this.automations.get(automationId)
+      if (auto) {
+        auto.lastRunStatus = "failed"
+        this.saveToDisk()
+      }
+      // Clean up authority map
+      this.authorityMaps.delete(automationId)
+      this.running.delete(automationId)
+
+      auditLog("reauth_denied", { permissionKey: pending.permissionKey }, { automationId, automationName: pending.automationName })
+      log.info(`[Automation] Reauth denied for "${pending.automationName}": ${pending.permissionKey}`)
+      return { success: true, message: "Reauth denied — automation blocked" }
+    }
+
+    // Approve: grant the permission on the authority map
+    const severity: PermissionSeverity = pending.violationType === "wallet" || pending.violationType === "shell" ? "critical" : "warning"
+    grantPermission(pending.authorityMap, pending.permissionKey, {
+      noExpiry: opts?.noExpiry || false,
+      severity,
+      reason: `Reauth approved by user at ${new Date().toISOString()}`,
+    })
+    // Store updated authority map for next execution
+    this.authorityMaps.set(automationId, pending.authorityMap)
+    this.running.delete(automationId)
+
+    auditLog("reauth_approved", {
+      permissionKey: pending.permissionKey,
+      noExpiry: opts?.noExpiry || false,
+      severity,
+    }, { automationId, automationName: pending.automationName })
+    log.info(`[Automation] Reauth approved for "${pending.automationName}": ${pending.permissionKey} (noExpiry=${opts?.noExpiry || false})`)
+
+    // Re-trigger the automation
+    try {
+      await this.trigger(automationId)
+      return { success: true, message: "Reauth approved — automation re-triggered" }
+    } catch (err) {
+      return { success: false, message: `Reauth approved but re-trigger failed: ${err instanceof Error ? err.message : err}` }
+    }
   }
 
   /** Approve a pending worktree merge (when requireMergeApproval is true) */
@@ -375,7 +617,7 @@ export class AutomationManager {
     }
     this.automations.set(id, automation)
     this.results.set(id, [])
-    this.saveToDisk()
+    this.persistFullState()
 
     if (automation.enabled) {
       this.startSchedule(automation)
@@ -387,7 +629,7 @@ export class AutomationManager {
     this.stopSchedule(id)
     const deleted = this.automations.delete(id)
     this.results.delete(id)
-    if (deleted) this.saveToDisk()
+    if (deleted) this.persistFullState()
     return deleted
   }
 
@@ -419,7 +661,7 @@ export class AutomationManager {
     if (!auto) return false
     auto.enabled = true
     this.startSchedule(auto)
-    this.saveToDisk()
+    this.persistFullState()
     return true
   }
 
@@ -428,11 +670,11 @@ export class AutomationManager {
     if (!auto) return false
     auto.enabled = false
     this.stopSchedule(id)
-    this.saveToDisk()
+    this.persistFullState()
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "timeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -481,7 +723,7 @@ export class AutomationManager {
       if (auto.enabled) this.startSchedule(auto)
     }
 
-    this.saveToDisk()
+    this.persistFullState()
     return { ...auto, nextRunAt: this.nextRunAtMap.get(id) }
   }
 
@@ -502,6 +744,7 @@ export class AutomationManager {
   // --- Scheduling ---
 
   private startSchedule(auto: AutomationConfig) {
+    if (!this.schedulingEnabled) return // release daemon does not schedule
     this.stopSchedule(auto.id) // clear any existing
 
     if (auto.schedule.type === "interval") {
@@ -652,6 +895,12 @@ export class AutomationManager {
   killAutomation(id: string): boolean {
     const proc = this.runningProcesses.get(id)
     if (!proc || proc.killed) return false
+    // Resolve any pending phase gate to prevent deadlock
+    const pendingGate = this.pendingPhaseGates.get(id)
+    if (pendingGate) {
+      pendingGate.resolve({ automationId: id, action: "abort" })
+      this.pendingPhaseGates.delete(id)
+    }
     killProcessTree(proc)
     // Force kill after 5s if still running
     setTimeout(() => { if (!proc.killed) killProcessTree(proc) }, 5000)
@@ -660,6 +909,7 @@ export class AutomationManager {
 
   /** Manually trigger an automation (ignores schedule, respects rate limits) */
   async trigger(id: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.schedulingEnabled) return { ok: false, error: "Automation execution disabled on this daemon" }
     const auto = this.automations.get(id)
     if (!auto) return { ok: false, error: "Automation not found" }
 
@@ -679,6 +929,7 @@ export class AutomationManager {
 
   /** Fire-and-forget: create a temp automation with crew config and execute immediately */
   async fireAndForget(projectId: string, name: string, crew: CrewConfig, sessionContext?: string): Promise<string> {
+    if (!this.schedulingEnabled) throw new Error("Automation execution disabled on this daemon (release daemon)");
     const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const auto: AutomationConfig = {
       id,
@@ -719,6 +970,7 @@ export class AutomationManager {
 
   /** Execute an automation: open a PTY, launch agent, collect output */
   private async executeAutomation(id: string, manualTrigger = false) {
+    if (!this.schedulingEnabled) return // release daemon does not execute automations
     const auto = this.automations.get(id)
     if (!auto || (!auto.enabled && !manualTrigger)) return
 
@@ -728,6 +980,8 @@ export class AutomationManager {
       return
     }
     this.running.add(id)
+    auto.lastRunStatus = "running"
+    this.saveToDisk()
 
     auditLog("automation_started", { trustProfile: auto.trustProfile, sandboxLevel: auto.sandboxLevel, manualTrigger }, { automationId: id, automationName: auto.name })
 
@@ -893,22 +1147,64 @@ export class AutomationManager {
       const level = auto.sandboxLevel || "strict"
       const manifest = auto.manifest || createManifestForLevel(auto.templateId || auto.id, level)
 
-      // Runtime Authority Map — checkpoint permissions during execution
-      const runtimeAuthority = createFromTrustProfile({
+      // Runtime Authority Map — reuse from previous reauth cycle or create fresh
+      const isResumedExec = this.authorityMaps.has(id)
+      const runtimeAuthority = this.authorityMaps.get(id) || createFromTrustProfile({
         sessionId: `exec_${id}_${startedAt}`,
         automationId: id,
         sandboxLevel: auto.sandboxLevel,
         requirePlanReview: auto.requirePlanReview,
         requireMergeApproval: auto.requireMergeApproval,
       })
+      // Store authority map for potential reauth cycles
+      this.authorityMaps.set(id, runtimeAuthority)
 
       const monitor = new SkillMonitor({
         manifest,
         projectCwd: execProject.cwd,
         autoHalt: riskReport.score >= 30,
+        authorityMap: runtimeAuthority,
+        isResumedSession: isResumedExec,
+        onReauthRequired: (violation, permissionKey) => {
+          // Kill process + save context for reauth
+          const proc = this.runningProcesses.get(id)
+          if (proc && !proc.killed) killProcessTree(proc)
+
+          const reauth: PendingReauth = {
+            automationId: id,
+            automationName: auto.name,
+            sessionId: `exec_${id}_${startedAt}`,
+            violationType: violation.type,
+            violationDescription: violation.description,
+            permissionKey,
+            authorityMap: runtimeAuthority,
+            killedAt: Date.now(),
+          }
+          this.pendingReauths.set(id, reauth)
+          auditLog("reauth_required", {
+            permissionKey, violationType: violation.type,
+            violationDescription: violation.description,
+          }, { automationId: id, automationName: auto.name })
+          log.warn(`[Automation] Reauth required for "${auto.name}": ${permissionKey} — waiting for user`)
+
+          // Mark status as pending reauth
+          auto.lastRunStatus = "pending_reauth"
+          this.saveToDisk()
+
+          if (this.onEvent) {
+            this.onEvent({
+              type: "reauth_required",
+              automationId: id,
+              automationName: auto.name,
+              permissionKey,
+              violationType: violation.type,
+              violationDescription: violation.description,
+            })
+          }
+        },
         onViolation: (v) => {
           // Runtime authority checkpoint: check if violated permission is denied
-          const permKey = v.type === "filesystem" ? "filesystem.write" : v.type === "network" ? "network" : v.type === "shell" ? "shell.unrestricted" : v.type
+          const permKey = violationTypeToPermissionKey(v.type)
           const permitted = hasPermission(runtimeAuthority, permKey)
           auditLog("runtime_violation", {
             type: v.type, description: v.description, matchedText: v.matchedText,
@@ -940,7 +1236,7 @@ export class AutomationManager {
       })
 
       // Spawn agent process directly — no PTY, clean stdin/stdout pipe
-      const TIMEOUT_MS = 10 * 60 * 1000
+      const TIMEOUT_MS = (auto.timeoutMinutes || 30) * 60 * 1000
       const env = { ...process.env }
       // Remove Claude Code session markers to prevent "nested session" detection
       delete (env as any).CLAUDECODE
@@ -1018,6 +1314,11 @@ export class AutomationManager {
 
       monitor.flush()
       output = result.output
+      // Fallback: if stdout was empty (Windows pipe buffering), extract activity from JSONL
+      if (!output || output.length === 0) {
+        const jsonlActivity = extractJSONLActivity(execProject.cwd, startedAt)
+        if (jsonlActivity) output = jsonlActivity
+      }
       if (output.length > AutomationManager.MAX_OUTPUT_BYTES) {
         output = output.slice(-AutomationManager.MAX_OUTPUT_BYTES)
       }
@@ -1217,6 +1518,7 @@ export class AutomationManager {
       }
 
       // Build handoff summary for next phase
+      const handoffLengthBeforePhase = handoffSummary.length
       handoffSummary += `\n\n--- Phase ${phaseNum} Results ---\n${phaseSummaries.join("\n\n")}`
 
       // Phase delay
@@ -1225,10 +1527,107 @@ export class AutomationManager {
         log.info(`[Crew] Phase delay: waiting ${crew.phaseDelayMinutes}m before next phase`)
         await new Promise(resolve => setTimeout(resolve, delayMs))
       }
+
+      // Phase Gate: pause for human decision between phases
+      const phaseIdx = sortedPhases.indexOf(phaseNum)
+      const hasNextPhase = phaseIdx < sortedPhases.length - 1
+      if (crew.phaseGate && hasNextPhase && !circuitBroken) {
+        const nextPhaseNum = sortedPhases[phaseIdx + 1]
+        const gateRequest: PhaseGateRequest = {
+          automationId: id,
+          automationName: auto.name,
+          completedPhase: phaseNum,
+          nextPhase: nextPhaseNum,
+          phaseResults: roleResults.map(r => ({
+            roleId: r.roleId, roleName: r.roleName, icon: r.icon,
+            color: r.color, status: r.status, outputSummary: r.outputSummary,
+          })),
+          totalTokensUsed: report.totalTokensUsed,
+          tokenBudget: crew.tokenBudget,
+          timestamp: Date.now(),
+        }
+
+        log.info(`[Crew] Phase gate: waiting for human decision after phase ${phaseNum}`)
+        auditLog("phase_gate_waiting", { completedPhase: phaseNum, nextPhase: nextPhaseNum }, { automationId: id, automationName: auto.name })
+
+        // Broadcast gate event + wait for response (infinite wait)
+        if (this.onEvent) {
+          this.onEvent({ type: "phase_gate_waiting", gate: gateRequest })
+        }
+
+        const gateResponse = await new Promise<PhaseGateResponse>((resolve) => {
+          this.pendingPhaseGates.set(id, { resolve, request: gateRequest })
+        })
+
+        log.info(`[Crew] Phase gate response: ${gateResponse.action}${gateResponse.instructions ? ` (with instructions)` : ""}`)
+        auditLog("phase_gate_response", { action: gateResponse.action, hasInstructions: !!gateResponse.instructions }, { automationId: id, automationName: auto.name })
+
+        if (gateResponse.action === "abort") {
+          // Mark remaining phases as aborted
+          const remainingPhases = sortedPhases.filter(p => p > phaseNum)
+          for (const p of remainingPhases) {
+            const remainingRoles = phaseMap.get(p)!
+            report.phases.push({
+              phase: p,
+              roles: remainingRoles.map(r => ({
+                roleId: r.id, roleName: r.nameKey, icon: r.icon, color: r.color,
+                phase: p, status: "aborted" as const, tokensUsed: 0, durationMs: 0,
+                outputSummary: "Aborted by user at phase gate",
+              })),
+            })
+          }
+          report.status = "aborted"
+          break
+        } else if (gateResponse.action === "proceed_with_instructions") {
+          // Append user instructions to handoff for next phase
+          if (gateResponse.instructions) {
+            handoffSummary += `\n\n--- Human Instructions (after Phase ${phaseNum}) ---\n${gateResponse.instructions}`
+          }
+        } else if (gateResponse.action === "retry" || gateResponse.action === "retry_with_instructions") {
+          // Re-execute current phase: remove last phase result, restore handoff to pre-phase state
+          report.phases.pop()
+          handoffSummary = handoffSummary.slice(0, handoffLengthBeforePhase)
+
+          // Add retry instructions if provided
+          let retryHandoff = handoffSummary
+          if (gateResponse.action === "retry_with_instructions" && gateResponse.instructions) {
+            retryHandoff += `\n\n--- Human Instructions (retry Phase ${phaseNum}) ---\n${gateResponse.instructions}`
+          }
+
+          log.info(`[Crew] Retrying phase ${phaseNum}`)
+          const retryResults = await Promise.all(
+            roles.map(role => this.executeCrewRole(auto, role, execCwd, retryHandoff))
+          )
+
+          // Replace phase result
+          const retryPhaseResult = { phase: phaseNum, roles: retryResults }
+          report.phases.push(retryPhaseResult)
+
+          // Recalculate tokens for retry
+          let retryPhaseSummaries: string[] = []
+          for (const rr of retryResults) {
+            report.totalTokensUsed += rr.tokensUsed
+            if (rr.status === "completed") {
+              retryPhaseSummaries.push(`[${rr.roleName}]: ${rr.outputSummary}`)
+            } else if (rr.status === "failed") {
+              retryPhaseSummaries.push(`[${rr.roleName}]: FAILED — ${rr.outputSummary}`)
+            }
+            if (report.totalTokensUsed >= crew.tokenBudget) {
+              circuitBroken = true
+            }
+          }
+
+          // Rebuild handoff with retry results
+          handoffSummary += `\n\n--- Phase ${phaseNum} Results (retry) ---\n${retryPhaseSummaries.join("\n\n")}`
+        }
+        // "proceed" → continue normally, no changes needed
+      }
     }
 
     report.completedAt = Date.now()
-    report.status = circuitBroken ? "circuit_broken" : report.phases.some(p => p.roles.every(r => r.status === "failed")) ? "failed" : "completed"
+    if (!report.status || report.status === "completed") {
+      report.status = circuitBroken ? "circuit_broken" : report.phases.some(p => p.roles.every(r => r.status === "failed")) ? "failed" : "completed"
+    }
 
     // Store crew report
     this.storeCrewReport(id, report)
@@ -1247,7 +1646,7 @@ export class AutomationManager {
       exitCode: report.status === "completed" ? 0 : 1,
       output: output.length > AutomationManager.MAX_OUTPUT_BYTES ? output.slice(-AutomationManager.MAX_OUTPUT_BYTES) : output,
       summary: `Crew: ${report.status} — ${crew.roles.length} roles, ${report.totalTokensUsed}/${crew.tokenBudget} tokens`,
-      status: report.status === "circuit_broken" ? "circuit_broken" : report.status === "failed" ? "failed" : "success",
+      status: report.status === "aborted" ? "failed" : report.status === "circuit_broken" ? "circuit_broken" : report.status === "failed" ? "failed" : "success",
       crewReport: report,
     }
 
@@ -1329,7 +1728,7 @@ export class AutomationManager {
     }
 
     // Spawn process
-    const ROLE_TIMEOUT_MS = 10 * 60 * 1000
+    const ROLE_TIMEOUT_MS = (auto.timeoutMinutes || 30) * 60 * 1000
     const env = { ...process.env }
     delete (env as any).CLAUDECODE
     delete (env as any).CLAUDE_CODE_ENTRYPOINT
@@ -1388,7 +1787,13 @@ export class AutomationManager {
       })
 
       const roleDuration = Date.now() - roleStart
-      const summary = AutomationManager.extractSummary(result.output, result.timedOut ? "timeout" : "success")
+      // Fallback: if stdout was empty, extract activity from JSONL
+      let roleOutput = result.output
+      if (!roleOutput || roleOutput.length === 0) {
+        const jsonlActivity = extractJSONLActivity(cwd, roleStart)
+        if (jsonlActivity) roleOutput = jsonlActivity
+      }
+      const summary = AutomationManager.extractSummary(roleOutput, result.timedOut ? "timeout" : "success")
 
       return {
         roleId: role.id,
@@ -1400,7 +1805,7 @@ export class AutomationManager {
         tokensUsed: role.estimatedTokens || 2000,
         durationMs: roleDuration,
         outputSummary: summary,
-        outputFull: result.output.length > AutomationManager.MAX_OUTPUT_BYTES ? result.output.slice(-AutomationManager.MAX_OUTPUT_BYTES) : result.output,
+        outputFull: roleOutput.length > AutomationManager.MAX_OUTPUT_BYTES ? roleOutput.slice(-AutomationManager.MAX_OUTPUT_BYTES) : roleOutput,
       }
     } catch (err) {
       return {
@@ -1453,35 +1858,85 @@ export class AutomationManager {
     return join(this.storageDir, `results_${automationId}.json`)
   }
 
+  /**
+   * saveToDisk — daemon-only fields (lastRunAt, lastRunStatus).
+   * Reads disk first, merges only daemon-owned fields, writes atomically.
+   * User-facing fields (enabled, schedule, name, etc.) are written by persistFullState().
+   */
   private saveToDisk() {
-    // Read-modify-write: merge in-memory state with on-disk state to avoid
-    // stale writes overriding changes made by other code paths (e.g. toggle off
-    // from the app being overwritten by a daemon saveToDisk with old enabled=true).
+    this.saveQueue.enqueue(() => this.saveToDiskSync())
+  }
+
+  /** Synchronous save — called inside the queue or during shutdown */
+  private saveToDiskSync() {
     const filePath = this.getAutomationsFile()
     let diskMap = new Map<string, AutomationConfig>()
     try {
-      if (existsSync(filePath)) {
-        const diskData: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
+      const diskContent = readAtomicEncrypted(filePath)
+      if (diskContent) {
+        const diskData: AutomationConfig[] = JSON.parse(diskContent)
         for (const a of diskData) diskMap.set(a.id, a)
       }
-    } catch { /* ignore parse errors, overwrite */ }
+    } catch { /* ignore parse errors */ }
 
-    // In-memory is authoritative for all fields of automations we know about
+    // Only update daemon-owned fields on existing disk entries
     for (const [id, auto] of this.automations) {
-      diskMap.set(id, auto)
+      const disk = diskMap.get(id)
+      if (disk) {
+        // Daemon fields — always overwrite from memory
+        disk.lastRunAt = auto.lastRunAt
+        disk.lastRunStatus = auto.lastRunStatus
+      } else {
+        // New automation not on disk yet — write full object
+        diskMap.set(id, { ...auto })
+      }
     }
 
-    // Remove automations that were deleted in memory but still on disk
+    // Remove automations that were deleted in memory
     for (const id of diskMap.keys()) {
       if (!this.automations.has(id)) diskMap.delete(id)
     }
 
-    writeFileSync(filePath, JSON.stringify([...diskMap.values()], null, 2))
+    writeAtomic(filePath, JSON.stringify([...diskMap.values()], null, 2))
+  }
+
+  /**
+   * persistFullState — writes the full automation config to disk (atomic).
+   * Used by API write-through (add/remove/update/enable/disable).
+   */
+  private persistFullState() {
+    this.saveQueue.enqueue(() => {
+      const filePath = this.getAutomationsFile()
+      const data = [...this.automations.values()]
+      writeAtomic(filePath, JSON.stringify(data, null, 2))
+    })
   }
 
   private saveResultsToDisk(automationId: string) {
+    if (this._resultsLoadFailed.has(automationId)) {
+      // Results failed to load — merge new results with existing disk data instead of overwriting
+      try {
+        const diskContent = readAtomicEncrypted(this.getResultsFile(automationId))
+        const diskResults: AutomationResult[] = diskContent ? JSON.parse(diskContent) : []
+        const memResults = this.results.get(automationId) || []
+        const existingIds = new Set(diskResults.map(r => r.id))
+        const merged = [...diskResults, ...memResults.filter(r => !existingIds.has(r.id))]
+        if (merged.length > AutomationManager.MAX_RESULTS_PER_AUTOMATION) {
+          merged.splice(0, merged.length - AutomationManager.MAX_RESULTS_PER_AUTOMATION)
+        }
+        writeAtomic(this.getResultsFile(automationId), JSON.stringify(merged, null, 2))
+        this.results.set(automationId, merged)
+        this._resultsLoadFailed.delete(automationId)
+        log.info(`[Automation] Recovered results for "${automationId}" — merged ${diskResults.length} disk + ${memResults.length} new`)
+      } catch (err) {
+        log.warn(`[Automation] Cannot merge results for "${automationId}", saving in-memory only: ${err}`)
+        const results = this.results.get(automationId) || []
+        writeAtomic(this.getResultsFile(automationId), JSON.stringify(results, null, 2))
+      }
+      return
+    }
     const results = this.results.get(automationId) || []
-    writeFileSync(this.getResultsFile(automationId), JSON.stringify(results, null, 2))
+    writeAtomic(this.getResultsFile(automationId), JSON.stringify(results, null, 2))
   }
 
   private loadFromDisk() {
@@ -1489,7 +1944,10 @@ export class AutomationManager {
       const filePath = this.getAutomationsFile()
       if (!existsSync(filePath)) return
 
-      const data: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
+      const content = readAtomicEncrypted(filePath)
+      if (!content) return
+      const data: AutomationConfig[] = JSON.parse(content)
+      let needsSave = false
       for (const auto of data) {
         // Backward compat: infer trustProfile from sandboxLevel for pre-Trust-Layer automations
         if (!auto.trustProfile) {
@@ -1504,24 +1962,35 @@ export class AutomationManager {
             auto.trustProfile = "custom"
           }
         }
+        // Stale state recovery: if lastRunStatus looks like it was mid-run, mark interrupted
+        if (auto.lastRunStatus === "running") {
+          log.warn(`[Automation] "${auto.name}" was running when daemon last exited — marking interrupted`)
+          auto.lastRunStatus = "interrupted"
+          needsSave = true
+        }
+
         this.automations.set(auto.id, auto)
-        // Load results
+        // Load results — on failure, log warning but DO NOT overwrite the disk file
         try {
           const resultsPath = this.getResultsFile(auto.id)
           if (existsSync(resultsPath)) {
-            this.results.set(auto.id, JSON.parse(readFileSync(resultsPath, "utf-8")))
+            this.results.set(auto.id, JSON.parse(readAtomicEncrypted(resultsPath) || "[]"))
           } else {
             this.results.set(auto.id, [])
           }
-        } catch {
+        } catch (err) {
+          log.warn(`[Automation] Failed to load results for "${auto.name}": ${err}`)
+          // Use empty array in memory but mark as unloaded so saveResultsToDisk won't overwrite
           this.results.set(auto.id, [])
+          this._resultsLoadFailed.add(auto.id)
         }
-        // Resume enabled schedules
-        if (auto.enabled) {
+        // Resume enabled schedules (only if this daemon is the scheduler)
+        if (auto.enabled && this.schedulingEnabled) {
           this.startSchedule(auto)
         }
       }
-      log.info(`[Automation] Loaded ${data.length} automations from disk`)
+      if (needsSave) this.saveToDiskSync()
+      log.info(`[Automation] Loaded ${data.length} automations from disk${this.schedulingEnabled ? "" : " (scheduling disabled — release daemon)"}`)
     } catch (err) {
       log.warn(`[Automation] Failed to load automations: ${err}`)
     }
@@ -1622,5 +2091,60 @@ export class AutomationManager {
     for (const [id] of this.timers) {
       this.stopSchedule(id)
     }
+  }
+
+  /**
+   * Graceful shutdown: kill running automations, mark interrupted, save, exit.
+   * Called from SIGTERM/SIGINT handlers.
+   */
+  async gracefulShutdown(): Promise<void> {
+    if (this.shuttingDown) return
+    this.shuttingDown = true
+    log.warn(`[Automation] Graceful shutdown — ${this.runningProcesses.size} running, ${this.timers.size} scheduled`)
+
+    // 1. Stop all timers
+    this.stopAll()
+
+    // 2. Resolve all pending phase gates to prevent deadlock
+    for (const [id, pending] of this.pendingPhaseGates) {
+      pending.resolve({ automationId: id, action: "abort" })
+    }
+    this.pendingPhaseGates.clear()
+
+    // 3. Kill all running automation processes
+    for (const [id, proc] of this.runningProcesses) {
+      log.warn(`[Automation] Killing running automation: ${id} (PID ${proc.pid})`)
+      killProcessTree(proc)
+      // Mark as interrupted
+      const auto = this.automations.get(id)
+      if (auto) {
+        auto.lastRunStatus = "interrupted"
+        auto.lastRunAt = Date.now()
+      }
+      // Store interrupted result
+      this.storeResult(id, {
+        id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        automationId: id,
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        exitCode: null,
+        output: "Daemon shutdown — automation interrupted",
+        summary: "Interrupted by daemon shutdown",
+        status: "interrupted",
+      })
+    }
+    this.runningProcesses.clear()
+    this.running.clear()
+
+    // 3. Final save (synchronous — we're about to exit)
+    try {
+      this.saveToDiskSync()
+    } catch (err) {
+      log.error(`[Automation] Failed to save on shutdown: ${err instanceof Error ? err.message : err}`)
+    }
+
+    // 4. Wait for queued saves to flush
+    await this.saveQueue.flush()
+    log.info(`[Automation] Shutdown complete`)
   }
 }

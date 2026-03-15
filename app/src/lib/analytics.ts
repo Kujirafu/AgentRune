@@ -47,7 +47,7 @@ export function setOptOut(val: boolean) {
 }
 
 export function getOptOut(): boolean {
-  return localStorage.getItem("agentrune_telemetry_optout") === "true"
+  return optOut
 }
 
 const MAX_PROPERTIES_SIZE = 4096
@@ -164,4 +164,50 @@ export function trackAppOpen() {
 
 export function trackLogin() {
   track("login", {})
+}
+
+// ─── Phase 2: New events ────────────────────────────────────────
+
+export function trackScreenView(screen: string, from?: string) {
+  track("screen_view", { screen, ...(from ? { from } : {}) })
+}
+
+export function trackTabSwitch(tab: string, context: string) {
+  track("tab_switch", { tab, context })
+}
+
+export function trackCrewStart(crewName: string, roleCount: number, tokenBudget: number) {
+  track("crew_start", { crewName, roleCount, tokenBudget })
+}
+
+export function trackCrewEnd(crewName: string, success: boolean, durationMs: number) {
+  track("crew_end", { crewName, success, durationMs })
+}
+
+export function trackScheduleCreate(templateId: string, interval: string) {
+  track("schedule_create", { templateId, interval })
+}
+
+export function trackPlanCreate(projectId: string, priority: string) {
+  track("plan_create", { projectId, priority })
+}
+
+export function trackPlanExecute(projectId: string, taskCount: number) {
+  track("plan_execute", { projectId, taskCount })
+}
+
+export function trackFileBrowse(projectId: string) {
+  track("file_browse", { projectId })
+}
+
+export function trackViewModeChange(mode: "board" | "terminal") {
+  track("view_mode_change", { mode })
+}
+
+/** @internal — test-only: reset module state */
+export function _resetForTesting() {
+  queue.length = 0
+  distinctId = ""
+  optOut = false
+  if (timer) { clearInterval(timer); timer = null }
 }

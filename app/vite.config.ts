@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      __APP_VERSION__: JSON.stringify("0.2.24"),
+      __APP_VERSION__: JSON.stringify("0.2.26"),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
     build: {
@@ -21,11 +21,18 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: {
+            // Vendor: stable deps that rarely change → long-lived cache
+            vendor: ["react", "react-dom"],
             // Split heavy deps into separate lazy-loadable chunks
             xterm: ["@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"],
             markdown: ["react-markdown", "remark-gfm", "remark-parse", "unified"],
             motion: ["framer-motion"],
             qrcode: ["html5-qrcode"],
+            capacitor: [
+              "@capacitor/core", "@capacitor/app", "@capacitor/browser",
+              "@capacitor/clipboard", "@capacitor/local-notifications",
+              "@capacitor/push-notifications",
+            ],
           },
         },
       },

@@ -6,15 +6,34 @@ AI agent mobile control panel. Launch, monitor, and schedule AI agents from your
 
 AgentRune lets you control AI coding agents (Claude Code, Codex, Gemini, Aider, Cline, Cursor) from an Android app. A CLI daemon runs on your PC and exposes a WebSocket + HTTP API through a Cloudflare tunnel, so you can manage sessions from anywhere.
 
-Key capabilities:
+## Features
 
+### Session Control
 - **Session management** -- start, stop, resume, and monitor agent sessions in real time
+- **Session recovery** -- daemon crashes or network drops? One tap to restore full context
 - **Voice input** -- speak prompts to your agents via Android speech recognition
-- **Automation scheduling** -- cron-style scheduling with 24+ built-in templates
 - **Multi-agent support** -- Claude Code, Codex, Gemini, Aider, Cline, Cursor
 - **Dual-daemon failover** -- dev + release daemons with automatic failover/failback
-- **Sandbox system** -- 4-tier configurable sandbox (strict / moderate / permissive / none)
-- **AgentLore integration** -- agents query an AI-verified knowledge base via MCP
+- **Settings sync** -- planMode, autoEdit, effort level sync directly to CLI flags
+
+### Automation
+- **Automation scheduling** -- cron-style scheduling with 24+ built-in templates
+- **Skill chains** -- multi-step automation pipelines, chain tasks sequentially or in parallel
+- **Crew system** -- multi-role workflows (PM → engineer → QA) with phase gates and per-role token budgets, built on top of skill chains
+- **Sandbox system** -- 4-tier configurable sandbox (strict / moderate / permissive / none) with prompt conflict scanning
+
+### Trust & Security
+- **Trust profiles** -- 4 security levels (Autonomous / Supervised / Guarded / Custom) to control what agents can do unattended
+- **Plan panel** -- agents submit execution plans for review before they build
+- **Runtime authority** -- restrict agent operations (file write, HTTP requests, git push) per schedule
+- **Audit log** -- all agent operations recorded for review
+- **AES-256-GCM encryption** for stored secrets and auth tokens
+- **OAuth login** -- GitHub and Google authentication
+
+### Integrations
+- **AgentLore MCP** -- agents query an AI-verified knowledge base
+- **Push notifications** -- FCM alerts for agent decisions, automation completions, version updates
+- **Telemetry** -- self-hosted analytics with opt-out support
 
 ## Architecture
 
@@ -84,19 +103,17 @@ APK output: `app/android/app/build/outputs/apk/debug/app-debug.apk`
 ### Install the CLI globally
 
 ```bash
-cd cli && npm run build
-npm link
+npm install -g agentrune
 agentrune start
 ```
 
-## Security
+## Community
 
-- All remote connections require authentication (session token via Authorization header or query param)
-- Local connections (127.0.0.1) bypass auth by design
-- AES-256-GCM encryption for stored secrets and auth tokens
-- Input validation on all user-facing parameters
-- Security headers on all HTTP responses
-- See commit history for detailed security audit trail
+Join us for testing, feedback, and discussion:
+
+- **Telegram** -- [AgentLore & AgentRune](https://t.me/AgentLore_n_AgentRune)
+- **X (Twitter)** -- [@AGLO_Official](https://x.com/AGLO_Official)
+- **Moltbook** -- [agentlore](https://www.moltbook.com/u/agentlore)
 
 ## Community
 
