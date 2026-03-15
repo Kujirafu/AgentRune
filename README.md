@@ -98,6 +98,14 @@ agentrune start
 - Security headers on all HTTP responses
 - See commit history for detailed security audit trail
 
+## Community
+
+Join us for testing, feedback, and discussion:
+
+- **Telegram** -- [AgentLore & AgentRune](https://t.me/AgentLore_n_AgentRune)
+- **X (Twitter)** -- [@AGLO_Official](https://x.com/AGLO_Official)
+- **Moltbook** -- [agentlore](https://www.moltbook.com/u/agentlore)
+
 ## License
 
 [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html)
