@@ -21,7 +21,7 @@ Object.defineProperty(globalThis, "crypto", {
 })
 
 // Mock fetch
-const fetchMock = vi.fn(() => Promise.resolve({ ok: true }))
+const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(() => Promise.resolve({ ok: true } as Response))
 globalThis.fetch = fetchMock as any
 
 // Mock document.addEventListener (prevent real listener attachment)

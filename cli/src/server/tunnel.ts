@@ -3,7 +3,7 @@
 // Quick tunnels require no account — just `cloudflared tunnel --url http://localhost:PORT`
 // The tunnel URL is parsed from stderr output and registered with AgentLore.
 
-import { spawn, execSync } from "node:child_process"
+import { spawn, execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, createWriteStream, chmodSync } from "node:fs"
 import { join } from "node:path"
 import { homedir, platform, arch } from "node:os"
@@ -82,8 +82,8 @@ function findCloudflared(): string | null {
 
   // Check system PATH
   try {
-    const cmd = platform() === "win32" ? "where cloudflared" : "which cloudflared"
-    const result = execSync(cmd, { encoding: "utf-8" }).trim().split("\n")[0]
+    const bin = platform() === "win32" ? "where" : "which"
+    const result = execFileSync(bin, ["cloudflared"], { encoding: "utf-8" }).trim().split("\n")[0]
     if (result && existsSync(result)) return result
   } catch {}
 

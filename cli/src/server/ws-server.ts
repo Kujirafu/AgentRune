@@ -577,12 +577,20 @@ export function createServer(portOverride?: number) {
     res.type("html").send(getTerminalHtml())
   })
 
-  // Session tokens for WS auth
-  const sessionTokens = new Set<string>()
+  // Session tokens for WS auth — Map<token, boundIp>
+  const sessionTokens = new Map<string, string>()
 
-  function issueSessionToken(): string {
-    const token = createSessionToken("local")
-    sessionTokens.add(token)
+  /** Extract real client IP (cloudflared sets Cf-Connecting-Ip) */
+  function getClientIp(req: any): string {
+    return req.headers?.["cf-connecting-ip"]
+      || req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
+      || req.socket?.remoteAddress
+      || ""
+  }
+
+  function issueSessionToken(clientIp?: string): string {
+    const token = createSessionToken("local", clientIp)
+    sessionTokens.set(token, clientIp || "")
     return token
   }
 
@@ -609,7 +617,17 @@ export function createServer(portOverride?: number) {
       return res.status(401).json({ error: "Authentication required" })
     }
 
-    if (sessionTokens.has(token) || validateSessionToken(token)) {
+    const clientIp = getClientIp(req)
+    const boundIp = sessionTokens.get(token)
+    // Fast path: token in local cache — verify IP binding
+    if (boundIp !== undefined) {
+      if (boundIp && clientIp && boundIp !== clientIp) {
+        return res.status(401).json({ error: "Session bound to different network" })
+      }
+      return next()
+    }
+    // Slow path: check persisted tokens (with IP binding)
+    if (validateSessionToken(token, clientIp)) {
       return next()
     }
 
@@ -1084,8 +1102,9 @@ export function createServer(portOverride?: number) {
       if (!myDevice) {
         return res.status(403).json({ error: "Device not registered under this account" })
       }
-      // Phone token is valid and owns this device — issue a session token
-      const sessionToken = issueSessionToken()
+      // Phone token is valid and owns this device — issue a session token bound to client IP
+      const authClientIp = getClientIp(req)
+      const sessionToken = issueSessionToken(authClientIp)
       res.json({ authenticated: true, sessionToken })
     } catch (err: any) {
       log.error(`[cloud auth] Verification failed: ${err?.message || "unknown"}`)
@@ -1111,6 +1130,7 @@ export function createServer(portOverride?: number) {
 
     // Validate CWD: must exist, be a directory, and be within user's home directory
     const resolvedCwd = resolve(cwd)
+    const userHome = process.env.HOME || process.env.USERPROFILE || "."
     if (!isWithinDir(resolvedCwd, userHome)) {
       return res.status(400).json({ error: "Project path must be within user home directory" })
     }
@@ -2281,7 +2301,7 @@ export function createServer(portOverride?: number) {
 
   function checkAutoComplete(prd: PrdItem): boolean {
     if (prd.status === "done" || prd.tasks.length === 0) return false
-    const allDone = prd.tasks.every(t => t.status === "done" || t.status === "completed" || t.status === "skipped")
+    const allDone = prd.tasks.every(t => t.status === "done" || t.status === "skipped")
     if (allDone) {
       prd.status = "done"
       prd.updatedAt = Date.now()
@@ -2303,7 +2323,7 @@ export function createServer(portOverride?: number) {
           title: prd.title,
           priority: prd.priority,
           status: prd.status,
-          tasksDone: prd.tasks.filter(t => t.status === "done" || t.status === "completed").length,
+          tasksDone: prd.tasks.filter(t => t.status === "done").length,
           tasksSkipped: prd.tasks.filter(t => t.status === "skipped").length,
           tasksTotal: prd.tasks.length,
           createdAt: prd.createdAt,
@@ -3264,7 +3284,16 @@ export function createServer(portOverride?: number) {
         ws.close()
         return
       }
-      if (!sessionTokens.has(token) && !validateSessionToken(token)) {
+      const wsClientIp = getClientIp(req)
+      // Check local cache with IP binding
+      const wsBoundIp = sessionTokens.get(token)
+      if (wsBoundIp !== undefined) {
+        if (wsBoundIp && wsClientIp && wsBoundIp !== wsClientIp) {
+          ws.send(JSON.stringify({ type: "error", message: "Session bound to different network" }))
+          ws.close()
+          return
+        }
+      } else if (!validateSessionToken(token, wsClientIp)) {
         ws.send(JSON.stringify({ type: "error", message: "Invalid or expired token" }))
         ws.close()
         return
@@ -4118,18 +4147,18 @@ export function createServer(portOverride?: number) {
           log.info(`Spawning watch terminal for session ${targetSid.slice(0, 8)}`)
           try {
             const binPath = join(dirname(fileURLToPath(import.meta.url)), "bin.js")
-            const cmd = `node "${binPath}" watch --session ${targetSid} --port ${PORT}`
+            const nodeArgs = [binPath, "watch", "--session", targetSid, "--port", String(PORT)]
             const { spawn: spawnChild } = childProcess
             let child
             if (process.platform === "win32") {
               try {
-                child = spawnChild("wt", ["--title", `AgentRune Watch`, "cmd", "/c", cmd], { detached: true, stdio: "ignore" })
+                child = spawnChild("wt", ["--title", "AgentRune Watch", "cmd", "/c", "node", ...nodeArgs], { detached: true, stdio: "ignore" })
               } catch {
-                child = spawnChild("cmd", ["/c", "start", `"AgentRune Watch"`, "cmd", "/c", cmd], { detached: true, stdio: "ignore", shell: true })
+                child = spawnChild("cmd", ["/c", "start", "AgentRune Watch", "cmd", "/c", "node", ...nodeArgs], { detached: true, stdio: "ignore" })
               }
             } else {
-              // macOS/Linux: try common terminal emulators
-              child = spawnChild("bash", ["-c", cmd], { detached: true, stdio: "ignore" })
+              // macOS/Linux
+              child = spawnChild("node", nodeArgs, { detached: true, stdio: "ignore" })
             }
             child.unref()
             child.on("error", () => watchedSessions.delete(targetSid))
@@ -4150,6 +4179,9 @@ export function createServer(portOverride?: number) {
           if (!storeSid || !storeEvt || (!isLocal && clientOwnedSession !== storeSid)) break
           // Validate event structure
           if (typeof storeEvt.id !== "string" || typeof storeEvt.type !== "string") break
+          // Only allow client-originating event types (prevent spoofing server-generated events)
+          const ALLOWED_CLIENT_EVENTS = new Set(["user_message", "user_decision", "note", "image_preview"])
+          if (!ALLOWED_CLIENT_EVENTS.has(storeEvt.type)) break
           // Cap field sizes to prevent memory/disk abuse
           if (storeEvt.title && typeof storeEvt.title === "string" && storeEvt.title.length > 500) storeEvt.title = storeEvt.title.slice(0, 500)
           if (storeEvt.detail && typeof storeEvt.detail === "string" && storeEvt.detail.length > 5000) storeEvt.detail = storeEvt.detail.slice(0, 5000)
@@ -5042,7 +5074,7 @@ export function createServer(portOverride?: number) {
         cloudToken = fresh
         writeFileSync(cloudTokenPath, cloudToken)
       }
-      sessionTokens.add(cloudToken)
+      sessionTokens.set(cloudToken, "") // Cloud token — not IP-bound (server-side use only)
       await agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelState.url)
       setInterval(() => agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, tunnelState.url), 2 * 60 * 1000)
     }

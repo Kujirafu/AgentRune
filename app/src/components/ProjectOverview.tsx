@@ -190,7 +190,7 @@ export function ProjectOverview({
   const [automationProjectId, setAutomationProjectId] = useState<string | null>(null)
   const [editingAutomation, setEditingAutomation] = useState<{ id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null>(null)
   const [automationCounts, setAutomationCounts] = useState<Map<string, number>>(new Map())
-  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
+  const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; skill?: string; runMode?: string; agentId?: string; bypass?: boolean; lastResult?: { status: string; startedAt: number; finishedAt?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
@@ -1338,7 +1338,7 @@ export function ProjectOverview({
                     const isChain = tmpl.id.startsWith("chain_")
                     const chainSlug = isChain ? tmpl.id.replace("chain_", "") : roles[0]?.skillChainSlug
                     const chain = chainSlug ? BUILTIN_CHAINS.find(c => c.slug === chainSlug) : null
-                    const depth = chainDepths[tmpl.id] || chain?.defaultDepth || "standard"
+                    const depth = chainDepths[tmpl.id] || "standard"
 
                     return (
                       <div key={tmpl.id}>

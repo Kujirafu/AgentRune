@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, createReadStream, chmodSync, statSync, renameSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
+import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
 import { spawn, execSync, execFileSync, type ChildProcess } from "node:child_process"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
@@ -24,7 +25,7 @@ function killProcessTree(proc: ChildProcess): void {
   try {
     if (process.platform === "win32") {
       // taskkill /T kills child tree; windowsHide prevents CMD flash
-      execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore", windowsHide: true })
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { stdio: "ignore", windowsHide: true })
     } else {
       // Kill process group (negative PID) — works because detached=true on POSIX
       process.kill(-proc.pid, "SIGTERM")
@@ -311,17 +312,31 @@ function writePromptFile(storageDir: string, automationId: string, prompt: strin
 
 // --- Atomic write + save queue ---
 
-/** Write to a temp file then rename — prevents partial writes on crash/kill */
+/** Write to a temp file then rename — prevents partial writes on crash/kill.
+ *  Encrypts with AES-256-GCM (same scheme as vault keys and auth tokens). */
 function writeAtomic(filePath: string, data: string): void {
   const tmpPath = `${filePath}.${randomBytes(4).toString("hex")}.tmp`
   try {
-    writeFileSync(tmpPath, data, { encoding: "utf-8" })
+    writeEncryptedFile(tmpPath, data)
     renameSync(tmpPath, filePath)
   } catch (err) {
     // Clean up temp file on failure
     try { unlinkSync(tmpPath) } catch {}
     throw err
   }
+}
+
+/** Read a file, decrypting if encrypted. Auto-migrates plaintext files. */
+function readAtomicEncrypted(filePath: string): string | null {
+  if (!existsSync(filePath)) return null
+  const content = readEncryptedFile(filePath)
+  if (content === null) return null
+  // Auto-migrate: if file was plaintext, re-encrypt on read
+  const raw = readFileSync(filePath, "utf-8")
+  if (!isEncrypted(raw)) {
+    writeEncryptedFile(filePath, content)
+  }
+  return content
 }
 
 /** Promise queue that serializes saveToDisk calls — prevents concurrent read-modify-write */
@@ -506,7 +521,7 @@ export class AutomationManager {
 
     // Re-trigger the automation
     try {
-      await this.trigger(automationId, true)
+      await this.trigger(automationId)
       return { success: true, message: "Reauth approved — automation re-triggered" }
     } catch (err) {
       return { success: false, message: `Reauth approved but re-trigger failed: ${err instanceof Error ? err.message : err}` }
@@ -1767,7 +1782,7 @@ export class AutomationManager {
       // Fallback: if stdout was empty, extract activity from JSONL
       let roleOutput = result.output
       if (!roleOutput || roleOutput.length === 0) {
-        const jsonlActivity = extractJSONLActivity(project.cwd, roleStart)
+        const jsonlActivity = extractJSONLActivity(cwd, roleStart)
         if (jsonlActivity) roleOutput = jsonlActivity
       }
       const summary = AutomationManager.extractSummary(roleOutput, result.timedOut ? "timeout" : "success")
@@ -1849,8 +1864,9 @@ export class AutomationManager {
     const filePath = this.getAutomationsFile()
     let diskMap = new Map<string, AutomationConfig>()
     try {
-      if (existsSync(filePath)) {
-        const diskData: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
+      const diskContent = readAtomicEncrypted(filePath)
+      if (diskContent) {
+        const diskData: AutomationConfig[] = JSON.parse(diskContent)
         for (const a of diskData) diskMap.set(a.id, a)
       }
     } catch { /* ignore parse errors */ }
@@ -1898,7 +1914,9 @@ export class AutomationManager {
       const filePath = this.getAutomationsFile()
       if (!existsSync(filePath)) return
 
-      const data: AutomationConfig[] = JSON.parse(readFileSync(filePath, "utf-8"))
+      const content = readAtomicEncrypted(filePath)
+      if (!content) return
+      const data: AutomationConfig[] = JSON.parse(content)
       let needsSave = false
       for (const auto of data) {
         // Backward compat: infer trustProfile from sandboxLevel for pre-Trust-Layer automations
@@ -1926,7 +1944,7 @@ export class AutomationManager {
         try {
           const resultsPath = this.getResultsFile(auto.id)
           if (existsSync(resultsPath)) {
-            this.results.set(auto.id, JSON.parse(readFileSync(resultsPath, "utf-8")))
+            this.results.set(auto.id, JSON.parse(readAtomicEncrypted(resultsPath) || "[]"))
           } else {
             this.results.set(auto.id, [])
           }

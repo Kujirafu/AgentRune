@@ -590,7 +590,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
         <button onClick={() => { setActiveTab("tasks"); fetchAllTasks() }} style={tabStyle(activeTab === "tasks")}>
           {t("tasks.tabTitle") || "Tasks"} {(() => {
             const allTasks = [...prdTaskGroups.flatMap(g => g.tasks), ...standaloneTasks]
-            const pending = allTasks.filter(t => t.status !== "done" && t.status !== "skipped" && t.status !== "completed").length
+            const pending = allTasks.filter(t => t.status !== "done" && t.status !== "skipped").length
             return pending > 0 ? `(${pending})` : ""
           })()}
         </button>

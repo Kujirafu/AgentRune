@@ -374,6 +374,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
           slug: "",
           steps: chain.steps || [],
           forkedFromSlug: chain.slug,
+          sandboxLevel: "none",
+          bypass: true,
         })
         setView("editor")
       } catch { /* ignore */ }
@@ -902,6 +904,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
       slug: "",
       steps: chain.steps,
       forkedFromSlug: chain.slug,
+      sandboxLevel: "none",
+      bypass: true,
     })
     setView("editor")
   }, [t])
