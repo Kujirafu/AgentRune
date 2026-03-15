@@ -399,6 +399,7 @@ export class AutomationManager {
   private nextRunAtMap = new Map<string, number>()  // track next trigger timestamp
   private runningProcesses = new Map<string, ChildProcess>()  // for killing running automations
   private results = new Map<string, AutomationResult[]>()
+  private _resultsLoadFailed = new Set<string>()
   private running = new Set<string>()  // prevent duplicate concurrent executions
   private dailyExecCount = new Map<string, number>()  // "YYYY-MM-DD" → count
   private storageDir: string
@@ -424,12 +425,15 @@ export class AutomationManager {
   private static MAX_RESULTS_PER_AUTOMATION = 20
   private static MAX_OUTPUT_BYTES = 50_000
 
-  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits }) {
+  private schedulingEnabled: boolean
+
+  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits; schedulingEnabled?: boolean }) {
     this.ptyManager = ptyManager
     this.projects = projects
     this.onEvent = onEvent
     this.vaultPath = opts?.vaultPath
     this.limits = opts?.limits || FREE_LIMITS
+    this.schedulingEnabled = opts?.schedulingEnabled !== false // default true
     this.whitelist = new SkillWhitelist()
     this.storageDir = join(getConfigDir(), "automations")
     mkdirSync(this.storageDir, { recursive: true })
@@ -740,6 +744,7 @@ export class AutomationManager {
   // --- Scheduling ---
 
   private startSchedule(auto: AutomationConfig) {
+    if (!this.schedulingEnabled) return // release daemon does not schedule
     this.stopSchedule(auto.id) // clear any existing
 
     if (auto.schedule.type === "interval") {
@@ -904,6 +909,7 @@ export class AutomationManager {
 
   /** Manually trigger an automation (ignores schedule, respects rate limits) */
   async trigger(id: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.schedulingEnabled) return { ok: false, error: "Automation execution disabled on this daemon" }
     const auto = this.automations.get(id)
     if (!auto) return { ok: false, error: "Automation not found" }
 
@@ -923,6 +929,7 @@ export class AutomationManager {
 
   /** Fire-and-forget: create a temp automation with crew config and execute immediately */
   async fireAndForget(projectId: string, name: string, crew: CrewConfig, sessionContext?: string): Promise<string> {
+    if (!this.schedulingEnabled) throw new Error("Automation execution disabled on this daemon (release daemon)");
     const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const auto: AutomationConfig = {
       id,
@@ -963,6 +970,7 @@ export class AutomationManager {
 
   /** Execute an automation: open a PTY, launch agent, collect output */
   private async executeAutomation(id: string, manualTrigger = false) {
+    if (!this.schedulingEnabled) return // release daemon does not execute automations
     const auto = this.automations.get(id)
     if (!auto || (!auto.enabled && !manualTrigger)) return
 
@@ -1905,6 +1913,28 @@ export class AutomationManager {
   }
 
   private saveResultsToDisk(automationId: string) {
+    if (this._resultsLoadFailed.has(automationId)) {
+      // Results failed to load — merge new results with existing disk data instead of overwriting
+      try {
+        const diskContent = readAtomicEncrypted(this.getResultsFile(automationId))
+        const diskResults: AutomationResult[] = diskContent ? JSON.parse(diskContent) : []
+        const memResults = this.results.get(automationId) || []
+        const existingIds = new Set(diskResults.map(r => r.id))
+        const merged = [...diskResults, ...memResults.filter(r => !existingIds.has(r.id))]
+        if (merged.length > AutomationManager.MAX_RESULTS_PER_AUTOMATION) {
+          merged.splice(0, merged.length - AutomationManager.MAX_RESULTS_PER_AUTOMATION)
+        }
+        writeAtomic(this.getResultsFile(automationId), JSON.stringify(merged, null, 2))
+        this.results.set(automationId, merged)
+        this._resultsLoadFailed.delete(automationId)
+        log.info(`[Automation] Recovered results for "${automationId}" — merged ${diskResults.length} disk + ${memResults.length} new`)
+      } catch (err) {
+        log.warn(`[Automation] Cannot merge results for "${automationId}", saving in-memory only: ${err}`)
+        const results = this.results.get(automationId) || []
+        writeAtomic(this.getResultsFile(automationId), JSON.stringify(results, null, 2))
+      }
+      return
+    }
     const results = this.results.get(automationId) || []
     writeAtomic(this.getResultsFile(automationId), JSON.stringify(results, null, 2))
   }
@@ -1940,7 +1970,7 @@ export class AutomationManager {
         }
 
         this.automations.set(auto.id, auto)
-        // Load results
+        // Load results — on failure, log warning but DO NOT overwrite the disk file
         try {
           const resultsPath = this.getResultsFile(auto.id)
           if (existsSync(resultsPath)) {
@@ -1948,16 +1978,19 @@ export class AutomationManager {
           } else {
             this.results.set(auto.id, [])
           }
-        } catch {
+        } catch (err) {
+          log.warn(`[Automation] Failed to load results for "${auto.name}": ${err}`)
+          // Use empty array in memory but mark as unloaded so saveResultsToDisk won't overwrite
           this.results.set(auto.id, [])
+          this._resultsLoadFailed.add(auto.id)
         }
-        // Resume enabled schedules
-        if (auto.enabled) {
+        // Resume enabled schedules (only if this daemon is the scheduler)
+        if (auto.enabled && this.schedulingEnabled) {
           this.startSchedule(auto)
         }
       }
       if (needsSave) this.saveToDiskSync()
-      log.info(`[Automation] Loaded ${data.length} automations from disk`)
+      log.info(`[Automation] Loaded ${data.length} automations from disk${this.schedulingEnabled ? "" : " (scheduling disabled — release daemon)"}`)
     } catch (err) {
       log.warn(`[Automation] Failed to load automations: ${err}`)
     }

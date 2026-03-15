@@ -103,6 +103,7 @@ export interface AgentEvent {
     | "decision_request"
     | "error"
     | "info"
+    | "user_message"
     | "token_usage"
     | "response"
     | "session_summary"

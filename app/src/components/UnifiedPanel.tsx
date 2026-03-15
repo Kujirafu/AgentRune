@@ -1993,20 +1993,6 @@ export function UnifiedPanel({
                         </div>
                         {/* Inline action buttons */}
                         <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-                          {/* Run Now */}
-                          <button onClick={async (e) => {
-                            e.stopPropagation()
-                            const crew = tmpl.crew!
-                            const svr = localStorage.getItem("agentrune_server") || ""
-                            const pid = automationProjectId || (projects.length > 0 ? projects[0].id : "")
-                            try { await fetch(`${svr}/api/automations/${pid}/fire`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ crew, name: tplName(tmpl) }) }) } catch { /* */ }
-                          }} style={{
-                            width: 30, height: 30, borderRadius: 8, border: "none",
-                            background: "rgba(55,172,192,0.1)", color: "#37ACC0",
-                            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
-                          }}>
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                          </button>
                           {/* Schedule */}
                           <button onClick={(e) => {
                             e.stopPropagation()
@@ -2175,46 +2161,9 @@ export function UnifiedPanel({
 
                           {/* Action buttons */}
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                            {/* Run Now */}
-                            {isMultiCrew ? (
-                              <button onClick={async () => {
-                                const crew = tmpl.crew!
-                                const svr = localStorage.getItem("agentrune_server") || ""
-                                const pid = automationProjectId || (projects.length > 0 ? projects[0].id : "")
-                                try {
-                                  await fetch(`${svr}/api/automations/${pid}/fire`, {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ crew, name: tplName(tmpl) }),
-                                  })
-                                } catch { /* ignore */ }
-                                setExpandedTemplateId(null)
-                              }} style={{
-                                padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                {t("automation.runNow")}
-                              </button>
-                            ) : tmpl.prompt ? (
-                              <button onClick={() => {
-                                localStorage.setItem("agentrune_session_prefill", tmpl.prompt)
-                                setExpandedTemplateId(null)
-                                onLaunch(automationProjectId || selectedProject || (projects.length > 0 ? projects[0].id : ""), "claude")
-                              }} style={{
-                                padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                {t("automation.runNow")}
-                              </button>
-                            ) : null}
                             {/* Edit */}
-                            <button onClick={() => {
+                            <button onClick={(e) => {
+                              e.stopPropagation()
                               setExpandedTemplateId(null)
                               if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
                               const editData: any = {
@@ -2237,9 +2186,19 @@ export function UnifiedPanel({
                               {t("templates.edit")}
                             </button>
                             {/* Schedule */}
-                            <button onClick={() => {
+                            <button onClick={(e) => {
+                              e.stopPropagation()
                               setExpandedTemplateId(null)
                               if (!automationProjectId && projects.length > 0) setAutomationProjectId(projects[0].id)
+                              const schedData: any = {
+                                id: "__new__", name: tplName(tmpl), prompt: tmpl.prompt || "",
+                                templateId: tmpl.id, enabled: true,
+                                schedule: { type: "daily", timeOfDay: "03:00" },
+                              }
+                              if (isMultiCrew && tmpl.crew) {
+                                schedData.crew = JSON.parse(JSON.stringify(tmpl.crew))
+                              }
+                              setEditingAutomation(schedData as typeof projectAutomations[0])
                               setShowAutomation(true)
                             }} style={{
                               padding: "6px 12px", borderRadius: 8,
@@ -3025,7 +2984,7 @@ export function UnifiedPanel({
       {/* AutomationSheet */}
       <AutomationSheet
         open={showAutomation}
-        projectId={automationProjectId || ""}
+        projectId={automationProjectId || selectedProject || (projects.length > 0 ? projects[0].id : "")}
         serverUrl={localStorage.getItem("agentrune_server") || ""}
         onClose={() => { setShowAutomation(false); setEditingAutomation(null) }}
         initialEdit={editingAutomation}

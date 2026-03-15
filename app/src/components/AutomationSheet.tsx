@@ -626,10 +626,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       enabled: true,
     }
 
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const authHeaders: Record<string, string> = { "Content-Type": "application/json" }
+    if (authToken) authHeaders["Authorization"] = `Bearer ${authToken}`
+
     try {
-      if (editId) {
+      if (editId && editId !== "__new__") {
         const res = await fetch(`${serverUrl}/api/automations/${projectId}/${editId}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" },
+          method: "PATCH", headers: authHeaders,
           body: JSON.stringify(body),
         })
         if (res.ok) {
@@ -643,7 +647,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         }
       } else {
         const res = await fetch(`${serverUrl}/api/automations/${projectId}`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: authHeaders,
           body: JSON.stringify(body),
         })
         if (res.ok) {
@@ -1566,8 +1570,25 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
             {/* 2. Prompt input — crew mode shows role cards, template shows collapsed, manual shows textarea */}
             {formCrew ? (
-              /* ---- CREW MODE: Role card list ---- */
+              /* ---- CREW MODE: Prompt + Role card list ---- */
               <div style={{ width: "100%", marginBottom: 0 }}>
+                {/* User prompt — what should this crew work on */}
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
+                  {t("automation.prompt") || "Prompt"}
+                </div>
+                <textarea
+                  value={formPrompt}
+                  onChange={(e) => setFormPrompt(e.target.value)}
+                  placeholder={t("automation.crewPromptPlaceholder") || "Describe what this crew should work on..."}
+                  rows={3}
+                  style={{
+                    width: "100%", padding: "10px 14px", borderRadius: 12,
+                    border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                    color: "var(--text-primary)", fontSize: 13, outline: "none",
+                    boxSizing: "border-box", marginBottom: 12, resize: "vertical",
+                    fontFamily: "inherit", lineHeight: 1.5,
+                  }}
+                />
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>
                   {t("crew.rolesCount").replace("{n}", String(formCrew.roles.length))}
                 </div>

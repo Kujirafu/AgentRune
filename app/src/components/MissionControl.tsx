@@ -1059,7 +1059,7 @@ export function MissionControl({
     const userEvent = {
       id: `usr_${Date.now()}`,
       timestamp: Date.now(),
-      type: "info" as const,
+      type: "user_message" as const,
       status: "completed" as const,
       title: text.length > 60 ? text.slice(0, 60) + "..." : text,
       detail: text.length > 60 ? text : undefined,
@@ -1300,7 +1300,7 @@ export function MissionControl({
         if (event.timestamp < (prev[prev.length - 1]?.timestamp || 0)) {
           merged.sort((a, b) => a.timestamp - b.timestamp)
         }
-        return merged.slice(-100)
+        return merged
       })
       if (event.type === "decision_request" && event.status === "waiting") {
         setAgentStatus("waiting")

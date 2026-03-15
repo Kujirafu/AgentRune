@@ -977,7 +977,7 @@ export function createServer(portOverride?: number) {
         }).catch(() => {})
       }
     }
-  }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS })
+  }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS, schedulingEnabled: PORT !== 3456 })
 
   // --- Auth endpoints ---
 
@@ -4189,8 +4189,11 @@ export function createServer(portOverride?: number) {
           if (list) {
             list.push(storeEvt)
             if (list.length > 200) list.splice(0, list.length - 200)
+            persistEvents(storeSid, list)
           } else {
-            sessionRecentEvents.set(storeSid, [storeEvt])
+            const newList = [storeEvt]
+            sessionRecentEvents.set(storeSid, newList)
+            persistEvents(storeSid, newList)
           }
           break
         }

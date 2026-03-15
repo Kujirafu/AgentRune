@@ -730,6 +730,8 @@ export const zhTW: Record<string, string> = {
   "automation.namePlaceholder": "排程名稱",
   "automation.commandPlaceholder": "指令（例如 claude 'triage open issues'）",
   "automation.promptPlaceholder": "描述你要 Agent 做什麼...",
+  "automation.prompt": "任務",
+  "automation.crewPromptPlaceholder": "這個 crew 要做什麼？例如：重構 auth 模組、寫 v2 發布文章...",
   "automation.schedule": "排程方式",
   "automation.daily": "每天",
   "automation.interval": "間隔",

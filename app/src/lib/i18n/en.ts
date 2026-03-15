@@ -726,6 +726,8 @@ export const en: Record<string, string> = {
   "automation.namePlaceholder": "Automation name",
   "automation.commandPlaceholder": "Command (e.g. claude 'triage open issues')",
   "automation.promptPlaceholder": "Describe what the agent should do...",
+  "automation.prompt": "Task",
+  "automation.crewPromptPlaceholder": "What should this crew work on? e.g. Refactor the auth module, Write blog post about v2 launch...",
   "automation.schedule": "Schedule",
   "automation.daily": "Daily",
   "automation.interval": "Interval",
