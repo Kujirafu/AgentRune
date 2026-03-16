@@ -126,9 +126,12 @@ function setupSelfHealing(automationManager?: import("../server/automation-manag
     log.error(`[Self-heal] Unhandled rejection: ${msg}`)
     // Don't exit — let the server keep running
   })
-  // Log exit reason — helps diagnose silent daemon deaths
+  // On exit: kill all spawned automation children (sync — prevents zombie orphans)
   process.on("exit", (code) => {
     log.error(`[Self-heal] Process exiting with code ${code} (memory: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB)`)
+    if (automationManager) {
+      automationManager.killAllRunning()
+    }
   })
 
   // Graceful shutdown: save automation state before exit
