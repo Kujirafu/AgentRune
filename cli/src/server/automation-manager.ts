@@ -749,20 +749,39 @@ export class AutomationManager {
 
     if (auto.schedule.type === "interval") {
       const ms = (auto.schedule.intervalMinutes || 30) * 60 * 1000
-      log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
-      this.nextRunAtMap.set(auto.id, Date.now() + ms)
-      const timer = setInterval(() => {
-        // Re-check enabled state — defends against stale timers surviving a toggle-off
-        const current = this.automations.get(auto.id)
-        if (!current?.enabled) {
-          log.info(`[Automation] "${auto.name}" disabled, stopping stale interval`)
-          this.stopSchedule(auto.id)
-          return
-        }
+
+      // If last run was recent, delay first execution to respect the interval
+      const sinceLastRun = auto.lastRunAt ? Date.now() - auto.lastRunAt : ms
+      const initialDelay = sinceLastRun >= ms ? ms : ms - sinceLastRun
+      const skippedMinutes = Math.round((ms - initialDelay) / 60000)
+
+      if (initialDelay < ms) {
+        log.info(`[Automation] "${auto.name}" last ran ${Math.round(sinceLastRun / 60000)}m ago, next in ${Math.round(initialDelay / 60000)}m (skipping ${skippedMinutes}m)`)
+      } else {
+        log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
+      }
+
+      this.nextRunAtMap.set(auto.id, Date.now() + initialDelay)
+
+      // Use setTimeout for the first tick (respects lastRunAt), then setInterval
+      const startInterval = () => {
+        const timer = setInterval(() => {
+          const current = this.automations.get(auto.id)
+          if (!current?.enabled) {
+            log.info(`[Automation] "${auto.name}" disabled, stopping stale interval`)
+            this.stopSchedule(auto.id)
+            return
+          }
+          this.nextRunAtMap.set(auto.id, Date.now() + ms)
+          this.executeAutomation(auto.id)
+        }, ms)
+        this.timers.set(auto.id, timer)
         this.nextRunAtMap.set(auto.id, Date.now() + ms)
         this.executeAutomation(auto.id)
-      }, ms)
-      this.timers.set(auto.id, timer)
+      }
+
+      const delayTimer = setTimeout(startInterval, initialDelay)
+      this.timers.set(auto.id, delayTimer)
     } else if (auto.schedule.type === "daily") {
       this.scheduleDailyNext(auto)
     }
@@ -942,6 +961,7 @@ export class AutomationManager {
       runMode: "local",
       agentId: "claude",
       trustProfile: "autonomous",
+      bypass: true,
       crew,
     }
     this.automations.set(id, auto)
@@ -1053,9 +1073,9 @@ export class AutomationManager {
       return
     }
 
-    // ── Security gate: whitelist + confirmation ──
+    // ── Security gate: whitelist + confirmation (bypass=true skips this) ──
     const skillId = auto.templateId || auto.skill || auto.id
-    if (!this.whitelist.isTrusted(skillId) && riskReport.score >= 30 && this.onEvent) {
+    if (!auto.bypass && !this.whitelist.isTrusted(skillId) && riskReport.score >= 30 && this.onEvent) {
       log.info(`[Automation] Requesting confirmation for "${auto.name}" (risk=${riskReport.score})`)
       this.onEvent({ type: "skill_confirmation_required", automationId: id, skillId, riskReport, manifest: auto.manifest })
 
@@ -2091,6 +2111,17 @@ export class AutomationManager {
     for (const [id] of this.timers) {
       this.stopSchedule(id)
     }
+  }
+
+  /** Synchronous kill of all running automation child processes.
+   *  Called from process.on("exit") to prevent zombie orphans on daemon crash.
+   *  Must be synchronous — async won't run inside "exit" handler. */
+  killAllRunning(): void {
+    for (const [id, proc] of this.runningProcesses) {
+      try { killProcessTree(proc) } catch {}
+    }
+    this.runningProcesses.clear()
+    this.running.clear()
   }
 
   /**

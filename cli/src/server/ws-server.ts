@@ -4860,6 +4860,15 @@ export function createServer(portOverride?: number) {
               // Don't spam notifications — agent exits after resume are expected
               // (e.g., Claude resumed a completed conversation and exited normally)
             } else {
+            // Push notification for session crash
+            const alCfg2 = cfg.agentlore
+            if (alCfg2) {
+              const lastTitle = sessionLastTitle.get(sessionId) || sessionAgentId
+              sendPushNotification(alCfg2, `${sessionAgentId} crashed`, lastTitle, {
+                sessionId,
+                type: "session_crashed",
+              }).catch(() => {})
+            }
             // Emit crash event to clients
             const agentLabel = sessionAgentId.charAt(0).toUpperCase() + sessionAgentId.slice(1)
             const loc = getSessionLocale(sessionId, sessionLaunchSettings)
@@ -4947,6 +4956,16 @@ export function createServer(portOverride?: number) {
   })
 
   sessions.on("exit", (sessionId: string) => {
+    // Push notification for session exit
+    const alCfg = cfg.agentlore
+    if (alCfg) {
+      const title = sessionLastTitle.get(sessionId) || "Session ended"
+      sendPushNotification(alCfg, "Session ended", title, {
+        sessionId,
+        type: "session_ended",
+      }).catch(() => {})
+    }
+
     progressInterceptor.untrackSession(sessionId)
     sessionEngines.delete(sessionId)
     sessionRecentEvents.delete(sessionId)
@@ -5016,47 +5035,52 @@ export function createServer(portOverride?: number) {
       server.on("close", () => tunnel.stop())
     } catch (err: any) {
       log.warn(`Tunnel failed (LAN-only mode): ${err.message}`)
-      // Retry tunnel — check Cloudflare rate limit before each attempt
-      const retryTunnel = async (attempt: number) => {
-        if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only`); return }
-        // Check Cloudflare rate limit first
-        const { checkCloudflareRateLimit } = await import("./tunnel.js")
-        const waitSeconds = await checkCloudflareRateLimit()
-        const delay = waitSeconds > 0 ? waitSeconds : 120  // Use Retry-After or default 2min
-        log.dim(`Tunnel retry ${attempt} in ${delay}s${waitSeconds > 0 ? " (from Retry-After)" : ""}...`)
-        setTimeout(async () => {
-          try {
-            // Re-check rate limit right before attempt
-            const preWait = await checkCloudflareRateLimit()
-            if (preWait > 0) {
-              log.dim(`Still rate limited, retrying in ${preWait}s...`)
-              retryTunnel(attempt)  // Same attempt number, don't count this
-              return
-            }
-            const { startTunnel } = await import("./tunnel.js")
-            const tunnel = await startTunnel(PORT)
-            tunnelState.url = tunnel.url
-            updateGlobalTunnelUrl(tunnel.url)
-            log.info(`Tunnel recovered (attempt ${attempt}): ${tunnel.url}`)
-            tunnel.onRestart = (newUrl: string) => {
-              tunnelState.url = newUrl
-              updateGlobalTunnelUrl(newUrl)
-              log.info(`Tunnel URL changed: ${newUrl}`)
-              const agentloreConfig = config.agentlore
-              if (agentloreConfig) {
-                const cloudTokenPath = join(getConfigDir(), "cloud-token")
-                const cloudToken = existsSync(cloudTokenPath) ? readFileSync(cloudTokenPath, "utf-8").trim() : ""
-                if (cloudToken) agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, newUrl)
+      // Retry tunnel in background — never crash the daemon
+      const retryTunnel = async (attempt: number): Promise<void> => {
+        try {
+          if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only`); return }
+          // Check Cloudflare rate limit first
+          const { checkCloudflareRateLimit } = await import("./tunnel.js")
+          const waitSeconds = await checkCloudflareRateLimit()
+          const delay = waitSeconds > 0 ? waitSeconds : 120  // Use Retry-After or default 2min
+          log.dim(`Tunnel retry ${attempt} in ${delay}s${waitSeconds > 0 ? " (from Retry-After)" : ""}...`)
+          setTimeout(async () => {
+            try {
+              // Re-check rate limit right before attempt
+              const preWait = await checkCloudflareRateLimit()
+              if (preWait > 0) {
+                log.dim(`Still rate limited, retrying in ${preWait}s...`)
+                retryTunnel(attempt).catch((e) => log.warn(`[Tunnel] retry error: ${e.message}`))
+                return
               }
+              const { startTunnel } = await import("./tunnel.js")
+              const tunnel = await startTunnel(PORT)
+              tunnelState.url = tunnel.url
+              updateGlobalTunnelUrl(tunnel.url)
+              log.info(`Tunnel recovered (attempt ${attempt}): ${tunnel.url}`)
+              tunnel.onRestart = (newUrl: string) => {
+                tunnelState.url = newUrl
+                updateGlobalTunnelUrl(newUrl)
+                log.info(`Tunnel URL changed: ${newUrl}`)
+                const agentloreConfig = config.agentlore
+                if (agentloreConfig) {
+                  const cloudTokenPath = join(getConfigDir(), "cloud-token")
+                  const cloudToken = existsSync(cloudTokenPath) ? readFileSync(cloudTokenPath, "utf-8").trim() : ""
+                  if (cloudToken) agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, newUrl)
+                }
+              }
+              server.on("close", () => tunnel.stop())
+            } catch (retryErr: any) {
+              log.dim(`Tunnel retry ${attempt} failed: ${retryErr.message}`)
+              retryTunnel(attempt + 1).catch((e) => log.warn(`[Tunnel] retry error: ${e.message}`))
             }
-            server.on("close", () => tunnel.stop())
-          } catch {
-            log.dim(`Tunnel retry ${attempt} failed`)
-            retryTunnel(attempt + 1)
-          }
-        }, delay * 1000)
+          }, delay * 1000)
+        } catch (outerErr: any) {
+          // Safety net: if even the retry setup fails, log and give up gracefully
+          log.warn(`[Tunnel] retry setup error (staying LAN-only): ${outerErr.message}`)
+        }
       }
-      retryTunnel(1)
+      retryTunnel(1).catch((e) => log.warn(`[Tunnel] retry error: ${e.message}`))
     }
 
     // AgentLore heartbeat
