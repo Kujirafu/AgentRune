@@ -15,6 +15,7 @@ import { buildApiUrl, canUseApi } from "../lib/storage"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 import CrewReportSheet from "./CrewReportSheet"
+import AutomationReportSheet from "./AutomationReportSheet"
 // ChainBuilder import removed ??chain editing moved to workflow tab direct access
 import { trackScheduleCreate, trackAutomationTrigger } from "../lib/analytics"
 
@@ -363,7 +364,8 @@ function useTemplateI18n() {
 // --- Main Component ---
 
 export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit, onLaunchSession }: AutomationSheetProps) {
-  const { t } = useLocale()
+  const { t, locale } = useLocale()
+  const reportLocale = locale === "zh-TW" ? "zh-TW" : "en"
   const { tplName, tplDesc } = useTemplateI18n()
   const [automations, setAutomations] = useState<AutomationConfig[]>([])
   const [loading, setLoading] = useState(false)
@@ -399,6 +401,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [expandedRoleId, setExpandedRoleId] = useState<string | null>(null)
   // chainPickerRoleId/chainEditRoleId removed ??skill chain selection simplified out
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null)
+  const [resultReportTarget, setResultReportTarget] = useState<{ automationName: string; resultId: string } | null>(null)
   const [scanResult, setScanResult] = useState<{ blockedCount: number; conflicts: { detectedKey: string; categoryKey: string; blocked: boolean }[]; summaryKey: string; summaryParams: Record<string, string | number> } | null>(null)
   const [scanning, setScanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -1357,15 +1360,19 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           ) : (
                             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                               {results.slice(-5).reverse().map((r) => {
-                                const report = buildAutomationReport(r)
-                                const statusLabel = r.status === "success" ? "Success"
-                                  : r.status === "timeout" ? "Timeout"
-                                  : r.status === "blocked_by_risk" ? "Blocked"
-                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" ? "Skipped"
-                                  : "Failed"
+                                const report = buildAutomationReport(r, reportLocale)
+                                const statusLabel = r.status === "success" ? (reportLocale === "zh-TW" ? "成功" : "Success")
+                                  : r.status === "timeout" ? (reportLocale === "zh-TW" ? "逾時" : "Timeout")
+                                  : r.status === "blocked_by_risk" ? (reportLocale === "zh-TW" ? "阻擋" : "Blocked")
+                                  : r.status === "pending_reauth" ? (reportLocale === "zh-TW" ? "重驗" : "Reauth")
+                                  : r.status === "interrupted" ? (reportLocale === "zh-TW" ? "中斷" : "Interrupted")
+                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" || r.status === "skipped_daily_limit" ? (reportLocale === "zh-TW" ? "略過" : "Skipped")
+                                  : (reportLocale === "zh-TW" ? "失敗" : "Failed")
                                 const statusColor = r.status === "success" ? "#22c55e"
                                   : r.status === "timeout" ? "#f59e0b"
-                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" ? "#94a3b8"
+                                  : r.status === "pending_reauth" ? "#FB7185"
+                                  : r.status === "interrupted" ? "#f97316"
+                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" || r.status === "skipped_daily_limit" ? "#94a3b8"
                                   : "#ef4444"
                                 return (
                                   <div key={r.id} style={{
@@ -1383,13 +1390,20 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} 繚 {formatDuration(r.finishedAt - r.startedAt)}
                                       </div>
                                     </div>
-                                    {report.summary && (
+                                    <div style={{
+                                      marginTop: 8,
+                                      padding: "10px 12px",
+                                      borderRadius: 12,
+                                      background: "var(--glass-border)",
+                                      border: "1px solid rgba(55,172,192,0.16)",
+                                    }}>
                                       <div style={{
-                                        marginTop: 8,
-                                        padding: "10px 12px",
-                                        borderRadius: 10,
-                                        background: "var(--glass-border)",
-                                        border: "1px solid rgba(55,172,192,0.16)",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        gap: 8,
+                                        flexWrap: "wrap",
+                                        marginBottom: 8,
                                       }}>
                                         <div style={{
                                           fontSize: 10,
@@ -1397,106 +1411,53 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                           color: "#37ACC0",
                                           textTransform: "uppercase",
                                           letterSpacing: 1.2,
-                                          marginBottom: 6,
                                         }}>
                                           {t("automation.summaryReport")}
                                         </div>
-                                        <div style={{
-                                          fontSize: 12,
-                                          lineHeight: 1.6,
-                                          color: "var(--text-primary)",
-                                          whiteSpace: "pre-wrap",
-                                          wordBreak: "break-word",
-                                        }}>
-                                          {report.summary}
+                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                          {report.sections.slice(0, 3).map((section) => (
+                                            <span key={`${r.id}-${section.key}`} style={{
+                                              fontSize: 10,
+                                              padding: "4px 8px",
+                                              borderRadius: 999,
+                                              background: REPORT_SECTION_ACCENT[section.key].glow,
+                                              color: REPORT_SECTION_ACCENT[section.key].color,
+                                              fontWeight: 700,
+                                            }}>
+                                              {getReportSectionTitle(section.key)}
+                                            </span>
+                                          ))}
                                         </div>
                                       </div>
-                                    )}
-
-                                    {report.sections.length > 0 && (
-                                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                                        {report.sections.map((section) => {
-                                          const accent = REPORT_SECTION_ACCENT[section.key]
-                                          return (
-                                            <div
-                                              key={`${r.id}-${section.key}`}
-                                              style={{
-                                                padding: "10px 12px",
-                                                borderRadius: 10,
-                                                background: accent.glow,
-                                                border: `1px solid ${accent.glow}`,
-                                                boxShadow: `inset 3px 0 0 ${accent.color}`,
-                                              }}
-                                            >
-                                              <div style={{
-                                                fontSize: 10,
-                                                fontWeight: 700,
-                                                color: accent.color,
-                                                textTransform: "uppercase",
-                                                letterSpacing: 1.2,
-                                                marginBottom: 8,
-                                              }}>
-                                                {getReportSectionTitle(section.key)}
-                                              </div>
-                                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                                {section.items.map((item, index) => (
-                                                  <div key={`${r.id}-${section.key}-${index}`} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                                                    <div style={{
-                                                      width: 6,
-                                                      height: 6,
-                                                      marginTop: 6,
-                                                      borderRadius: "50%",
-                                                      background: accent.color,
-                                                      flexShrink: 0,
-                                                    }} />
-                                                    <div style={{
-                                                      fontSize: 12,
-                                                      lineHeight: 1.55,
-                                                      color: "var(--text-primary)",
-                                                      whiteSpace: "pre-wrap",
-                                                      wordBreak: "break-word",
-                                                    }}>
-                                                      {item}
-                                                    </div>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            </div>
-                                          )
-                                        })}
+                                      <div style={{
+                                        fontSize: 12,
+                                        lineHeight: 1.6,
+                                        color: "var(--text-primary)",
+                                        whiteSpace: "pre-wrap",
+                                        wordBreak: "break-word",
+                                      }}>
+                                        {report.summary || "已產生完整報告，點下面查看詳細結果。"}
                                       </div>
-                                    )}
-
-                                    {report.fullLog && (
-                                      <details style={{ marginTop: 8 }}>
-                                        <summary style={{
-                                          cursor: "pointer",
-                                          fontSize: 11,
-                                          fontWeight: 700,
-                                          color: "var(--text-secondary)",
-                                          listStyle: "none",
-                                          userSelect: "none",
-                                        }}>
-                                          {t("automation.fullLog")}
-                                        </summary>
-                                        <div style={{
-                                          marginTop: 8,
-                                          fontSize: 12,
-                                          lineHeight: 1.5,
-                                          color: "var(--text-secondary)",
-                                          whiteSpace: "pre-wrap",
-                                          wordBreak: "break-word",
-                                          maxHeight: 180,
-                                          overflowY: "auto",
-                                          background: "rgba(15,23,42,0.08)",
-                                          padding: "10px 12px",
-                                          borderRadius: 8,
-                                          border: "1px solid var(--glass-border)",
-                                        }}>
-                                          {report.fullLog}
-                                        </div>
-                                      </details>
-                                    )}
+                                      <button onClick={() => setResultReportTarget({ automationName: auto.name, resultId: r.id })} style={{
+                                        marginTop: 10,
+                                        width: "100%",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        gap: 8,
+                                        padding: "10px 12px",
+                                        borderRadius: 10,
+                                        border: "1px solid rgba(55,172,192,0.28)",
+                                        background: "rgba(55,172,192,0.08)",
+                                        color: "#37ACC0",
+                                        fontSize: 12,
+                                        fontWeight: 700,
+                                        cursor: "pointer",
+                                      }}>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
+                                        查看完整報告
+                                      </button>
+                                    </div>
                                   </div>
                                 )
                               })}
@@ -2626,6 +2587,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         automationName={reportTarget?.name || ""}
         serverUrl={serverUrl}
         onClose={() => setReportTarget(null)}
+      />
+      <AutomationReportSheet
+        open={!!resultReportTarget}
+        automationName={resultReportTarget?.automationName || ""}
+        results={results}
+        selectedResultId={resultReportTarget?.resultId || null}
+        onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)}
+        onClose={() => setResultReportTarget(null)}
       />
 
     </>

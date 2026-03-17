@@ -113,4 +113,46 @@ describe("buildAutomationReport", () => {
     expect(results?.items).toContain("Duplicate Of: 03/17 09:00 | Agent 視角 | AI 盲區 | post 123")
     expect(results?.items).toContain("Reason: duplicate content matched a recently published post")
   })
+
+  it("recognizes korean section headings and maps them into structured sections", () => {
+    const output = [
+      "실행 결과",
+      "- Threads draft created successfully",
+      "",
+      "문제",
+      "- Cloudflare cooldown active for 12m",
+      "",
+      "다음 단계",
+      "- Retry after cooldown expires",
+    ].join("\n")
+
+    const report = buildAutomationReport({ summary: "", output })
+    const results = report.sections.find((section) => section.key === "results")
+    const issues = report.sections.find((section) => section.key === "issues")
+    const decisions = report.sections.find((section) => section.key === "decisions")
+
+    expect(results?.items).toContain("Threads draft created successfully")
+    expect(issues?.items).toContain("Cloudflare cooldown active for 12m")
+    expect(decisions?.items).toContain("Retry after cooldown expires")
+  })
+
+  it("localizes common korean and internal publish lines for zh-TW presentation", () => {
+    const output = [
+      "Session 91 완전히 완료됐습니다. 포스트는 타임아웃이 났지만 API 확인 결과 실제 발행 성공입니다.",
+      "",
+      "--- AgentRune Social Publish ---",
+      "Platform: threads",
+      "Posted: yes",
+      "Post ID: 18313545688286987",
+    ].join("\n")
+
+    const report = buildAutomationReport({ summary: "", output }, "zh-TW")
+    const results = report.sections.find((section) => section.key === "results")
+
+    expect(report.summary).toContain("Session 91 已完整完成")
+    expect(report.summary).toContain("API 確認實際已發佈成功")
+    expect(results?.items).toContain("平台：Threads")
+    expect(results?.items).toContain("發文結果：已發布")
+    expect(results?.items).toContain("貼文 ID：18313545688286987")
+  })
 })

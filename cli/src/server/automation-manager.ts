@@ -17,7 +17,16 @@ import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
 import { buildAutomationSocialInstructions, detectAutomationSocialMode, extractAutomationSocialDirective, outputNeedsManualIntervention } from "./automation-social.js"
-import { buildRecentSocialPostPromptContext, findDuplicateSocialPost, formatSocialDuplicateMatch, rememberSocialPost } from "./social-dedup.js"
+import {
+  buildRecentSocialPostPromptContext,
+  clearSocialPublishCooldown,
+  findDuplicateSocialPost,
+  formatSocialDuplicateMatch,
+  formatSocialPublishCooldown,
+  getActiveSocialPublishCooldown,
+  rememberSocialPost,
+  rememberSocialPublishCooldown,
+} from "./social-dedup.js"
 import { recordPublishedSocialPost } from "./social-history.js"
 import { publishSocialPost } from "./social-publisher.js"
 import { extractAutomationSummary } from "./automation-summary.js"
@@ -289,7 +298,15 @@ export function wrapPromptWithLocale(prompt: string): string {
   const locale = getSystemLocale()
   if (locale === "en") return prompt
   const langName = LOCALE_NAMES[locale] || locale
-  return `[System] Respond in ${langName}. All output, summaries, and reports must be in ${langName}.\n\n${prompt}`
+  const outputStyle =
+    locale === "zh-TW"
+      ? "Use Traditional Chinese for all section headings, summaries, progress reports, tables, and final answers. Do not switch to Korean, Japanese, Simplified Chinese, or English except for unavoidable product names, API field names, or direct quotes."
+      : locale === "ja"
+        ? "Use Japanese for all section headings, summaries, progress reports, tables, and final answers."
+        : locale === "ko"
+          ? "Use Korean for all section headings, summaries, progress reports, tables, and final answers."
+          : `All output, summaries, and reports must be in ${langName}.`
+  return `[System] Respond in ${langName}. ${outputStyle}\n\n${prompt}`
 }
 
 // --- Agent protocol (shared with ws-server) ---
@@ -602,7 +619,7 @@ export class AutomationManager {
     if (this.automations.size >= this.limits.maxAutomations) {
       return { error: `Automation limit reached (max ${this.limits.maxAutomations}). Upgrade to add more.` }
     }
-    const id = `auto_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const id = `auto_${Date.now()}_${randomBytes(4).toString("hex")}`
     const automation: AutomationConfig = {
       ...config,
       id,
@@ -1006,7 +1023,7 @@ export class AutomationManager {
   /** Fire-and-forget: create a temp automation with crew config and execute immediately */
   async fireAndForget(projectId: string, name: string, crew: CrewConfig, sessionContext?: string): Promise<string> {
     if (!this.schedulingEnabled) throw new Error("Automation execution disabled on this daemon (release daemon)");
-    const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const id = `fire_${Date.now()}_${randomBytes(4).toString("hex")}`
     const auto: AutomationConfig = {
       id,
       projectId,
@@ -1050,6 +1067,7 @@ export class AutomationManager {
     if (!this.schedulingEnabled) return // release daemon does not execute automations
     const auto = this.automations.get(id)
     if (!auto || (!auto.enabled && !manualTrigger)) return
+    const socialMode = detectAutomationSocialMode(auto)
 
     // Prevent duplicate concurrent execution
     if (this.running.has(id)) {
@@ -1067,49 +1085,94 @@ export class AutomationManager {
     }
 
     try {
-    // Daily rate limit check
-    const todayKey = new Date().toISOString().slice(0, 10)
-    const todayCount = this.dailyExecCount.get(todayKey) || 0
-    if (todayCount >= this.limits.maxDailyExecutions) {
-      log.warn(`[Automation] Daily execution limit reached (${this.limits.maxDailyExecutions}), skipping "${auto.name}"`)
-      return
-    }
-    this.dailyExecCount.set(todayKey, todayCount + 1)
-    // Prune stale daily counts (keep only last 7 days)
-    if (this.dailyExecCount.size > 7) {
-      const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
-      for (const key of this.dailyExecCount.keys()) {
-        if (key < cutoff) this.dailyExecCount.delete(key)
-      }
-    }
+      if (socialMode) {
+        const activeCooldown = getActiveSocialPublishCooldown(socialMode.platform)
+        if (activeCooldown) {
+          const startedAt = Date.now()
+          const output = [
+            "--- AgentRune Social Publish ---",
+            `Platform: ${socialMode.platform}`,
+            "Posted: skipped",
+            "Reason: publish cooldown active",
+            `Cooldown: ${formatSocialPublishCooldown(activeCooldown, startedAt)}`,
+            `Cooldown Reason: ${activeCooldown.reason}`,
+            activeCooldown.error ? `Last Error: ${activeCooldown.error}` : undefined,
+            activeCooldown.source ? `Source: ${activeCooldown.source}` : undefined,
+            manualTrigger ? "Manual Trigger: respected active cooldown" : undefined,
+          ].filter(Boolean).join("\n")
 
-    // Per-automation daily run limit (from Trust Profile)
-    if (auto.dailyRunLimit && auto.dailyRunLimit > 0) {
-      const results = this.results.get(id) || []
-      const todayStart = new Date(todayKey).getTime()
-      const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
-      if (todayRunCount >= auto.dailyRunLimit) {
-        log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
-        auditLog("daily_limit_reached", { todayRunCount, limit: auto.dailyRunLimit }, { automationId: id, automationName: auto.name })
-        const result: AutomationResult = {
-          id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
-          exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
-          status: "skipped_daily_limit",
+          const resultEntry: AutomationResult = {
+            id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
+            automationId: id,
+            startedAt,
+            finishedAt: Date.now(),
+            exitCode: null,
+            output,
+            summary: extractAutomationSummary(output, "skipped_no_action"),
+            status: "skipped_no_action",
+          }
+
+          this.storeResult(id, resultEntry)
+          auto.lastRunAt = resultEntry.finishedAt
+          auto.lastRunStatus = "skipped_no_action"
+          this.saveToDisk()
+
+          log.info(`[Automation] "${auto.name}" skipped: active ${socialMode.platform} publish cooldown`)
+          auditLog(
+            "automation_completed",
+            { status: resultEntry.status, exitCode: resultEntry.exitCode, durationMs: resultEntry.finishedAt - resultEntry.startedAt },
+            { automationId: id, automationName: auto.name },
+          )
+          if (this.onEvent) {
+            this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
+          }
+          return
         }
-        this.storeResult(id, result)
-        this.running.delete(id)
-        if (this.onEvent) {
-          this.onEvent({ type: "daily_limit_reached", automationId: id, automationName: auto.name, limit: auto.dailyRunLimit, todayCount: todayRunCount })
-        }
+      }
+
+      // Daily rate limit check
+      const todayKey = new Date().toISOString().slice(0, 10)
+      const todayCount = this.dailyExecCount.get(todayKey) || 0
+      if (todayCount >= this.limits.maxDailyExecutions) {
+        log.warn(`[Automation] Daily execution limit reached (${this.limits.maxDailyExecutions}), skipping "${auto.name}"`)
         return
       }
-    }
+      this.dailyExecCount.set(todayKey, todayCount + 1)
+      // Prune stale daily counts (keep only last 7 days)
+      if (this.dailyExecCount.size > 7) {
+        const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+        for (const key of this.dailyExecCount.keys()) {
+          if (key < cutoff) this.dailyExecCount.delete(key)
+        }
+      }
 
-    const project = this.projects.find((p) => p.id === auto.projectId)
-    if (!project) {
-      log.warn(`[Automation] Project "${auto.projectId}" not found for automation "${auto.name}"`)
-      return
-    }
+      // Per-automation daily run limit (from Trust Profile)
+      if (auto.dailyRunLimit && auto.dailyRunLimit > 0) {
+        const results = this.results.get(id) || []
+        const todayStart = new Date(todayKey).getTime()
+        const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
+        if (todayRunCount >= auto.dailyRunLimit) {
+          log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
+          auditLog("daily_limit_reached", { todayRunCount, limit: auto.dailyRunLimit }, { automationId: id, automationName: auto.name })
+          const result: AutomationResult = {
+            id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
+            exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
+            status: "skipped_daily_limit",
+          }
+          this.storeResult(id, result)
+          this.running.delete(id)
+          if (this.onEvent) {
+            this.onEvent({ type: "daily_limit_reached", automationId: id, automationName: auto.name, limit: auto.dailyRunLimit, todayCount: todayRunCount })
+          }
+          return
+        }
+      }
+
+      const project = this.projects.find((p) => p.id === auto.projectId)
+      if (!project) {
+        log.warn(`[Automation] Project "${auto.projectId}" not found for automation "${auto.name}"`)
+        return
+      }
 
     // ── Security gate: static analysis ──
     const contentToAnalyze = [auto.prompt || "", auto.command || "", auto.skill || ""].join("\n")
@@ -1217,8 +1280,6 @@ export class AutomationManager {
     let output = ""
     let exitCode: number | null = null
     let status: AutomationResult["status"] = "success"
-    const socialMode = detectAutomationSocialMode(auto)
-
     try {
       // Create a temporary PTY session for this automation
       // Runtime behavior monitor
@@ -1430,6 +1491,13 @@ export class AutomationManager {
             if (publishResult.success) {
               output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: yes\nPost ID: ${publishResult.postId}\nSource: ${directive.source || "unknown"}`
 
+              const cooldownClear = clearSocialPublishCooldown(directive.platform)
+              if (cooldownClear.success) {
+                output += `\nCooldown Guard: ${cooldownClear.cleared ? "cleared" : "not active"}`
+              } else {
+                output += `\nCooldown Guard: clear failed\nCooldown Guard Error: ${cooldownClear.error || "Unknown cooldown clear error"}`
+              }
+
               const dedupeResult = rememberSocialPost({
                 platform: directive.platform,
                 text: directive.text,
@@ -1461,6 +1529,22 @@ export class AutomationManager {
               }
             } else {
               output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: no\nError: ${publishResult.error || "Unknown publish error"}`
+              if (publishResult.cooldownMs && publishResult.cooldownReason) {
+                const cooldownResult = rememberSocialPublishCooldown({
+                  platform: directive.platform,
+                  reason: publishResult.cooldownReason,
+                  cooldownMs: publishResult.cooldownMs,
+                  retryAfterMs: publishResult.retryAfterMs,
+                  statusCode: publishResult.statusCode,
+                  error: publishResult.error,
+                  source: directive.source,
+                })
+                if (cooldownResult.success && cooldownResult.entry) {
+                  output += `\nCooldown Guard: active until ${formatSocialPublishCooldown(cooldownResult.entry)}`
+                } else {
+                  output += `\nCooldown Guard: failed\nCooldown Guard Error: ${cooldownResult.error || "Unknown cooldown persistence error"}`
+                }
+              }
               status = "failed"
             }
           }
@@ -1476,12 +1560,13 @@ export class AutomationManager {
         }
       }
     } catch (err) {
-      output = err instanceof Error ? err.message : String(err)
+      log.error(`[Automation] execution error: ${err instanceof Error ? err.message : String(err)}`)
+      output = "Automation execution failed unexpectedly"
       status = "failed"
     }
 
     const resultEntry: AutomationResult = {
-      id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
       automationId: id,
       startedAt,
       finishedAt: Date.now(),
@@ -1786,7 +1871,7 @@ export class AutomationManager {
     const output = outputParts.join("\n\n---\n\n")
 
     const resultEntry: AutomationResult = {
-      id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
       automationId: id,
       startedAt,
       finishedAt: report.completedAt,
@@ -2281,7 +2366,7 @@ export class AutomationManager {
       }
       // Store interrupted result
       this.storeResult(id, {
-        id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
         automationId: id,
         startedAt: Date.now(),
         finishedAt: Date.now(),

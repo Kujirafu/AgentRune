@@ -13,6 +13,8 @@ export interface AutomationReport {
   fullLog: string
 }
 
+export type AutomationReportLocale = "en" | "zh-TW"
+
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
 const FE_RE = /\x1b[@-Z\\-_]/g
@@ -35,6 +37,9 @@ const SECTION_ALIASES: Record<AutomationReportSectionKey, string[]> = {
     "執行流程",
     "執行流程分析",
     "發文前檢查清單",
+    "수행한 작업",
+    "실행 내용",
+    "진행한 일",
     "steps",
     "step",
     "actions taken",
@@ -52,6 +57,9 @@ const SECTION_ALIASES: Record<AutomationReportSectionKey, string[]> = {
     "摘要",
     "判斷",
     "結論",
+    "결과",
+    "실행 결과",
+    "요약",
     "summary",
     "outcome",
     "outcomes",
@@ -67,6 +75,9 @@ const SECTION_ALIASES: Record<AutomationReportSectionKey, string[]> = {
     "待修",
     "錯誤",
     "失敗原因",
+    "문제",
+    "위험",
+    "오류",
     "issues",
     "issue",
     "risks",
@@ -89,6 +100,9 @@ const SECTION_ALIASES: Record<AutomationReportSectionKey, string[]> = {
     "下一步",
     "下次執行",
     "下次排程",
+    "결정 필요",
+    "다음 단계",
+    "후속 조치",
     "manual action",
     "action required",
     "next step",
@@ -106,6 +120,9 @@ const SECTION_ALIASES: Record<AutomationReportSectionKey, string[]> = {
     "補充",
     "備註",
     "其他",
+    "메모",
+    "참고",
+    "추가 사항",
     "details",
     "notes",
     "context",
@@ -309,6 +326,84 @@ function uniqueLines(lines: Array<string | null | undefined>): string[] {
   return result
 }
 
+const INTERNAL_FIELD_LABELS_ZH: Record<string, string> = {
+  Platform: "平台",
+  Posted: "發文結果",
+  "Post ID": "貼文 ID",
+  Source: "來源",
+  Error: "錯誤",
+  Reason: "原因",
+  "Duplicate Of": "重複對象",
+  "Duplicate Guard": "重複保護",
+  "Duplicate Guard Error": "重複保護錯誤",
+  "Materials Updated": "素材庫已更新",
+  "Materials Path": "素材路徑",
+  "Materials Error": "素材庫錯誤",
+}
+
+const INTERNAL_VALUE_LABELS_ZH: Record<string, string> = {
+  yes: "已發布",
+  no: "未發布",
+  skipped: "已略過",
+  success: "成功",
+  failed: "失敗",
+  timeout: "逾時",
+  interrupted: "已中斷",
+  pending_reauth: "等待重新驗證",
+}
+
+const ZH_LINE_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/Session (\d+) 완전히 완료됐습니다\./gi, "Session $1 已完整完成。"],
+  [/포스트는 타임아웃이 났지만 API 확인 결과 실제 발행 성공입니다\./gi, "貼文雖然逾時，但 API 確認實際已發佈成功。"],
+  [/실제 발행 성공/gi, "實際發佈成功"],
+  [/완전히 완료됐습니다/gi, "已完整完成"],
+  [/완료되었습니다/gi, "已完成"],
+  [/완료됐습니다/gi, "已完成"],
+  [/타임아웃/gi, "逾時"],
+  [/Cloudflare cooldown active for ([^\n]+)/gi, "Cloudflare 冷卻中（$1）"],
+  [/Retry after cooldown expires/gi, "冷卻結束後重試"],
+  [/Threads draft created successfully/gi, "Threads 草稿已建立"],
+  [/Completed \(no output\)/gi, "已完成（沒有輸出）"],
+  [/Timed out \(no output\)/gi, "已逾時（沒有輸出）"],
+  [/Failed \(no output\)/gi, "已失敗（沒有輸出）"],
+  [/Interrupted by daemon shutdown/gi, "因 daemon 關閉而中斷"],
+  [/duplicate content matched a recently published post/gi, "內容與近期已發布貼文重複"],
+  [/Retry after cooldown/gi, "冷卻後重試"],
+]
+
+function localizeInternalValue(value: string): string {
+  const trimmed = value.trim()
+  const lowered = trimmed.toLowerCase()
+  if (lowered === "threads") return "Threads"
+  if (lowered === "x") return "X"
+  if (lowered === "moltbook") return "Moltbook"
+  return INTERNAL_VALUE_LABELS_ZH[lowered] || trimmed
+}
+
+export function localizeAutomationReportText(text: string, locale: AutomationReportLocale = "en"): string {
+  const trimmed = text.trim()
+  if (!trimmed || locale !== "zh-TW") return trimmed
+
+  const internalMatch = trimmed.match(/^([A-Za-z ]+):\s*(.+)$/)
+  if (internalMatch) {
+    const [, rawLabel, rawValue] = internalMatch
+    const label = INTERNAL_FIELD_LABELS_ZH[rawLabel.trim()]
+    if (label) {
+      return `${label}：${localizeInternalValue(rawValue)}`
+    }
+  }
+
+  let localized = trimmed
+  for (const [pattern, replacement] of ZH_LINE_REPLACEMENTS) {
+    localized = localized.replace(pattern, replacement)
+  }
+  return localized
+}
+
+function localizeLines(lines: string[], locale: AutomationReportLocale): string[] {
+  return uniqueLines(lines.map((line) => localizeAutomationReportText(line, locale)))
+}
+
 function processCodeBlock(buffer: string[], currentSection: AutomationReportSectionKey | null, target: Record<AutomationReportSectionKey, string[]>): void {
   const lines = buffer.map((line) => normalizeLine(line)).filter(Boolean)
   if (lines.length === 0) return
@@ -428,7 +523,10 @@ function pickHeadline(intro: string[], sections: Record<AutomationReportSectionK
     || null
 }
 
-export function buildAutomationReport(result: Pick<AutomationResult, "summary" | "output">): AutomationReport {
+export function buildAutomationReport(
+  result: Pick<AutomationResult, "summary" | "output">,
+  locale: AutomationReportLocale = "en",
+): AutomationReport {
   const fullLog = stripAnsi(result.output || "")
     .split(/\r?\n/)
     .filter((line) => !INTERNAL_MARKER_RE.test(line.trim()))
@@ -445,11 +543,17 @@ export function buildAutomationReport(result: Pick<AutomationResult, "summary" |
     ...sections.issues.slice(0, 1),
   ]))
 
+  const localizedSummary = localizeAutomationReportText(
+    !isThinSummary(derivedSummary) ? derivedSummary || "" : storedSummary || derivedSummary || "",
+    locale,
+  )
+  const localizedSections = SECTION_ORDER
+    .map((key) => ({ key, items: localizeLines(sections[key], locale) }))
+    .filter((section) => section.items.length > 0)
+
   return {
-    summary: !isThinSummary(derivedSummary) ? derivedSummary : storedSummary || derivedSummary,
-    sections: SECTION_ORDER
-      .map((key) => ({ key, items: sections[key] }))
-      .filter((section) => section.items.length > 0),
+    summary: localizedSummary || null,
+    sections: localizedSections,
     fullLog,
   }
 }

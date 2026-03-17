@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { getPidFile, getConfigDir, loadConfig, saveConfig } from "../shared/config.js"
 import { log } from "../shared/logger.js"
+import { shutdownTelemetry, captureCliEvent } from "../server/telemetry.js"
 import { killProcessTree } from "../shared/process-tree.js"
 import { openStateFileForAppend, readStateFile, unlinkStateFile, writeStateFile } from "../shared/state-file.js"
 
@@ -149,6 +150,8 @@ function setupSelfHealing(automationManager?: import("../server/automation-manag
 
   const shutdown = async (signal: string) => {
     log.warn(`[Self-heal] Received ${signal}`)
+    captureCliEvent("cli_stopped", { signal })
+    await shutdownTelemetry()
     if (automationManager) {
       await automationManager.gracefulShutdown()
     }

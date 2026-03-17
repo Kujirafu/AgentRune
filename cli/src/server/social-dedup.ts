@@ -6,15 +6,18 @@ import type { SocialPlatform } from "./social-types.js"
 
 const HISTORY_FILE = "social-post-history.json"
 const LEGACY_MOLTBOOK_HISTORY_FILE = "moltbook-history.json"
-const HISTORY_VERSION = 1
+const HISTORY_VERSION = 2
 const MAX_ENTRIES_PER_PLATFORM = 200
+const MAX_COOLDOWNS = 8
 const DEFAULT_DUPLICATE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+const DEFAULT_PLATFORM_COOLDOWN_MS = 30 * 60 * 1000
 const DEFAULT_PROMPT_LIMIT = 5
 const MAX_EXCERPT_LENGTH = 140
 
 interface SocialPostHistoryStore {
   version: number
   posts: SocialPostHistoryEntry[]
+  cooldowns: SocialPublishCooldownEntry[]
 }
 
 export interface SocialPostHistoryEntry {
@@ -62,6 +65,42 @@ export interface FindDuplicateSocialPostRequest {
 
 export interface SocialDuplicateMatch extends SocialPostHistoryEntry {
   ageMs: number
+}
+
+export interface SocialPublishCooldownEntry {
+  platform: SocialPlatform
+  reason: string
+  createdAt: number
+  expiresAt: number
+  source?: string
+  error?: string
+  statusCode?: number
+  retryAfterMs?: number
+}
+
+export interface RememberSocialPublishCooldownRequest {
+  platform: SocialPlatform
+  reason: string
+  createdAt?: number
+  cooldownMs?: number
+  expiresAt?: number
+  source?: string
+  error?: string
+  statusCode?: number
+  retryAfterMs?: number
+}
+
+export interface SocialPublishCooldownResult {
+  success: boolean
+  stored: boolean
+  entry?: SocialPublishCooldownEntry
+  error?: string
+}
+
+export interface ClearSocialPublishCooldownResult {
+  success: boolean
+  cleared: boolean
+  error?: string
 }
 
 interface LegacyMoltbookItem {
@@ -155,6 +194,7 @@ export function rememberSocialPost(request: RememberSocialPostRequest): Remember
     saveSystemHistory({
       version: HISTORY_VERSION,
       posts: [...keptPlatformPosts, ...otherPosts].sort((a, b) => b.publishedAt - a.publishedAt),
+      cooldowns: pruneCooldowns(store.cooldowns, publishedAt),
     })
 
     if (entry.platform === "moltbook") {
@@ -170,6 +210,88 @@ export function rememberSocialPost(request: RememberSocialPostRequest): Remember
     return {
       success: false,
       stored: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+export function getActiveSocialPublishCooldown(
+  platform: SocialPlatform,
+  now = Date.now(),
+): SocialPublishCooldownEntry | null {
+  return loadSystemHistory()
+    .cooldowns
+    .filter((entry) => entry.platform === platform && entry.expiresAt > now)
+    .sort((a, b) => b.expiresAt - a.expiresAt)[0] || null
+}
+
+export function rememberSocialPublishCooldown(
+  request: RememberSocialPublishCooldownRequest,
+): SocialPublishCooldownResult {
+  const reason = request.reason.trim()
+  if (!reason) {
+    return { success: false, stored: false, error: "Cooldown reason is required" }
+  }
+
+  const createdAt = request.createdAt ?? Date.now()
+  const cooldownMs = request.expiresAt
+    ? Math.max(1, request.expiresAt - createdAt)
+    : Math.max(1, request.cooldownMs ?? request.retryAfterMs ?? DEFAULT_PLATFORM_COOLDOWN_MS)
+  const expiresAt = request.expiresAt ?? (createdAt + cooldownMs)
+
+  try {
+    const store = loadSystemHistory()
+    const entry: SocialPublishCooldownEntry = {
+      platform: request.platform,
+      reason,
+      createdAt,
+      expiresAt,
+      source: normalizeOptional(request.source),
+      error: normalizeOptional(request.error)?.slice(0, 200),
+      statusCode: typeof request.statusCode === "number" ? request.statusCode : undefined,
+      retryAfterMs: typeof request.retryAfterMs === "number" ? request.retryAfterMs : undefined,
+    }
+
+    const cooldowns = pruneCooldowns([
+      entry,
+      ...store.cooldowns.filter((item) => item.platform !== request.platform),
+    ], createdAt)
+
+    saveSystemHistory({
+      version: HISTORY_VERSION,
+      posts: store.posts,
+      cooldowns,
+    })
+
+    return { success: true, stored: true, entry }
+  } catch (err) {
+    return {
+      success: false,
+      stored: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+export function clearSocialPublishCooldown(platform: SocialPlatform): ClearSocialPublishCooldownResult {
+  try {
+    const store = loadSystemHistory()
+    const cooldowns = store.cooldowns.filter((entry) => entry.platform !== platform)
+    if (cooldowns.length === store.cooldowns.length) {
+      return { success: true, cleared: false }
+    }
+
+    saveSystemHistory({
+      version: HISTORY_VERSION,
+      posts: store.posts,
+      cooldowns,
+    })
+
+    return { success: true, cleared: true }
+  } catch (err) {
+    return {
+      success: false,
+      cleared: false,
       error: err instanceof Error ? err.message : String(err),
     }
   }
@@ -211,6 +333,15 @@ export function formatSocialDuplicateMatch(match: SocialDuplicateMatch): string 
   return parts.join(" | ") || formatPromptTimestamp(match.publishedAt)
 }
 
+export function formatSocialPublishCooldown(entry: SocialPublishCooldownEntry, now = Date.now()): string {
+  const remainingMs = Math.max(0, entry.expiresAt - now)
+  const remainingMinutes = Math.ceil(remainingMs / 60_000)
+  const remainingLabel = remainingMinutes >= 60
+    ? `${Math.ceil(remainingMinutes / 60)}h remaining`
+    : `${remainingMinutes}m remaining`
+  return `${formatPromptTimestamp(entry.expiresAt)} | ${remainingLabel}`
+}
+
 function composeSocialPostBody(platform: SocialPlatform, text: string, title?: string): string {
   if (platform === "moltbook" && title?.trim()) {
     return `${title.trim()}\n\n${text}`
@@ -229,19 +360,23 @@ function computeSocialPostFingerprintForPayload(platform: SocialPlatform, text: 
 function loadSystemHistory(): SocialPostHistoryStore {
   const filePath = getSystemHistoryFilePath()
   if (!existsSync(filePath)) {
-    return { version: HISTORY_VERSION, posts: [] }
+    return { version: HISTORY_VERSION, posts: [], cooldowns: [] }
   }
 
   try {
     const raw = readFileSync(filePath, "utf-8")
     const parsed = JSON.parse(raw) as Partial<SocialPostHistoryStore>
     const posts = Array.isArray(parsed.posts) ? parsed.posts.filter(isValidHistoryEntry) : []
+    const cooldowns = Array.isArray(parsed.cooldowns)
+      ? sanitizeCooldowns(parsed.cooldowns.filter(isValidCooldownEntry))
+      : []
     return {
       version: typeof parsed.version === "number" ? parsed.version : HISTORY_VERSION,
       posts,
+      cooldowns,
     }
   } catch {
-    return { version: HISTORY_VERSION, posts: [] }
+    return { version: HISTORY_VERSION, posts: [], cooldowns: [] }
   }
 }
 
@@ -366,6 +501,21 @@ function dedupeHistoryEntries(entries: SocialPostHistoryEntry[]): SocialPostHist
   return result
 }
 
+function pruneCooldowns(
+  entries: SocialPublishCooldownEntry[],
+  now = Date.now(),
+): SocialPublishCooldownEntry[] {
+  return sanitizeCooldowns(entries)
+    .filter((entry) => entry.expiresAt > now)
+}
+
+function sanitizeCooldowns(entries: SocialPublishCooldownEntry[]): SocialPublishCooldownEntry[] {
+  return entries
+    .filter((entry) => Number.isFinite(entry.createdAt) && Number.isFinite(entry.expiresAt))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, MAX_COOLDOWNS)
+}
+
 function isValidHistoryEntry(value: unknown): value is SocialPostHistoryEntry {
   if (!value || typeof value !== "object") return false
   const entry = value as Partial<SocialPostHistoryEntry>
@@ -375,6 +525,17 @@ function isValidHistoryEntry(value: unknown): value is SocialPostHistoryEntry {
     typeof entry.normalizedText === "string" &&
     typeof entry.fingerprint === "string" &&
     typeof entry.publishedAt === "number"
+  )
+}
+
+function isValidCooldownEntry(value: unknown): value is SocialPublishCooldownEntry {
+  if (!value || typeof value !== "object") return false
+  const entry = value as Partial<SocialPublishCooldownEntry>
+  return (
+    typeof entry.platform === "string" &&
+    typeof entry.reason === "string" &&
+    typeof entry.createdAt === "number" &&
+    typeof entry.expiresAt === "number"
   )
 }
 

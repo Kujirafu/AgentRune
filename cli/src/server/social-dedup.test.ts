@@ -13,9 +13,13 @@ vi.mock("../shared/config.js", () => ({
 
 import {
   buildRecentSocialPostPromptContext,
+  clearSocialPublishCooldown,
   findDuplicateSocialPost,
+  formatSocialPublishCooldown,
+  getActiveSocialPublishCooldown,
   normalizeSocialPostText,
   rememberSocialPost,
+  rememberSocialPublishCooldown,
 } from "./social-dedup.js"
 
 const tempDirs: string[] = []
@@ -120,5 +124,56 @@ describe("social-dedup", () => {
       title: "Latency floors catch fake reviews",
       source: "legacy-script",
     })
+  })
+
+  it("persists active social publish cooldowns across runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentrune-social-dedup-"))
+    tempDirs.push(dir)
+    mockConfig.dir = dir
+
+    const stored = rememberSocialPublishCooldown({
+      platform: "moltbook",
+      reason: "API returned Retry-After backoff",
+      cooldownMs: 15 * 60 * 1000,
+      source: "moltbook-scheduler",
+      error: "429: Too Many Requests",
+      createdAt: Date.UTC(2026, 2, 17, 9, 0),
+    })
+
+    expect(stored).toMatchObject({
+      success: true,
+      stored: true,
+      entry: {
+        platform: "moltbook",
+        reason: "API returned Retry-After backoff",
+        source: "moltbook-scheduler",
+      },
+    })
+
+    const active = getActiveSocialPublishCooldown("moltbook", Date.UTC(2026, 2, 17, 9, 5))
+    expect(active).toMatchObject({
+      platform: "moltbook",
+      error: "429: Too Many Requests",
+    })
+    expect(formatSocialPublishCooldown(active!, Date.UTC(2026, 2, 17, 9, 5))).toContain("10m remaining")
+  })
+
+  it("clears cooldowns after a successful publish", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentrune-social-dedup-"))
+    tempDirs.push(dir)
+    mockConfig.dir = dir
+
+    rememberSocialPublishCooldown({
+      platform: "threads",
+      reason: "API rate limit or cooldown detected",
+      cooldownMs: 5 * 60 * 1000,
+    })
+
+    expect(getActiveSocialPublishCooldown("threads")).not.toBeNull()
+    expect(clearSocialPublishCooldown("threads")).toEqual({
+      success: true,
+      cleared: true,
+    })
+    expect(getActiveSocialPublishCooldown("threads")).toBeNull()
   })
 })

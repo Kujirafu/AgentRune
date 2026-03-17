@@ -7,9 +7,10 @@ import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
 import { AutomationSheet } from "./AutomationSheet"
+import AutomationReportSheet from "./AutomationReportSheet"
 import { BUILTIN_TEMPLATES } from "../data/builtin-templates"
 import { CHAIN_TEMPLATES, BUILTIN_CREWS } from "../data/builtin-crews"
-import type { AutomationTemplate } from "../data/automation-types"
+import type { AutomationResult, AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
@@ -17,6 +18,7 @@ import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
 import { buildApiUrl, canUseApi } from "../lib/storage"
+import { buildAutomationReport } from "../lib/automation-report"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -195,6 +197,18 @@ function getSessionStatus(events: AgentEvent[]): string {
   return "idle"
 }
 
+function getAutomationResultMeta(status: AutomationResult["status"]): { label: string; color: string } {
+  if (status === "success") return { label: "OK", color: "#22c55e" }
+  if (status === "timeout") return { label: "TIMEOUT", color: "#f59e0b" }
+  if (status === "pending_reauth") return { label: "REAUTH", color: "#FB7185" }
+  if (status === "interrupted") return { label: "INTERRUPTED", color: "#f97316" }
+  if (status === "skipped_no_action" || status === "skipped_no_confirmation" || status === "skipped_daily_limit") {
+    return { label: "SKIPPED", color: "#94a3b8" }
+  }
+  if (status === "blocked_by_risk") return { label: "BLOCKED", color: "#ef4444" }
+  return { label: "FAIL", color: "#ef4444" }
+}
+
 function getSessionLabels(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem("agentrune_session_labels") || "{}") } catch { return {} }
 }
@@ -305,7 +319,8 @@ export function UnifiedPanel({
   const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; projectId: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; agentId?: string; runMode?: string; skill?: string; nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number; duration?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
   const [expandedResults, setExpandedResults] = useState<string | null>(null)
-  const [resultsData, setResultsData] = useState<Map<string, Array<{ id: string; status: string; startedAt: number; finishedAt: number; duration?: number; output: string }>>>(new Map())
+  const [resultsData, setResultsData] = useState<Map<string, AutomationResult[]>>(new Map())
+  const [resultReportTarget, setResultReportTarget] = useState<{ automationId: string; automationName: string; resultId: string } | null>(null)
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -1722,41 +1737,72 @@ export function UnifiedPanel({
                               <div style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, padding: 8 }}>Loading...</div>
                             )}
                             {(resultsData.get(auto.id) || []).slice().reverse().map((r) => {
+                              const resultMeta = getAutomationResultMeta(r.status)
+                              const report = buildAutomationReport(r, locale === "zh-TW" ? "zh-TW" : "en")
                               const dur = r.finishedAt - r.startedAt
                               const durStr = dur > 60000
                                 ? `${Math.floor(dur / 60000)}m ${Math.round((dur % 60000) / 1000)}s`
                                 : `${Math.round(dur / 1000)}s`
                               return (
-                                <div key={r.id} style={{
-                                  padding: "6px 8px", borderRadius: 8,
-                                  background: "var(--bg-secondary, rgba(0,0,0,0.05))",
-                                  fontSize: 10,
-                                }}>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                                <button
+                                  key={r.id}
+                                  onClick={() => setResultReportTarget({ automationId: auto.id, automationName: auto.name, resultId: r.id })}
+                                  style={{
+                                    padding: "10px 10px 9px",
+                                    borderRadius: 10,
+                                    background: "var(--bg-secondary, rgba(0,0,0,0.05))",
+                                    fontSize: 10,
+                                    border: "1px solid var(--glass-border)",
+                                    textAlign: "left",
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: 8,
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{
                                       width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-                                      background: r.status === "success" ? "#22c55e" : r.status === "timeout" ? "#f59e0b" : "#ef4444",
+                                      background: resultMeta.color,
                                     }} />
-                                    <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
-                                      {r.status === "success" ? "OK" : r.status === "timeout" ? "TIMEOUT" : "FAIL"}
+                                    <span style={{ fontWeight: 700, color: resultMeta.color }}>
+                                      {resultMeta.label}
                                     </span>
                                     <span style={{ color: "var(--text-secondary)" }}>{durStr}</span>
                                     <span style={{ marginLeft: "auto", color: "var(--text-secondary)", opacity: 0.6 }}>
                                       {new Date(r.startedAt).toLocaleString()}
                                     </span>
                                   </div>
-                                  {r.output && (
-                                    <pre style={{
-                                      margin: 0, padding: "4px 6px", borderRadius: 6,
-                                      background: "var(--bg-primary, rgba(0,0,0,0.1))",
-                                      color: "var(--text-secondary)", fontSize: 9, lineHeight: 1.4,
-                                      maxHeight: 120, overflowY: "auto", overflowX: "hidden",
-                                      whiteSpace: "pre-wrap", wordBreak: "break-all",
-                                    }}>
-                                      {r.output.length > 2000 ? r.output.slice(-2000) : r.output}
-                                    </pre>
-                                  )}
-                                </div>
+                                  <div style={{
+                                    padding: "9px 10px",
+                                    borderRadius: 8,
+                                    background: "rgba(255,255,255,0.45)",
+                                    color: "var(--text-primary)",
+                                    fontSize: 11,
+                                    lineHeight: 1.55,
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                  }}>
+                                    {report.summary || "已產生完整報告，點擊查看詳細結果。"}
+                                  </div>
+                                  <div style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: 8,
+                                    color: "#37ACC0",
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                  }}>
+                                    <span>查看完整報告</span>
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                      <polyline points="14 2 14 8 20 8" />
+                                      <line x1="16" y1="13" x2="8" y2="13" />
+                                      <line x1="16" y1="17" x2="8" y2="17" />
+                                    </svg>
+                                  </div>
+                                </button>
                               )
                             })}
                             {resultsData.has(auto.id) && (resultsData.get(auto.id) || []).length === 0 && (
@@ -2989,6 +3035,15 @@ export function UnifiedPanel({
         </>
       )}
       </AnimatePresence>
+
+      <AutomationReportSheet
+        open={!!resultReportTarget}
+        automationName={resultReportTarget?.automationName || ""}
+        results={resultsData.get(resultReportTarget?.automationId || "") || []}
+        selectedResultId={resultReportTarget?.resultId || null}
+        onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)}
+        onClose={() => setResultReportTarget(null)}
+      />
 
       {/* AutomationSheet */}
       <AutomationSheet

@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, basename, dirname, isAbsolute, resolve, normalize, sep } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { execFileSync, spawn as childSpawn } from "node:child_process"
-import { randomInt } from "node:crypto"
+import { randomInt, randomBytes } from "node:crypto"
 import * as childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { PtyManager } from "./pty-manager.js"
@@ -33,12 +33,14 @@ import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { AGENT_INSTALL_INFO, buildAgentLaunch, isLaunchAgentId, normalizeAgentSettings } from "./agent-launch.js"
 import { buildSessionActivityPayload, shouldSendCrashPush } from "./crash-notification.js"
+import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
 import { log } from "../shared/logger.js"
+import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
 import type { AgentEvent, TaskStore, PrdItem, PrdPriority, Project } from "../shared/types.js"
 import type { LaunchAgentId, NormalizedAgentSettings } from "./agent-launch.js"
 
 // --- Terminal Web UI (desktop sync) ---
-function getTerminalHtml(): string {
+function getTerminalHtml(nonce: string): string {
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
@@ -71,11 +73,11 @@ function getTerminalHtml(): string {
 <div id="terminal"></div>
 <div id="input-bar">
   <input id="cmd" placeholder="Type command or message..." autofocus>
-  <button onclick="sendCmd()">Send</button>
+  <button id="send-btn">Send</button>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-<script>
+<script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script nonce="${nonce}">
 const term = new Terminal({ theme: { background: '#1a1a2e', foreground: '#e2e8f0' }, fontSize: 14, cursorBlink: true });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
@@ -129,6 +131,7 @@ function sendCmd() {
 document.getElementById('cmd').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendCmd();
 });
+document.getElementById('send-btn').addEventListener('click', sendCmd);
 
 // Also forward raw keyboard to PTY for interactive use
 term.onData((data) => {
@@ -225,23 +228,17 @@ function getProjectsPath(): string {
 }
 
 function loadProjects(): Project[] {
+  const fallbackProject: Project = {
+    id: "default",
+    name: "Home",
+    cwd: process.env.HOME || process.env.USERPROFILE || ".",
+  }
   const configPath = getProjectsPath()
-  if (!existsSync(configPath)) {
-    return [{
-      id: "default",
-      name: "Home",
-      cwd: process.env.HOME || process.env.USERPROFILE || ".",
-    }]
+  const loaded = loadProjectsFromDisk(configPath, fallbackProject)
+  if (loaded.changed) {
+    saveProjectsToDisk(configPath, loaded.projects)
   }
-  try {
-    return JSON.parse(readFileSync(configPath, "utf-8"))
-  } catch {
-    return [{
-      id: "default",
-      name: "Home",
-      cwd: process.env.HOME || process.env.USERPROFILE || ".",
-    }]
-  }
+  return loaded.projects
 }
 
 // --- Events persistence ---
@@ -535,7 +532,7 @@ export function createServer(portOverride?: number) {
     res.header("X-Frame-Options", "DENY")
     res.header("X-XSS-Protection", "1; mode=block")
     res.header("Referrer-Policy", "no-referrer")
-    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
+    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
     next()
   })
 
@@ -564,7 +561,9 @@ export function createServer(portOverride?: number) {
 
   // Serve terminal web UI at root — enables desktop sync terminal
   app.get("/", (_req, res) => {
-    res.type("html").send(getTerminalHtml())
+    const nonce = randomBytes(16).toString("base64")
+    res.header("Content-Security-Policy", `default-src 'self'; script-src 'nonce-${nonce}' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;`)
+    res.type("html").send(getTerminalHtml(nonce))
   })
 
   // Session tokens for WS auth — Map<token, boundIp>
@@ -1137,7 +1136,7 @@ export function createServer(portOverride?: number) {
     const project = { id, name, cwd: resolvedCwd }
     projects.push(project)
 
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json(project)
   })
 
@@ -1147,7 +1146,7 @@ export function createServer(portOverride?: number) {
     const { name } = req.body
     if (!name) return res.status(400).json({ error: "Missing name" })
     projects[idx].name = name
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json(projects[idx])
   })
 
@@ -1155,7 +1154,7 @@ export function createServer(portOverride?: number) {
     const idx = projects.findIndex((p) => p.id === req.params.id)
     if (idx === -1) return res.status(404).json({ error: "Project not found" })
     projects.splice(idx, 1)
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json({ ok: true })
   })
 
@@ -3619,6 +3618,7 @@ export function createServer(portOverride?: number) {
           }
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
+          captureCliEvent("cli_session_created", { agentId, projectId, resumed: alreadyExisted })
 
           // For recoverable sessions (daemon restarted, PTY gone but events persisted):
           // auto-resume only when the client marks this attach as a real session resume.
@@ -4909,6 +4909,8 @@ export function createServer(portOverride?: number) {
   })
 
   sessions.on("exit", (sessionId: string) => {
+    captureCliEvent("cli_session_ended", { sessionId: sessionId.slice(0, 20) })
+
     // Push notification for session exit
     const alCfg = cfg.agentlore
     if (alCfg) {
@@ -5068,8 +5070,14 @@ export function createServer(portOverride?: number) {
       }, 10 * 60 * 1000) // every 10 minutes
     }
 
-    // AgentLore heartbeat
+    // CLI telemetry — init with deviceId and fire cli_started
     const agentloreConfig = config.agentlore
+    if (agentloreConfig) {
+      initCliTelemetry(agentloreConfig.deviceId)
+      captureCliEvent("cli_started", { port: PORT, platform: process.platform })
+    }
+
+    // AgentLore heartbeat
     if (agentloreConfig) {
       const cloudTokenPath = join(getConfigDir(), "cloud-token")
       let cloudToken: string

@@ -133,7 +133,7 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_no_action" | "circuit_broken"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_no_action" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
 
   // Crew execution
   crew?: CrewConfig
@@ -147,7 +147,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string  // human-readable summary of what the agent actually did
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken" | "interrupted" | "pending_reauth"
 }
 
 export interface AutomationTemplate {

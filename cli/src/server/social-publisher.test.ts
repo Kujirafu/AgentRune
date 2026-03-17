@@ -12,7 +12,7 @@ vi.mock("./vault-keys.js", () => ({
 }))
 
 import { loadNamedVaultSecrets } from "./vault-keys.js"
-import { publishSocialPost } from "./social-publisher.js"
+import { publishSocialPost, solveMoltbookChallenge } from "./social-publisher.js"
 
 describe("social-publisher", () => {
   afterEach(() => {
@@ -96,6 +96,43 @@ describe("social-publisher", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe("https://graph.threads.net/v1.0/12345678901234567/threads_publish")
   })
 
+  it("surfaces Retry-After as a persistent cooldown hint", async () => {
+    vi.mocked(loadNamedVaultSecrets).mockReturnValue({
+      THREADS_USER_ID: "12345678901234567",
+      THREADS_ACCESS_TOKEN: "threads-access-token",
+    })
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      headers: {
+        get(name: string) {
+          return name.toLowerCase() === "retry-after" ? "120" : null
+        },
+      },
+      json: async () => ({
+        error: {
+          message: "Too Many Requests",
+        },
+      }),
+    })
+
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(publishSocialPost({
+      platform: "threads",
+      text: "Approved post text",
+    })).resolves.toMatchObject({
+      success: false,
+      platform: "threads",
+      statusCode: 429,
+      retryAfterMs: 120_000,
+      cooldownMs: 120_000,
+      cooldownReason: "API returned Retry-After backoff",
+      error: "429: Too Many Requests",
+    })
+  })
+
   it("publishes Moltbook posts and answers verification challenges", async () => {
     vi.mocked(loadNamedVaultSecrets).mockReturnValue({
       MOLTBOOK_API_KEY: "moltbook-secret",
@@ -139,5 +176,16 @@ describe("social-publisher", () => {
       verification_code: "verify-123",
       answer: "12",
     }))
+  })
+
+  it("solves spaced-out number words and plural math verbs", () => {
+    expect(solveMoltbookChallenge("what is tW eN tY tHrEe")).toBe("23")
+    expect(solveMoltbookChallenge("doubles seven")).toBe("14")
+    expect(solveMoltbookChallenge("halves 8")).toBe("4")
+  })
+
+  it("rejects fuzzy and contextual false positives", () => {
+    expect(solveMoltbookChallenge("fight")).toBeNull()
+    expect(solveMoltbookChallenge("one claw")).toBeNull()
   })
 })
