@@ -4,6 +4,8 @@ import { loadConfig } from "../shared/config.js"
 import type { SocialPlatform } from "./social-types.js"
 
 const THREADS_MATERIALS_FILE = "Threads素材庫.md"
+const MATERIALS_FOLDER = "社群"
+const MARKDOWN_TABLE_DIVIDER_RE = /^\|?[\s:|-]+\|[\s|:.-]*$/
 
 export interface SocialHistoryRecordRequest {
   platform: SocialPlatform
@@ -88,13 +90,13 @@ function recordThreadsHistory(request: SocialHistoryRecordRequest): SocialHistor
 function resolveThreadsMaterialsPath(): string | null {
   const cfg = loadConfig()
   if (cfg.vaultPath) {
-    const direct = join(cfg.vaultPath, "AgentLore", "社群", THREADS_MATERIALS_FILE)
+    const direct = join(cfg.vaultPath, "AgentLore", MATERIALS_FOLDER, THREADS_MATERIALS_FILE)
     if (existsSync(direct)) return direct
   }
 
   if (cfg.keyVaultPath) {
     const agentLoreDir = dirname(cfg.keyVaultPath)
-    const sibling = join(agentLoreDir, "社群", THREADS_MATERIALS_FILE)
+    const sibling = join(agentLoreDir, MATERIALS_FOLDER, THREADS_MATERIALS_FILE)
     if (existsSync(sibling)) return sibling
   }
 
@@ -103,7 +105,11 @@ function resolveThreadsMaterialsPath(): string | null {
 
 function insertRowIntoThreadsHistory(raw: string, row: string): string {
   const lines = raw.split(/\r?\n/)
-  const tableHeaderIndex = lines.findIndex((line) => line.trim() === "| 日期 | 類型 | 主題 | 數據 |")
+  const tableHeaderIndex = lines.findIndex((line, index) => {
+    if (!line.trim().startsWith("|")) return false
+    const divider = lines[index + 1]
+    return typeof divider === "string" && MARKDOWN_TABLE_DIVIDER_RE.test(divider.trim())
+  })
   if (tableHeaderIndex < 0 || tableHeaderIndex + 1 >= lines.length) return raw
 
   let insertIndex = tableHeaderIndex + 2
@@ -117,7 +123,7 @@ function insertRowIntoThreadsHistory(raw: string, row: string): string {
 
 function sanitizeCell(value?: string): string | undefined {
   if (!value) return undefined
-  const trimmed = value.trim().replace(/\r?\n+/g, " ").replace(/\|/g, "／")
+  const trimmed = value.trim().replace(/\r?\n+/g, " ").replace(/\|/g, "｜")
   return trimmed || undefined
 }
 

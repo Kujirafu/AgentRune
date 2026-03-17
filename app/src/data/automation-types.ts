@@ -119,6 +119,7 @@ export interface AutomationConfig {
   // Execution environment
   runMode: "local" | "worktree"
   agentId: string
+  locale?: string
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode)
 
   // Trust Layer

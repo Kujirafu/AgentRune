@@ -16,7 +16,13 @@ import { auditLog, pruneAuditLogs } from "./audit-log.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
-import { buildAutomationSocialInstructions, detectAutomationSocialMode, extractAutomationSocialDirective, outputNeedsManualIntervention } from "./automation-social.js"
+import {
+  buildAutomationSocialInstructions,
+  detectAutomationSocialMode,
+  extractAutomationSocialDirective,
+  outputIndicatesNoPublishableContent,
+  outputNeedsManualIntervention,
+} from "./automation-social.js"
 import {
   buildRecentSocialPostPromptContext,
   clearSocialPublishCooldown,
@@ -30,6 +36,7 @@ import {
 import { recordPublishedSocialPost } from "./social-history.js"
 import { publishSocialPost } from "./social-publisher.js"
 import { extractAutomationSummary } from "./automation-summary.js"
+import { callLlmForSummary, shouldUseLlmSummary } from "./llm-summary.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
@@ -236,6 +243,7 @@ export interface AutomationConfig {
   schedule: AutomationSchedule
   runMode: "local" | "worktree"
   agentId: string
+  locale?: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
   // Trust Layer — trustProfile controls sandboxLevel, requireMergeApproval, requirePlanReview, dailyRunLimit
@@ -287,6 +295,19 @@ function getSystemLocale(): string {
   return "en"
 }
 
+function normalizeAutomationLocale(locale?: string): string | undefined {
+  if (!locale || !/^[A-Za-z0-9_-]{2,32}$/.test(locale)) return undefined
+  if (locale.toLowerCase().startsWith("zh")) return "zh-TW"
+  if (locale.toLowerCase().startsWith("ja")) return "ja"
+  if (locale.toLowerCase().startsWith("ko")) return "ko"
+  if (locale.toLowerCase().startsWith("en")) return "en"
+  return locale
+}
+
+function getAutomationLocale(auto?: { locale?: string }): string {
+  return normalizeAutomationLocale(auto?.locale) || getSystemLocale()
+}
+
 const LOCALE_NAMES: Record<string, string> = {
   "zh-TW": "Traditional Chinese (繁體中文)",
   "ja": "Japanese (日本語)",
@@ -294,8 +315,7 @@ const LOCALE_NAMES: Record<string, string> = {
   "en": "English",
 }
 
-export function wrapPromptWithLocale(prompt: string): string {
-  const locale = getSystemLocale()
+export function wrapPromptWithLocale(prompt: string, locale: string = getSystemLocale()): string {
   if (locale === "en") return prompt
   const langName = LOCALE_NAMES[locale] || locale
   const outputStyle =
@@ -626,6 +646,7 @@ export class AutomationManager {
       createdAt: Date.now(),
       runMode: config.runMode || "local",
       agentId: config.agentId || "claude",
+      locale: normalizeAutomationLocale(config.locale) || getSystemLocale(),
       trustProfile: config.trustProfile || "supervised",
     }
     // Expand trust profile into concrete settings (unless custom)
@@ -696,7 +717,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "timeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "locale" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "timeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -711,6 +732,7 @@ export class AutomationManager {
     if (updates.enabled !== undefined) auto.enabled = updates.enabled
     if (updates.runMode !== undefined) auto.runMode = updates.runMode
     if (updates.agentId !== undefined) auto.agentId = updates.agentId
+    if (updates.locale !== undefined) auto.locale = normalizeAutomationLocale(updates.locale) || getSystemLocale()
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
@@ -773,12 +795,15 @@ export class AutomationManager {
       const ms = (auto.schedule.intervalMinutes || 30) * 60 * 1000
 
       // If last run was recent, delay first execution to respect the interval
+      // If overdue (sinceLastRun >= interval), run immediately instead of waiting another full cycle
       const sinceLastRun = auto.lastRunAt ? Date.now() - auto.lastRunAt : ms
-      const initialDelay = sinceLastRun >= ms ? ms : ms - sinceLastRun
-      const skippedMinutes = Math.round((ms - initialDelay) / 60000)
+      const overdue = sinceLastRun >= ms
+      const initialDelay = overdue ? 0 : ms - sinceLastRun
 
-      if (initialDelay < ms) {
-        log.info(`[Automation] "${auto.name}" last ran ${Math.round(sinceLastRun / 60000)}m ago, next in ${Math.round(initialDelay / 60000)}m (skipping ${skippedMinutes}m)`)
+      if (overdue) {
+        log.info(`[Automation] "${auto.name}" overdue by ${Math.round((sinceLastRun - ms) / 60000)}m — running immediately`)
+      } else if (initialDelay < ms) {
+        log.info(`[Automation] "${auto.name}" last ran ${Math.round(sinceLastRun / 60000)}m ago, next in ${Math.round(initialDelay / 60000)}m`)
       } else {
         log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
       }
@@ -900,13 +925,13 @@ export class AutomationManager {
    */
   private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string } | null {
     const rawPrompt = auto.prompt || ""
-    let promptText = wrapPromptWithLocale(rawPrompt)
+    let promptText = wrapPromptWithLocale(rawPrompt, getAutomationLocale(auto))
     const socialMode = detectAutomationSocialMode(auto)
     const recentRunContext = this.buildRecentRunPromptContext(auto.id)
 
     // Legacy raw command field is no longer supported for direct execution (security: command injection risk).
     if (auto.command && !auto.prompt) {
-      promptText = wrapPromptWithLocale(auto.command)
+      promptText = wrapPromptWithLocale(auto.command, getAutomationLocale(auto))
     }
 
     if (recentRunContext) {
@@ -943,7 +968,7 @@ export class AutomationManager {
       manifest: auto.manifest,
       authorityMap,
       trustProfile: auto.trustProfile,
-      locale: getSystemLocale(),
+      locale: getAutomationLocale(auto),
     })
     const constraintsBlock = formatConstraintsForPrompt(constraintSet)
     if (constraintsBlock) {
@@ -960,7 +985,7 @@ export class AutomationManager {
     }
 
     // Write prompt (with agent protocol) to file
-    const locale = getSystemLocale()
+    const locale = getAutomationLocale(auto)
     const agentProtocol = buildAgentProtocol(locale)
     const fullPrompt = `[System Instructions]\n${agentProtocol}\n\n[User Prompt]\n${promptText}`
     const promptFilePath = writePromptFile(this.storageDir, auto.id, fullPrompt)
@@ -1247,6 +1272,7 @@ export class AutomationManager {
       return
     }
 
+    const locale = getAutomationLocale(auto)
     const built = this.buildAutomationCommand(auto)
     if (!built) {
       log.warn(`[Automation] Could not build command for "${auto.name}" (agent=${auto.agentId})`)
@@ -1551,6 +1577,9 @@ export class AutomationManager {
         } else if (directive?.kind === "skip") {
           output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: skipped\nReason: ${directive.reason}\nSource: ${directive.source || "unknown"}`
           status = "skipped_no_action"
+        } else if (outputIndicatesNoPublishableContent(output)) {
+          output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${socialMode.platform}\nPosted: skipped\nReason: automation reported that no publishable materials were available`
+          status = "skipped_no_action"
         } else if (outputNeedsManualIntervention(output)) {
           output += "\n\n--- AgentRune Social Publish ---\nPosted: no\nError: automation requested manual intervention instead of API posting"
           status = "failed"
@@ -1565,6 +1594,16 @@ export class AutomationManager {
       status = "failed"
     }
 
+    let summary = extractAutomationSummary(output, status)
+    if (shouldUseLlmSummary(output)) {
+      try {
+        const humanized = await callLlmForSummary(output, { locale, agentId: auto.agentId })
+        if (humanized?.trim()) summary = humanized.trim()
+      } catch (err) {
+        log.warn(`[Automation] LLM summary failed for "${auto.name}": ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
     const resultEntry: AutomationResult = {
       id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
       automationId: id,
@@ -1572,7 +1611,7 @@ export class AutomationManager {
       finishedAt: Date.now(),
       exitCode,
       output,
-      summary: extractAutomationSummary(output, status),
+      summary,
       status,
     }
 
@@ -1901,7 +1940,7 @@ export class AutomationManager {
   /** Execute a single crew role as an agent process */
   private async executeCrewRole(auto: AutomationConfig, role: CrewRole, cwd: string, handoffSummary: string): Promise<CrewRoleResult> {
     const roleStart = Date.now()
-    const locale = getSystemLocale()
+    const locale = getAutomationLocale(auto)
 
     // Build role-specific prompt with persona, handoff, and humanizer
     let rolePrompt = ""
@@ -1931,7 +1970,7 @@ export class AutomationManager {
     }
 
     // Wrap with locale
-    const promptText = wrapPromptWithLocale(rolePrompt)
+    const promptText = wrapPromptWithLocale(rolePrompt, locale)
 
     // Build agent protocol + write prompt file
     const agentProtocol = buildAgentProtocol(locale)

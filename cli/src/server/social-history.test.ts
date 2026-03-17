@@ -15,6 +15,13 @@ import { recordPublishedSocialPost } from "./social-history.js"
 
 const tempDirs: string[] = []
 
+function today(): string {
+  const date = new Date()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${month}-${day}`
+}
+
 afterEach(() => {
   mockConfig.current = {}
   while (tempDirs.length > 0) {
@@ -32,19 +39,19 @@ describe("social-history", () => {
     mkdirSync(materialsDir, { recursive: true })
     const filePath = join(materialsDir, "Threads素材庫.md")
     writeFileSync(filePath, [
-      "| 日期 | 類型 | 主題 | 數據 |",
+      "| Date | Type | Title | Metrics |",
       "|------|------|------|------|",
-      "| 03-15 | 觀點文 | 舊貼文 | 2 轉 |",
+      "| 03-15 | Thread | Existing post | 2 replies |",
       "",
-      "### 觀察",
+      "### Recent ideas",
     ].join("\n"))
 
     mockConfig.current = { vaultPath: vaultRoot }
 
     expect(recordPublishedSocialPost({
       platform: "threads",
-      recordType: "Agent 視角",
-      recordTitle: "AI 盲區（大部分人用 AI 的方式都太小心了）",
+      recordType: "Agent Insight",
+      recordTitle: "AI blind spots are usually caused by overly careful prompting",
       recordMetrics: "-",
     })).toMatchObject({
       success: true,
@@ -52,7 +59,7 @@ describe("social-history", () => {
     })
 
     const updated = readFileSync(filePath, "utf-8")
-    expect(updated).toContain("| Agent 視角 | AI 盲區（大部分人用 AI 的方式都太小心了） | - |")
+    expect(updated).toContain(`| ${today()} | Agent Insight | AI blind spots are usually caused by overly careful prompting | - |`)
   })
 
   it("deduplicates an existing Threads history row", () => {
@@ -65,21 +72,22 @@ describe("social-history", () => {
     mkdirSync(keyVaultDir, { recursive: true })
     mkdirSync(materialsDir, { recursive: true })
     const filePath = join(materialsDir, "Threads素材庫.md")
-    const row = "| 03-17 | Agent 視角 | AI 盲區（大部分人用 AI 的方式都太小心了） | - |"
+    const row = `| ${today()} | Agent Insight | AI blind spots are usually caused by overly careful prompting | - |`
+
     writeFileSync(filePath, [
-      "| 日期 | 類型 | 主題 | 數據 |",
+      "| Date | Type | Title | Metrics |",
       "|------|------|------|------|",
       row,
       "",
-      "### 觀察",
+      "### Recent ideas",
     ].join("\n"))
 
     mockConfig.current = { keyVaultPath: keyVaultDir }
 
     expect(recordPublishedSocialPost({
       platform: "threads",
-      recordType: "Agent 視角",
-      recordTitle: "AI 盲區（大部分人用 AI 的方式都太小心了）",
+      recordType: "Agent Insight",
+      recordTitle: "AI blind spots are usually caused by overly careful prompting",
       recordMetrics: "-",
     })).toEqual({
       success: true,
@@ -88,4 +96,3 @@ describe("social-history", () => {
     })
   })
 })
-

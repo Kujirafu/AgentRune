@@ -1,4 +1,4 @@
-// components/UnifiedPanel.tsx
+﻿// components/UnifiedPanel.tsx
 // Unified home screen: 3 top-level tabs (Projects / Schedules / Templates)
 // Replaces the 2-panel ProjectOverview with a single vertical-scrolling page.
 import React, { useState, useEffect, useRef, useCallback } from "react"
@@ -18,7 +18,10 @@ import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
 import { buildApiUrl, canUseApi } from "../lib/storage"
-import { buildAutomationReport } from "../lib/automation-report"
+import {
+  buildAutomationReport,
+  getAutomationResultStatusLabel,
+} from "../lib/automation-report"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -54,7 +57,7 @@ const isCrew = (tmpl: AutomationTemplate) => tmpl.category === "crew" && (tmpl.c
 const isChain = (tmpl: AutomationTemplate) => tmpl.id.startsWith("chain_")
 const isPrompt = (tmpl: AutomationTemplate) => !isChain(tmpl) && !isCrew(tmpl)
 
-// Map builtin template IDs → { CREW_ROLE_ICONS key, circle color }
+// Map builtin template IDs ??{ CREW_ROLE_ICONS key, circle color }
 const BUILTIN_TPL_ICON: Record<string, { icon: string; color: string }> = {
   scan_commits: { icon: "search", color: "#37ACC0" },
   release_notes: { icon: "clipboard-list", color: "#347792" },
@@ -136,8 +139,8 @@ function isLabelNoise(title: string): boolean {
   if (title === "Token usage") return true
   if (/^Thinking\.{0,3}$/i.test(title)) return true
   if (/^Processing\.{0,3}$/i.test(title)) return true
-  if (/^初始化/i.test(title)) return true
-  if (/^工作階段已(開始|結束)$/i.test(title)) return true
+  if (/^思考中\.{0,3}$/i.test(title)) return true
+  if (/^(已更新|最新進度|結果)$/i.test(title)) return true
   if (/^Session (started|ended|resumed)/i.test(title)) return true
   if (/^Permission requested/i.test(title)) return true
   if (/^Agent is requesting/i.test(title)) return true
@@ -197,16 +200,16 @@ function getSessionStatus(events: AgentEvent[]): string {
   return "idle"
 }
 
-function getAutomationResultMeta(status: AutomationResult["status"]): { label: string; color: string } {
-  if (status === "success") return { label: "OK", color: "#22c55e" }
-  if (status === "timeout") return { label: "TIMEOUT", color: "#f59e0b" }
-  if (status === "pending_reauth") return { label: "REAUTH", color: "#FB7185" }
-  if (status === "interrupted") return { label: "INTERRUPTED", color: "#f97316" }
+function getAutomationResultMeta(status: AutomationResult["status"], locale: "en" | "zh-TW"): { label: string; color: string } {
+  if (status === "success") return { label: getAutomationResultStatusLabel(status, locale), color: "#22c55e" }
+  if (status === "timeout") return { label: getAutomationResultStatusLabel(status, locale), color: "#f59e0b" }
+  if (status === "pending_reauth") return { label: getAutomationResultStatusLabel(status, locale), color: "#FB7185" }
+  if (status === "interrupted") return { label: getAutomationResultStatusLabel(status, locale), color: "#f97316" }
   if (status === "skipped_no_action" || status === "skipped_no_confirmation" || status === "skipped_daily_limit") {
-    return { label: "SKIPPED", color: "#94a3b8" }
+    return { label: getAutomationResultStatusLabel(status, locale), color: "#94a3b8" }
   }
-  if (status === "blocked_by_risk") return { label: "BLOCKED", color: "#ef4444" }
-  return { label: "FAIL", color: "#ef4444" }
+  if (status === "blocked_by_risk") return { label: getAutomationResultStatusLabel(status, locale), color: "#ef4444" }
+  return { label: getAutomationResultStatusLabel(status, locale), color: "#ef4444" }
 }
 
 function getSessionLabels(): Record<string, string> {
@@ -254,6 +257,16 @@ export function UnifiedPanel({
   // --- Locale ---
   const { t, locale } = useLocale()
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
+  const reportLocale = locale === "zh-TW" ? "zh-TW" : "en"
+  const reportCopy = reportLocale === "zh-TW"
+    ? {
+        viewLabel: "查看完整報告",
+        emptySummary: "這次執行還沒有可讀摘要。",
+      }
+    : {
+        viewLabel: "View Full Report",
+        emptySummary: "No readable summary is available yet.",
+      }
 
   // --- Template helpers ---
   const tplName = (tmpl: AutomationTemplate) => {
@@ -280,7 +293,7 @@ export function UnifiedPanel({
       const ct = t(ck)
       if (ct !== ck) {
         const tokens = tmpl.crew?.tokenBudget
-        return tokens ? `${ct} · ${tokens.toLocaleString()} tokens` : ct
+        return tokens ? `${ct} 繚 ${tokens.toLocaleString()} tokens` : ct
       }
       return tmpl.description
     }
@@ -730,7 +743,7 @@ export function UnifiedPanel({
 
   const sendVoice = () => {
     if (voiceSessionId && voiceText.trim() && onSessionInput) {
-      onSessionInput(voiceSessionId, `[語音指令] ${voiceText.trim()}\n`)
+      onSessionInput(voiceSessionId, `[隤?誘] ${voiceText.trim()}\n`)
       if (navigator.vibrate) navigator.vibrate(20)
     }
     voiceEditOriginal.current = ""
@@ -949,7 +962,7 @@ export function UnifiedPanel({
             fontSize: 12, color: "var(--text-secondary)",
             fontWeight: 500, marginTop: 4,
           }}>
-            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} · {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
+            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} 繚 {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1123,8 +1136,8 @@ export function UnifiedPanel({
                   marginBottom: 20,
                   borderRadius: 16,
                   background: theme === "dark"
-                    ? "rgba(52,119,146,0.08)"   // #347792 tinted glass — dark
-                    : "rgba(189,209,198,0.15)",  // #BDD1C6 tinted glass — light
+                    ? "rgba(52,119,146,0.08)"   // #347792 tinted glass ??dark
+                    : "rgba(189,209,198,0.15)",  // #BDD1C6 tinted glass ??light
                   backdropFilter: "blur(24px) saturate(1.4)", WebkitBackdropFilter: "blur(24px) saturate(1.4)",
                   border: theme === "dark"
                     ? "1px solid rgba(55,172,192,0.12)"   // #37ACC0 tint border
@@ -1472,7 +1485,7 @@ export function UnifiedPanel({
                     </div>
                   )}
 
-                  {/* No sessions — small dashed card in tray */}
+                  {/* No sessions ??small dashed card in tray */}
                   {sessionCount === 0 && (
                     <div style={{
                       margin: "4px 10px 0",
@@ -1514,7 +1527,7 @@ export function UnifiedPanel({
               )
             })}
 
-            {/* New session button — always visible at bottom of project list */}
+            {/* New session button ??always visible at bottom of project list */}
             {projects.length > 0 && (
               <button
                 onClick={() => setShowNewSheet(true)}
@@ -1711,7 +1724,7 @@ export function UnifiedPanel({
                             color: auto.lastResult.status === "success" ? "#22c55e" : "#ef4444",
                             fontWeight: 600,
                           }}>
-                            {auto.lastResult.status === "success" ? "OK" : "FAIL"}
+                            {getAutomationResultStatusLabel(auto.lastResult.status as AutomationResult["status"], reportLocale)}
                           </span>
                           <span>{new Date(auto.lastResult.startedAt).toLocaleString()}</span>
                           {auto.lastResult.duration != null && (
@@ -1737,8 +1750,9 @@ export function UnifiedPanel({
                               <div style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, padding: 8 }}>Loading...</div>
                             )}
                             {(resultsData.get(auto.id) || []).slice().reverse().map((r) => {
-                              const resultMeta = getAutomationResultMeta(r.status)
-                              const report = buildAutomationReport(r, locale === "zh-TW" ? "zh-TW" : "en")
+                              const resultMeta = getAutomationResultMeta(r.status, reportLocale)
+                              const rawReport = buildAutomationReport(r, reportLocale)
+                              const report = { ...rawReport, summary: rawReport.summary || reportCopy.emptySummary }
                               const dur = r.finishedAt - r.startedAt
                               const durStr = dur > 60000
                                 ? `${Math.floor(dur / 60000)}m ${Math.round((dur % 60000) / 1000)}s`
@@ -1783,7 +1797,7 @@ export function UnifiedPanel({
                                     whiteSpace: "pre-wrap",
                                     wordBreak: "break-word",
                                   }}>
-                                    {report.summary || "已產生完整報告，點擊查看詳細結果。"}
+                                    {report.summary || reportCopy.emptySummary}
                                   </div>
                                   <div style={{
                                     display: "flex",
@@ -1794,7 +1808,7 @@ export function UnifiedPanel({
                                     fontSize: 11,
                                     fontWeight: 700,
                                   }}>
-                                    <span>查看完整報告</span>
+                                    <span>{reportCopy.viewLabel}</span>
                                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                       <polyline points="14 2 14 8 20 8" />
@@ -2012,14 +2026,14 @@ export function UnifiedPanel({
                   const roles = tmpl.crew?.roles || []
                   const isChain = tmpl.id.startsWith("chain_")
                   const isMultiCrew = tmpl.category === "crew" && roles.length > 1
-                  // isChain = single-role skill chain template (tap → ChainBuilder)
-                  // isMultiCrew = multi-role crew (tap → expand to see roles)
-                  // neither = pure prompt template (tap → expand to see prompt)
+                  // isChain = single-role skill chain template (tap ??ChainBuilder)
+                  // isMultiCrew = multi-role crew (tap ??expand to see roles)
+                  // neither = pure prompt template (tap ??expand to see prompt)
                   const chainSlug = isChain ? tmpl.id.replace("chain_", "") : (isMultiCrew ? null : roles[0]?.skillChainSlug)
                   const chain = chainSlug ? BUILTIN_CHAINS.find(c => c.slug === chainSlug) : null
                   const depth = chainDepths[tmpl.id] || "standard"
 
-                  // ─── Chain card: tap opens ChainBuilder, action buttons inline ───
+                  // ??? Chain card: tap opens ChainBuilder, action buttons inline ???
                   if (isChain && chain) {
                     return (
                       <div key={tmpl.id} style={{
@@ -2043,7 +2057,7 @@ export function UnifiedPanel({
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {getStepCount(chain)} {t("crew.chainSteps")} · {estimateTokens(chain, depth).toLocaleString()} tokens
+                            {getStepCount(chain)} {t("crew.chainSteps")} 繚 {estimateTokens(chain, depth).toLocaleString()} tokens
                           </div>
                         </div>
                         {/* Inline action buttons */}
@@ -2088,7 +2102,7 @@ export function UnifiedPanel({
                     )
                   }
 
-                  // ─── Multi-role crew and pure prompt: expandable cards ───
+                  // ??? Multi-role crew and pure prompt: expandable cards ???
                   return (
                     <div key={tmpl.id}>
                       <button
@@ -2151,7 +2165,7 @@ export function UnifiedPanel({
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {isMultiCrew
-                              ? `${roles.length} ${t("fireCrew.roles")} · ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
+                              ? `${roles.length} ${t("fireCrew.roles")} 繚 ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
                               : tplDesc(tmpl)
                             }
                           </div>
@@ -2192,8 +2206,8 @@ export function UnifiedPanel({
                                       {t(r.nameKey) !== r.nameKey ? t(r.nameKey) : r.nameKey}
                                     </div>
                                     <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                      {t("crew.phase").replace("{n}", String(r.phase))} · {(r.estimatedTokens || 0).toLocaleString()} tokens
-                                      {r.skillChainSlug && ` · ${r.skillChainSlug}`}
+                                      {t("crew.phase").replace("{n}", String(r.phase))} 繚 {(r.estimatedTokens || 0).toLocaleString()} tokens
+                                      {r.skillChainSlug && ` 繚 ${r.skillChainSlug}`}
                                     </div>
                                   </div>
                                 </div>
@@ -2292,7 +2306,7 @@ export function UnifiedPanel({
                   return <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{filtered.map(renderCard)}</div>
                 }
 
-                // Group by type: Crew → Chain → Prompt (priority order)
+                // Group by type: Crew ??Chain ??Prompt (priority order)
                 const typeGroups = [
                   { key: "crew", label: t("templates.filterCrew"), test: isCrew },
                   { key: "chain", label: t("templates.filterChain"), test: isChain },
@@ -3239,3 +3253,4 @@ export function UnifiedPanel({
     </div>
   )
 }
+

@@ -30,6 +30,37 @@ export type SocialAutomationDirective = SocialPostDirective | SocialSkipDirectiv
 
 const SOCIAL_POST_MARKER = "__AGENTRUNE_SOCIAL_POST__"
 const SOCIAL_SKIP_MARKER = "__AGENTRUNE_SOCIAL_SKIP__"
+const NO_PUBLISHABLE_CONTENT_HINTS = [
+  "no material",
+  "no materials",
+  "no approved material",
+  "no approved materials",
+  "no publishable content",
+  "no publishable material",
+  "no publishable materials",
+  "nothing to publish",
+  "nothing ready to publish",
+  "materials library is empty",
+  "library is empty",
+  "queue is empty",
+  "沒有素材",
+  "沒有可發",
+  "沒有可發布",
+  "沒有可發佈",
+  "沒有可用素材",
+  "沒有合適素材",
+  "沒有合適的素材",
+  "沒有核准素材",
+  "無素材",
+  "無可發素材",
+  "無需發文",
+  "無需發布",
+  "不用發文",
+  "不用發布",
+  "暫不發文",
+  "暫不發布",
+  "沒有內容可發",
+]
 
 const THREADS_HINTS = [
   "threads",
@@ -79,6 +110,9 @@ export function buildAutomationSocialInstructions(mode: SocialAutomationMode): s
       "Do NOT call Moltbook APIs directly from the agent.",
       "Produce a final-ready title and body. Do not leave placeholders.",
       "If you were given approved materials, stay inside those materials and do not invent unsupported claims.",
+      "If the automation prompt explicitly asks you to extend high-performing past posts, user replies, prior discussion threads, or recent mention signals into a new angle, you may do that as long as you stay grounded in those sources.",
+      "Treat those prior posts and reply threads as factual inputs to synthesize a new viewpoint, not as copy to paraphrase blindly.",
+      "Only emit a skip marker when there is truly no publishable angle after considering the materials, recent posts, mentions, and any explicit extension rules in the prompt.",
       "",
       "If a post should be published now, end your final output with exactly one line:",
       `${SOCIAL_POST_MARKER} {"platform":"moltbook","title":"<final title>","text":"<final post body>","source":"<notes or materials file>","reason":"<why this post was chosen>","submolt":"general"}`,
@@ -86,6 +120,7 @@ export function buildAutomationSocialInstructions(mode: SocialAutomationMode): s
       "If no post should be published now because of cooldown, missing approval, missing material, or another valid precondition, end your final output with exactly one line:",
       `${SOCIAL_SKIP_MARKER} {"platform":"moltbook","reason":"<why no post should be published now>","source":"<notes or materials file>"}`,
       "",
+      "A plain explanation without the skip marker will be treated as an automation failure.",
       "Never wrap these marker lines in a code block.",
       "Only emit one marker line total.",
     ].join("\n")
@@ -111,6 +146,7 @@ export function buildAutomationSocialInstructions(mode: SocialAutomationMode): s
     "If no post should be published now because of cooldown, missing approval, missing material, or another valid precondition, end your final output with exactly one line:",
     `${SOCIAL_SKIP_MARKER} {"platform":"${mode.platform}","reason":"<why no post should be published now>","source":"<materials file or section>"}`,
     "",
+    "A plain explanation without the skip marker will be treated as an automation failure.",
     "Never wrap these marker lines in a code block.",
     "Only emit one marker line total.",
   ].join("\n")
@@ -174,6 +210,11 @@ export function outputNeedsManualIntervention(output: string): boolean {
   ].some((needle) => lower.includes(needle))
 }
 
+export function outputIndicatesNoPublishableContent(output: string): boolean {
+  const normalized = normalizeSocialAutomationText(output)
+  return NO_PUBLISHABLE_CONTENT_HINTS.some((needle) => normalized.includes(needle))
+}
+
 function safeParseDirective(raw: string): {
   platform?: AutomationSocialPlatform
   text?: string
@@ -208,4 +249,8 @@ function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
   const trimmed = value.trim()
   return trimmed || undefined
+}
+
+function normalizeSocialAutomationText(value: string): string {
+  return value.normalize("NFKC").toLowerCase()
 }

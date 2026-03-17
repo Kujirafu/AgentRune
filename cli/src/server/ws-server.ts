@@ -2949,7 +2949,7 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/automations/:projectId", express.json(), (req, res) => {
-    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model, bypass, crew } = req.body
+    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, locale, model, bypass, crew } = req.body
     // Crew automations don't need a prompt (roles have their own prompts)
     if (!name || !schedule || (!command && !prompt && !crew)) {
       return res.status(400).json({ error: "name, schedule, and (prompt or command or crew) are required" })
@@ -2964,6 +2964,7 @@ export function createServer(portOverride?: number) {
       schedule,
       runMode: runMode || "local",
       agentId: agentId || "claude",
+      locale: typeof locale === "string" ? locale : undefined,
       model: model || undefined,
       bypass: bypass || false,
       enabled: req.body.enabled !== false,

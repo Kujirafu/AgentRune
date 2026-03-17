@@ -1,4 +1,4 @@
-// components/AutomationSheet.tsx
+﻿// components/AutomationSheet.tsx
 // Alarm-clock style scheduling sheet with template support
 import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
@@ -10,7 +10,10 @@ import type { AutomationConfig, AutomationSchedule, AutomationResult, Automation
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText } from "../lib/skillChains"
 import type { SkillChainDef } from "../lib/skillChains"
 import { TRUST_PROFILE_PRESETS } from "../data/automation-types"
-import { buildAutomationReport, type AutomationReportSectionKey } from "../lib/automation-report"
+import {
+  buildAutomationReport,
+  getAutomationResultStatusLabel,
+} from "../lib/automation-report"
 import { buildApiUrl, canUseApi } from "../lib/storage"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
@@ -254,14 +257,6 @@ function StatusDot({ status }: { status?: string }) {
   return <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
 }
 
-const REPORT_SECTION_ACCENT: Record<AutomationReportSectionKey, { color: string; glow: string }> = {
-  actions: { color: "#37ACC0", glow: "rgba(55,172,192,0.12)" },
-  results: { color: "#22c55e", glow: "rgba(34,197,94,0.12)" },
-  issues: { color: "#f59e0b", glow: "rgba(245,158,11,0.14)" },
-  decisions: { color: "#FB8184", glow: "rgba(251,129,132,0.14)" },
-  notes: { color: "#94a3b8", glow: "rgba(148,163,184,0.14)" },
-}
-
 // --- Keyword matching for proactive template suggestion ---
 
 const KEYWORD_MAP: Record<string, string[]> = {
@@ -366,6 +361,17 @@ function useTemplateI18n() {
 export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit, onLaunchSession }: AutomationSheetProps) {
   const { t, locale } = useLocale()
   const reportLocale = locale === "zh-TW" ? "zh-TW" : "en"
+  const reportCopy = reportLocale === "zh-TW"
+    ? {
+        summaryLabel: "摘要報告",
+        viewLabel: "查看完整報告",
+        emptySummary: "這次執行還沒有可讀摘要。",
+      }
+    : {
+        summaryLabel: "Summary Report",
+        viewLabel: "View Full Report",
+        emptySummary: "No readable summary is available yet.",
+      }
   const { tplName, tplDesc } = useTemplateI18n()
   const [automations, setAutomations] = useState<AutomationConfig[]>([])
   const [loading, setLoading] = useState(false)
@@ -602,7 +608,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       schedule.intervalMinutes = parseInt(formInterval) || 30
     }
 
-    const body = {
+  const body = {
       name: formName.trim(),
       prompt: formPrompt.trim(),
       skill: formSkill.trim() || undefined,
@@ -610,6 +616,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       schedule,
       runMode: formRunMode,
       agentId: formAgentId,
+      locale,
       model: formModel || undefined,
       bypass: formBypass || undefined,
       trustProfile: formTrustProfile,
@@ -756,23 +763,6 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     if (ms < 1000) return `${ms}ms`
     if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
     return `${(ms / 60_000).toFixed(1)}m`
-  }
-
-  const getReportSectionTitle = (key: AutomationReportSectionKey): string => {
-    switch (key) {
-      case "actions":
-        return t("automation.whatHappened")
-      case "results":
-        return t("automation.resultReport")
-      case "issues":
-        return t("automation.issuesRisks")
-      case "decisions":
-        return t("automation.decisionsNext")
-      case "notes":
-        return t("automation.otherNotes")
-      default:
-        return key
-    }
   }
 
   return (
@@ -1267,7 +1257,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 background: "var(--icon-bg)", color: "var(--text-secondary)", fontWeight: 600,
                               }}>
                                 {AGENTS.find((a) => a.id === auto.agentId)?.name || auto.agentId}
-                                {(auto as any).model ? ` 繚 ${(auto as any).model}` : ""}
+                                {(auto as any).model ? ` 蝜?${(auto as any).model}` : ""}
                               </span>
                             )}
                             <span style={{
@@ -1360,14 +1350,15 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           ) : (
                             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                               {results.slice(-5).reverse().map((r) => {
-                                const report = buildAutomationReport(r, reportLocale)
-                                const statusLabel = r.status === "success" ? (reportLocale === "zh-TW" ? "成功" : "Success")
-                                  : r.status === "timeout" ? (reportLocale === "zh-TW" ? "逾時" : "Timeout")
-                                  : r.status === "blocked_by_risk" ? (reportLocale === "zh-TW" ? "阻擋" : "Blocked")
-                                  : r.status === "pending_reauth" ? (reportLocale === "zh-TW" ? "重驗" : "Reauth")
-                                  : r.status === "interrupted" ? (reportLocale === "zh-TW" ? "中斷" : "Interrupted")
-                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" || r.status === "skipped_daily_limit" ? (reportLocale === "zh-TW" ? "略過" : "Skipped")
-                                  : (reportLocale === "zh-TW" ? "失敗" : "Failed")
+                                const rawReport = buildAutomationReport(r, reportLocale)
+                                const report = { ...rawReport, summary: rawReport.summary || reportCopy.emptySummary }
+                                const statusLabel = r.status === "success" ? (reportLocale === "zh-TW" ? "??" : "Success")
+                                  : r.status === "timeout" ? (reportLocale === "zh-TW" ? "?暹?" : "Timeout")
+                                  : r.status === "blocked_by_risk" ? (reportLocale === "zh-TW" ? "?餅?" : "Blocked")
+                                  : r.status === "pending_reauth" ? (reportLocale === "zh-TW" ? "??" : "Reauth")
+                                  : r.status === "interrupted" ? (reportLocale === "zh-TW" ? "銝剜" : "Interrupted")
+                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" || r.status === "skipped_daily_limit" ? (reportLocale === "zh-TW" ? "?仿?" : "Skipped")
+                                  : (reportLocale === "zh-TW" ? "憭望?" : "Failed")
                                 const statusColor = r.status === "success" ? "#22c55e"
                                   : r.status === "timeout" ? "#f59e0b"
                                   : r.status === "pending_reauth" ? "#FB7185"
@@ -1383,11 +1374,11 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                         <StatusDot status={r.status} />
                                         <span style={{ fontSize: 11, fontWeight: 600, color: statusColor }}>
-                                          {statusLabel}
+                                          {getAutomationResultStatusLabel(r.status, reportLocale)}
                                         </span>
                                       </div>
                                       <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} 繚 {formatDuration(r.finishedAt - r.startedAt)}
+                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} 蝜?{formatDuration(r.finishedAt - r.startedAt)}
                                       </div>
                                     </div>
                                     <div style={{
@@ -1398,36 +1389,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                       border: "1px solid rgba(55,172,192,0.16)",
                                     }}>
                                       <div style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "space-between",
-                                        gap: 8,
-                                        flexWrap: "wrap",
+                                        fontSize: 10,
+                                        fontWeight: 700,
+                                        color: "#37ACC0",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 1.2,
                                         marginBottom: 8,
                                       }}>
-                                        <div style={{
-                                          fontSize: 10,
-                                          fontWeight: 700,
-                                          color: "#37ACC0",
-                                          textTransform: "uppercase",
-                                          letterSpacing: 1.2,
-                                        }}>
-                                          {t("automation.summaryReport")}
-                                        </div>
-                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                          {report.sections.slice(0, 3).map((section) => (
-                                            <span key={`${r.id}-${section.key}`} style={{
-                                              fontSize: 10,
-                                              padding: "4px 8px",
-                                              borderRadius: 999,
-                                              background: REPORT_SECTION_ACCENT[section.key].glow,
-                                              color: REPORT_SECTION_ACCENT[section.key].color,
-                                              fontWeight: 700,
-                                            }}>
-                                              {getReportSectionTitle(section.key)}
-                                            </span>
-                                          ))}
-                                        </div>
+                                        {reportCopy.summaryLabel}
                                       </div>
                                       <div style={{
                                         fontSize: 12,
@@ -1436,7 +1405,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         whiteSpace: "pre-wrap",
                                         wordBreak: "break-word",
                                       }}>
-                                        {report.summary || "已產生完整報告，點下面查看詳細結果。"}
+                                        {report.summary || reportCopy.emptySummary}
                                       </div>
                                       <button onClick={() => setResultReportTarget({ automationName: auto.name, resultId: r.id })} style={{
                                         marginTop: 10,
@@ -1455,7 +1424,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         cursor: "pointer",
                                       }}>
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
-                                        查看完整報告
+                                        {reportCopy.viewLabel}
                                       </button>
                                     </div>
                                   </div>
@@ -1766,8 +1735,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{roleName}</div>
                             <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                               {t("crew.phase").replace("{n}", String(role.phase))}
-                              {isParallel && ` 繚 ${t("crew.parallel")}`}
-                              {role.estimatedTokens ? ` 繚 ~${role.estimatedTokens.toLocaleString()} tok` : ""}
+                              {isParallel && ` 蝜?${t("crew.parallel")}`}
+                              {role.estimatedTokens ? ` 蝜?~${role.estimatedTokens.toLocaleString()} tok` : ""}
                             </div>
                           </div>
                           <IconChevron expanded={isExpanded} />
@@ -2789,7 +2758,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{name}</div>
           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
           <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 3 }}>
-            {t("crew.rolesCount").replace("{n}", String(roles.length))} 繚 {tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
+            {t("crew.rolesCount").replace("{n}", String(roles.length))} 蝜?{tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
           </div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -2823,3 +2792,4 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
     </div>
   )
 }
+
