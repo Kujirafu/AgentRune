@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      __APP_VERSION__: JSON.stringify("0.2.28"),
+      __APP_VERSION__: JSON.stringify("0.2.30"),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
     build: {
