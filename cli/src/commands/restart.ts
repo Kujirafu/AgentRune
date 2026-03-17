@@ -1,10 +1,12 @@
 // commands/restart.ts — Restart all daemons (or a specific port)
 // Default: restarts BOTH 3456 (release) and 3457 (dev)
-import { readFileSync, existsSync, unlinkSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { createConnection } from "node:net"
 import { getPidFile } from "../shared/config.js"
 import { log } from "../shared/logger.js"
-import { getStopMarker, stopCommand } from "./stop.js"
+import { killProcessTree } from "../shared/process-tree.js"
+import { readStateFile, unlinkStateFile } from "../shared/state-file.js"
+import { getStopMarker } from "./stop.js"
 import { startCommand } from "./start.js"
 
 const ALL_PORTS = [3456, 3457]
@@ -40,18 +42,18 @@ async function killPort(port: number): Promise<void> {
   const pidFile = getPidFile(port)
   if (existsSync(pidFile)) {
     try {
-      const pid = parseInt(readFileSync(pidFile, "utf-8").trim())
+      const pid = parseInt(readStateFile(pidFile).trim())
       if (!Number.isFinite(pid) || pid <= 0) {
         log.warn(`  Port ${port}: invalid PID in file, skipping kill`)
-        unlinkSync(pidFile)
+        unlinkStateFile(pidFile)
         return
       }
-      try { process.kill(pid) } catch {}
-      unlinkSync(pidFile)
+      killProcessTree(pid)
+      unlinkStateFile(pidFile)
       log.info(`  Port ${port}: killed PID ${pid}`)
     } catch {
       log.warn(`  Port ${port}: stale PID file removed`)
-      try { unlinkSync(pidFile) } catch {}
+      try { unlinkStateFile(pidFile) } catch {}
     }
   } else {
     log.dim(`  Port ${port}: no PID file`)
@@ -60,7 +62,7 @@ async function killPort(port: number): Promise<void> {
   // Also clear stop marker so start won't be blocked
   const marker = getStopMarker(port)
   if (existsSync(marker)) {
-    try { unlinkSync(marker) } catch {}
+    try { unlinkStateFile(marker) } catch {}
   }
 }
 

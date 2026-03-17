@@ -1,12 +1,15 @@
 // server/vault-keys.ts
-// Parse API keys from key vault markdown files and return as env vars
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs"
+// Parse secrets from markdown vault files and expose only allowlisted names.
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { log } from "../shared/logger.js"
-import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
+import { isEncrypted, readEncryptedFile, writeEncryptedFile } from "./crypto.js"
 
-// Known API key env var patterns — only inject these (not random markdown headers)
+const KEY_VAULT_DIRNAME = "金鑰庫"
+const MARKDOWN_SECRET_REGEX = /###\s+([^\n`]+?)\s*\r?\n```\r?\n([\s\S]*?)\r?\n```/g
+
+// Only inject API-style keys into PTY sessions.
 const API_KEY_PATTERNS = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
@@ -26,98 +29,120 @@ const API_KEY_PATTERNS = [
   "AZURE_OPENAI_API_KEY",
 ]
 
-/**
- * Parse a markdown file for env var key-value pairs.
- * Expects format:
- *   ### ENV_VAR_NAME
- *   ```
- *   value-here
- *   ```
- */
-function parseMarkdownKeys(content: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  const regex = /###\s+(\w+)\s*\n```\n([\s\S]*?)\n```/g
-  let match
-  while ((match = regex.exec(content)) !== null) {
-    const name = match[1].trim()
-    const value = match[2].trim()
-    // Only include known API key patterns, skip placeholders
-    if (API_KEY_PATTERNS.includes(name) && value && !value.includes("...") && value.length > 10) {
-      result[name] = value
-    }
-  }
-  return result
-}
-
-/**
- * Load API keys from a vault directory.
- * Reads all .md files in the directory, decrypting if encrypted.
- */
-function loadKeysFromDir(dir: string): Record<string, string> {
-  if (!existsSync(dir)) return {}
-  const keys: Record<string, string> = {}
-  try {
-    const files = readdirSync(dir).filter(f => f.endsWith(".md"))
-    for (const file of files) {
-      try {
-        const filePath = join(dir, file)
-        // Use encrypted reader — transparently handles both encrypted and plaintext files
-        const content = readEncryptedFile(filePath)
-        if (!content) continue
-        const parsed = parseMarkdownKeys(content)
-        Object.assign(keys, parsed)
-
-        // Auto-migrate: if file was plaintext in our secrets dir, re-encrypt it
-        const raw = readFileSync(filePath, "utf-8")
-        if (!isEncrypted(raw) && dir.includes(".agentrune")) {
-          writeEncryptedFile(filePath, content)
-          log.info(`Migrated ${file} to encrypted storage`)
-        }
-      } catch {}
-    }
-  } catch {}
-  return keys
-}
-
-/**
- * Load API keys from all configured vault locations.
- * Priority: keyVaultPath > autoSaveKeysPath > vaultPath/AgentLore/金鑰庫 > ~/.agentrune/secrets
- */
-export function loadVaultKeys(opts: {
+export interface VaultSecretLoadOptions {
   autoSaveKeysPath?: string
   vaultPath?: string
   keyVaultPath?: string
-}): Record<string, string> {
-  const keys: Record<string, string> = {}
+}
 
-  // 1. Direct key vault path (highest priority)
-  if (opts.keyVaultPath) {
-    const resolved = opts.keyVaultPath.replace(/^~/, homedir())
-    Object.assign(keys, loadKeysFromDir(resolved))
-  }
-
-  // 2. Check autoSaveKeysPath (user-configured secrets directory)
-  if (opts.autoSaveKeysPath) {
-    const resolved = opts.autoSaveKeysPath.replace(/^~/, homedir())
-    Object.assign(keys, loadKeysFromDir(resolved))
-  }
-
-  // 3. Check Obsidian vault 金鑰庫 directory
-  if (opts.vaultPath) {
-    const vaultKeysDir = join(opts.vaultPath, "AgentLore", "金鑰庫")
-    Object.assign(keys, loadKeysFromDir(vaultKeysDir))
-  }
-
-  // 4. Check default ~/.agentrune/secrets as fallback
-  const defaultDir = join(homedir(), ".agentrune", "secrets")
-  Object.assign(keys, loadKeysFromDir(defaultDir))
-
+export function loadVaultKeys(opts: VaultSecretLoadOptions): Record<string, string> {
+  const keys = loadNamedVaultSecrets(opts, API_KEY_PATTERNS)
   const count = Object.keys(keys).length
   if (count > 0) {
     log.info(`Loaded ${count} API keys from vault`)
   }
-
   return keys
+}
+
+export function loadNamedVaultSecrets(
+  opts: VaultSecretLoadOptions,
+  allowedNames: string[],
+): Record<string, string> {
+  const wanted = new Set(allowedNames)
+  const secrets: Record<string, string> = {}
+
+  for (const dir of getVaultSecretDirs(opts)) {
+    Object.assign(secrets, loadSecretsFromDir(dir, wanted))
+  }
+
+  return secrets
+}
+
+export function getVaultSecretDirs(opts: VaultSecretLoadOptions): string[] {
+  const dirs: string[] = []
+  const addDir = (value?: string) => {
+    if (!value) return
+    const resolved = value.replace(/^~/, homedir())
+    if (!dirs.includes(resolved)) dirs.push(resolved)
+  }
+
+  addDir(opts.keyVaultPath)
+  addDir(opts.autoSaveKeysPath)
+  if (opts.vaultPath) addDir(join(opts.vaultPath.replace(/^~/, homedir()), "AgentLore", KEY_VAULT_DIRNAME))
+  addDir(join(homedir(), ".agentrune", "secrets"))
+
+  return dirs
+}
+
+function loadSecretsFromDir(dir: string, wanted: Set<string>): Record<string, string> {
+  if (!existsSync(dir)) return {}
+
+  const secrets: Record<string, string> = {}
+  for (const file of safeReadDir(dir)) {
+    if (!file.endsWith(".md")) continue
+    const filePath = join(dir, file)
+    const content = readSecretFile(filePath)
+    if (!content) continue
+    Object.assign(secrets, parseMarkdownSecrets(content, wanted))
+    maybeEncryptLocalSecretFile(dir, filePath, content, file)
+  }
+
+  return secrets
+}
+
+function safeReadDir(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
+function readSecretFile(filePath: string): string | null {
+  try {
+    return readEncryptedFile(filePath)
+  } catch {
+    try {
+      return readFileSync(filePath, "utf-8")
+    } catch {
+      return null
+    }
+  }
+}
+
+function maybeEncryptLocalSecretFile(dir: string, filePath: string, content: string, file: string): void {
+  if (!dir.includes(".agentrune")) return
+
+  try {
+    const raw = readFileSync(filePath, "utf-8")
+    if (!isEncrypted(raw)) {
+      writeEncryptedFile(filePath, content)
+      log.info(`Migrated ${file} to encrypted storage`)
+    }
+  } catch {
+    // Ignore migration failures; reading already succeeded.
+  }
+}
+
+function parseMarkdownSecrets(content: string, wanted: Set<string>): Record<string, string> {
+  const secrets: Record<string, string> = {}
+  MARKDOWN_SECRET_REGEX.lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = MARKDOWN_SECRET_REGEX.exec(content)) !== null) {
+    const name = normalizeSecretHeading(match[1])
+    if (!wanted.has(name)) continue
+
+    const value = match[2].trim()
+    if (!value || value.includes("...")) continue
+    secrets[name] = value
+  }
+
+  return secrets
+}
+
+function normalizeSecretHeading(rawName: string): string {
+  return rawName.replace(/\s+\(.*?\)\s*$/, "").trim()
 }
 
 /** Default vault directory for saving keys from the app */
@@ -136,13 +161,11 @@ export function saveVaultKey(envVar: string, value: string): void {
 
   let content = ""
   if (existsSync(filePath)) {
-    // Read and decrypt existing content
     content = readEncryptedFile(filePath) || "# AgentRune API Keys\n"
   } else {
     content = "# AgentRune API Keys\n"
   }
 
-  // Check if this env var already exists — replace it
   const entryRegex = new RegExp(`### ${envVar}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
   const newEntry = `### ${envVar}\n\`\`\`\n${value.trim()}\n\`\`\``
 
@@ -175,6 +198,5 @@ export function deleteVaultKey(envVar: string): void {
  * List all saved keys (names only, for display).
  */
 export function listVaultKeyNames(): string[] {
-  const keys = loadVaultKeys({})
-  return Object.keys(keys)
+  return Object.keys(loadVaultKeys({}))
 }

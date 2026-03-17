@@ -1,7 +1,6 @@
 // adapters/codex-watcher.ts
-// Watch Codex CLI's session JSONL files for structured events.
+// Watch Codex CLI session JSONL files for structured events.
 // Codex stores sessions at: ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl
-// Session index at: ~/.codex/session_index.jsonl
 
 import { watch, statSync, openSync, readSync, closeSync, readdirSync } from "fs"
 import { join } from "path"
@@ -11,11 +10,60 @@ import type { AgentEvent } from "../shared/types.js"
 let idCounter = 0
 const makeId = () => `cxw_${Date.now()}_${++idCounter}`
 
-/** Find most recently modified rollout .jsonl across all date dirs */
-function findActiveCodexSession(): string | null {
+function normalizeComparablePath(path: string): string {
+  return path
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase()
+}
+
+export function codexSessionCwdMatchesProject(sessionCwd: string | null, projectCwd: string): boolean {
+  if (!sessionCwd) return false
+
+  const normalizedSession = normalizeComparablePath(sessionCwd)
+  const normalizedProject = normalizeComparablePath(projectCwd)
+  if (!normalizedSession || !normalizedProject) return false
+
+  return normalizedSession === normalizedProject
+    || normalizedSession.startsWith(`${normalizedProject}/`)
+    || normalizedProject.startsWith(`${normalizedSession}/`)
+}
+
+export function readCodexSessionCwd(sessionPath: string): string | null {
+  let fd: number | null = null
+  try {
+    fd = openSync(sessionPath, "r")
+    const buf = Buffer.alloc(16_384)
+    const bytesRead = readSync(fd, buf, 0, buf.length, 0)
+    const text = buf.subarray(0, bytesRead).toString("utf-8")
+    const lines = text.split("\n")
+
+    for (const raw of lines) {
+      if (!raw.trim()) continue
+      try {
+        const parsed = JSON.parse(raw) as { type?: string; payload?: { cwd?: string } }
+        if (parsed.type === "session_meta" && typeof parsed.payload?.cwd === "string") {
+          return parsed.payload.cwd
+        }
+      } catch {
+        // Ignore partial or malformed first-chunk lines.
+      }
+    }
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd) } catch {}
+    }
+  }
+
+  return null
+}
+
+/** Find the most recently modified rollout .jsonl for the same project cwd. */
+function findActiveCodexSession(projectCwd: string): string | null {
   const sessionsDir = join(homedir(), ".codex", "sessions")
   try {
-    // Walk YYYY/MM/DD structure, find most recent file
     const candidates: { path: string; mtime: number }[] = []
     for (const year of readdirSync(sessionsDir).filter(f => /^\d{4}$/.test(f))) {
       const yearDir = join(sessionsDir, year)
@@ -29,6 +77,7 @@ function findActiveCodexSession(): string | null {
                 for (const file of readdirSync(dayDir).filter(f => f.startsWith("rollout-") && f.endsWith(".jsonl"))) {
                   const full = join(dayDir, file)
                   try {
+                    if (!codexSessionCwdMatchesProject(readCodexSessionCwd(full), projectCwd)) continue
                     candidates.push({ path: full, mtime: statSync(full).mtimeMs })
                   } catch {}
                 }
@@ -57,11 +106,32 @@ interface CodexLine {
     cwd?: string
     cli_version?: string
     model_provider?: string
+    role?: string
+    content?: Array<{
+      type?: string
+      text?: string
+    }>
+  }
+}
+
+function buildAssistantResponseEvent(text: string, now: number): AgentEvent | null {
+  const clean = text.trim()
+  if (clean.length < 5) return null
+
+  const firstLine = clean.split("\n")[0].slice(0, 200)
+  const isLong = clean.length > 200 || clean.includes("\n")
+  return {
+    id: makeId(),
+    timestamp: now,
+    type: "response",
+    status: "completed",
+    title: isLong ? (firstLine.length < clean.split("\n")[0].length ? firstLine + "..." : firstLine) : clean,
+    detail: isLong ? clean : undefined,
   }
 }
 
 /** Convert Codex JSONL events to AgentEvents */
-function codexLineToEvents(line: CodexLine): AgentEvent[] {
+export function codexLineToEvents(line: CodexLine): AgentEvent[] {
   const events: AgentEvent[] = []
   const now = Date.now()
 
@@ -107,6 +177,14 @@ function codexLineToEvents(line: CodexLine): AgentEvent[] {
           detail: (p.arguments || "").slice(0, 120),
         })
       }
+    } else if (p.type === "message" && p.role === "assistant" && Array.isArray(p.content)) {
+      const text = p.content
+        .filter(block => block?.type === "output_text" && typeof block.text === "string")
+        .map(block => block.text!.trim())
+        .filter(Boolean)
+        .join("\n\n")
+      const event = buildAssistantResponseEvent(text, now)
+      if (event) events.push(event)
     }
   }
 
@@ -114,18 +192,9 @@ function codexLineToEvents(line: CodexLine): AgentEvent[] {
     const p = line.payload
 
     if (p.type === "agent_message" && p.message) {
-      const text = p.message.trim()
-      if (text.length < 20) return events
-      // Skip commentary phase (thinking out loud)
       if (p.phase === "commentary") return events
-      events.push({
-        id: makeId(),
-        timestamp: now,
-        type: "info",
-        status: "completed",
-        title: text.length > 80 ? text.slice(0, 80) + "..." : text,
-        detail: text.length > 80 ? text : undefined,
-      })
+      const event = buildAssistantResponseEvent(p.message, now)
+      if (event) events.push(event)
     }
   }
 
@@ -135,6 +204,7 @@ function codexLineToEvents(line: CodexLine): AgentEvent[] {
 export type CodexEventCallback = (events: AgentEvent[]) => void
 
 export class CodexWatcher {
+  private projectCwd: string
   private jsonlPath: string | null = null
   private offset = 0
   private watcher: ReturnType<typeof watch> | null = null
@@ -142,8 +212,10 @@ export class CodexWatcher {
   private callback: CodexEventCallback
   private lastCheck = 0
   private seenPayloadIds = new Set<string>()
+  private seenResponseKeys = new Set<string>()
 
-  constructor(callback: CodexEventCallback) {
+  constructor(projectCwd: string, callback: CodexEventCallback) {
+    this.projectCwd = projectCwd
     this.callback = callback
   }
 
@@ -159,13 +231,14 @@ export class CodexWatcher {
   }
 
   private findAndWatch(): void {
-    const active = findActiveCodexSession()
+    const active = findActiveCodexSession(this.projectCwd)
     if (!active) return
 
     if (active !== this.jsonlPath) {
       if (this.watcher) { this.watcher.close(); this.watcher = null }
       this.jsonlPath = active
       this.seenPayloadIds.clear()
+      this.seenResponseKeys.clear()
       // Start from end (don't replay history)
       try { this.offset = statSync(active).size } catch { this.offset = 0 }
       this.watchFile()
@@ -217,13 +290,24 @@ export class CodexWatcher {
       }
 
       const events = codexLineToEvents(parsed)
-      allEvents.push(...events)
+      for (const event of events) {
+        if (event.type === "response") {
+          const key = `${event.title}\n${event.detail || ""}`
+          if (this.seenResponseKeys.has(key)) continue
+          this.seenResponseKeys.add(key)
+        }
+        allEvents.push(event)
+      }
     }
 
     // Cap dedup set
     if (this.seenPayloadIds.size > 500) {
       const arr = [...this.seenPayloadIds]
       this.seenPayloadIds = new Set(arr.slice(-200))
+    }
+    if (this.seenResponseKeys.size > 500) {
+      const arr = [...this.seenResponseKeys]
+      this.seenResponseKeys = new Set(arr.slice(-200))
     }
 
     if (allEvents.length > 0) {
@@ -234,6 +318,7 @@ export class CodexWatcher {
   rescan(): void {
     this.jsonlPath = null
     this.seenPayloadIds.clear()
+    this.seenResponseKeys.clear()
     this.findAndWatch()
   }
 }

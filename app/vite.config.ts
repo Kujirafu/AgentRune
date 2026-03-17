@@ -7,12 +7,13 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url))
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, "VITE_")
-  const port = env.VITE_DEFAULT_PORT || "3456"
+  const defaultPort = mode === "development" ? "3457" : "3456"
+  const port = env.VITE_DEFAULT_PORT || defaultPort
 
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      __APP_VERSION__: JSON.stringify("0.2.26"),
+      __APP_VERSION__: JSON.stringify("0.2.28"),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
     build: {

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 interface SessionSummary {
   id: string
@@ -53,7 +54,11 @@ export function SessionHistory({ projectId, projectName, apiBase, onBack }: Sess
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch(`${apiBase}/api/history/${projectId}`)
+    if (!canUseApi(apiBase)) {
+      setLoading(false)
+      return
+    }
+    fetch(buildApiUrl(`/api/history/${projectId}`, apiBase))
       .then(r => r.json())
       .then(data => { setSessions(data); setLoading(false) })
       .catch(() => setLoading(false))

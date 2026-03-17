@@ -10,10 +10,12 @@ import type { AutomationConfig, AutomationSchedule, AutomationResult, Automation
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText } from "../lib/skillChains"
 import type { SkillChainDef } from "../lib/skillChains"
 import { TRUST_PROFILE_PRESETS } from "../data/automation-types"
+import { buildAutomationReport, type AutomationReportSectionKey } from "../lib/automation-report"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 import CrewReportSheet from "./CrewReportSheet"
-// ChainBuilder import removed — chain editing moved to workflow tab direct access
+// ChainBuilder import removed ??chain editing moved to workflow tab direct access
 import { trackScheduleCreate, trackAutomationTrigger } from "../lib/analytics"
 
 // --- Lucide-style SVG icons for crew role avatars (keyed by role.icon field) ---
@@ -93,7 +95,7 @@ const GROUP_I18N: Record<string, string> = {
   learning: "Learn",
 }
 
-// --- Subgroup → icon circle color ---
+// --- Subgroup ??icon circle color ---
 const SUBGROUP_COLORS: Record<string, string> = {
   git: "#F59E0B",
   ci: "#8B5CF6",
@@ -239,8 +241,24 @@ function WeekdayPicker({ selected, onChange }: { selected: number[]; onChange: (
 // --- Status dot ---
 
 function StatusDot({ status }: { status?: string }) {
-  const color = status === "success" ? "#22c55e" : status === "timeout" ? "#f59e0b" : status === "failed" ? "#ef4444" : "var(--text-secondary)"
+  const color = status === "success"
+    ? "#22c55e"
+    : status === "timeout"
+      ? "#f59e0b"
+      : status === "skipped_no_action" || status === "skipped_no_confirmation"
+        ? "#94a3b8"
+        : status === "failed" || status === "blocked_by_risk"
+          ? "#ef4444"
+          : "var(--text-secondary)"
   return <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
+}
+
+const REPORT_SECTION_ACCENT: Record<AutomationReportSectionKey, { color: string; glow: string }> = {
+  actions: { color: "#37ACC0", glow: "rgba(55,172,192,0.12)" },
+  results: { color: "#22c55e", glow: "rgba(34,197,94,0.12)" },
+  issues: { color: "#f59e0b", glow: "rgba(245,158,11,0.14)" },
+  decisions: { color: "#FB8184", glow: "rgba(251,129,132,0.14)" },
+  notes: { color: "#94a3b8", glow: "rgba(148,163,184,0.14)" },
 }
 
 // --- Keyword matching for proactive template suggestion ---
@@ -379,7 +397,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   // Crew mode
   const [formCrew, setFormCrew] = useState<CrewConfig | null>(null)
   const [expandedRoleId, setExpandedRoleId] = useState<string | null>(null)
-  // chainPickerRoleId/chainEditRoleId removed — skill chain selection simplified out
+  // chainPickerRoleId/chainEditRoleId removed ??skill chain selection simplified out
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null)
   const [scanResult, setScanResult] = useState<{ blockedCount: number; conflicts: { detectedKey: string; categoryKey: string; blocked: boolean }[]; summaryKey: string; summaryParams: Record<string, string | number> } | null>(null)
   const [scanning, setScanning] = useState(false)
@@ -410,19 +428,20 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   // Toast
   const [toast, setToast] = useState<string | null>(null)
   const showToast = (msg: string, duration = 2500) => { setToast(msg); setTimeout(() => setToast(null), duration) }
+  const apiUrl = useCallback((path: string) => buildApiUrl(path, serverUrl), [serverUrl])
 
   // Prompt keyword match suggestions
   const promptMatches = matchTemplates(formPrompt)
 
   const fetchAutomations = useCallback(async () => {
-    if (!serverUrl || !projectId) return
+    if (!projectId || !canUseApi(serverUrl)) return
     setLoading(true)
     try {
-      const res = await fetch(`${serverUrl}/api/automations/${projectId}`)
+      const res = await fetch(apiUrl(`/api/automations/${projectId}`))
       if (res.ok) setAutomations(await res.json())
     } catch { /* ignore */ }
     setLoading(false)
-  }, [serverUrl, projectId])
+  }, [apiUrl, projectId, serverUrl])
 
   useEffect(() => {
     if (open) {
@@ -472,7 +491,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     if (sheetRef.current) sheetRef.current.scrollTop = 0
   }, [page])
 
-  // Back button — directly close (list/templates pages moved to Panel 1 tabs)
+  // Back button ??directly close (list/templates pages moved to Panel 1 tabs)
   useEffect(() => {
     if (!open) return
     const handler = (e: Event) => {
@@ -487,7 +506,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
   const handleToggle = async (id: string, enabled: boolean) => {
     try {
-      await fetch(`${serverUrl}/api/automations/${projectId}/${id}`, {
+      await fetch(apiUrl(`/api/automations/${projectId}/${id}`), {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
       })
@@ -500,7 +519,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     setTriggeringId(id)
     trackAutomationTrigger(id, "manual")
     try {
-      const res = await fetch(`${serverUrl}/api/automations/${projectId}/${id}/trigger`, { method: "POST" })
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/trigger`), { method: "POST" })
       if (res.ok) {
         showToast(t("automation.triggered") || "Triggered")
       } else {
@@ -515,7 +534,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const handleScan = async (autoId: string, level: string) => {
     setScanning(true)
     try {
-      const res = await fetch(`${serverUrl}/api/automations/${projectId}/${autoId}/scan-conflicts?level=${level}`)
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${autoId}/scan-conflicts?level=${level}`))
       if (res.ok) {
         const data = await res.json()
         setScanResult(data)
@@ -526,7 +545,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
   const handleDelete = async (id: string) => {
     try {
-      await fetch(`${serverUrl}/api/automations/${projectId}/${id}`, { method: "DELETE" })
+      await fetch(apiUrl(`/api/automations/${projectId}/${id}`), { method: "DELETE" })
       setAutomations((prev) => prev.filter((a) => a.id !== id))
       if (expandedId === id) setExpandedId(null)
     } catch { /* ignore */ }
@@ -537,7 +556,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     setExpandedId(id)
     setLoadingResults(true)
     try {
-      const res = await fetch(`${serverUrl}/api/automations/${projectId}/${id}/results`)
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/results`))
       if (res.ok) setResults(await res.json())
       else setResults([])
     } catch { setResults([]) }
@@ -632,7 +651,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
     try {
       if (editId && editId !== "__new__") {
-        const res = await fetch(`${serverUrl}/api/automations/${projectId}/${editId}`, {
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${editId}`), {
           method: "PATCH", headers: authHeaders,
           body: JSON.stringify(body),
         })
@@ -646,7 +665,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           showToast(`Save failed (${res.status})`, 3000)
         }
       } else {
-        const res = await fetch(`${serverUrl}/api/automations/${projectId}`, {
+      const res = await fetch(apiUrl(`/api/automations/${projectId}`), {
           method: "POST", headers: authHeaders,
           body: JSON.stringify(body),
         })
@@ -736,6 +755,23 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     return `${(ms / 60_000).toFixed(1)}m`
   }
 
+  const getReportSectionTitle = (key: AutomationReportSectionKey): string => {
+    switch (key) {
+      case "actions":
+        return t("automation.whatHappened")
+      case "results":
+        return t("automation.resultReport")
+      case "issues":
+        return t("automation.issuesRisks")
+      case "decisions":
+        return t("automation.decisionsNext")
+      case "notes":
+        return t("automation.otherNotes")
+      default:
+        return key
+    }
+  }
+
   return (
     <AnimatePresence>
       {open && (
@@ -783,7 +819,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               </div>
             </div>
 
-            {/* Top entry buttons — manual + custom crew */}
+            {/* Top entry buttons ??manual + custom crew */}
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
               <button onClick={() => openAddForm()} style={{
                 display: "flex", alignItems: "center", gap: 10, flex: 1,
@@ -1098,7 +1134,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {automations.map((auto) => {
                   const isExpanded = expandedId === auto.id
-                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : auto.lastRunStatus === "circuit_broken" ? "#f59e0b" : (auto.lastRunStatus === "failed" || auto.lastRunStatus === "blocked_by_risk") ? "#ef4444" : auto.lastRunStatus === "skipped_no_confirmation" ? "#94a3b8" : undefined
+                  const statusColor = auto.lastRunStatus === "success" ? "#22c55e" : auto.lastRunStatus === "timeout" ? "#f59e0b" : auto.lastRunStatus === "circuit_broken" ? "#f59e0b" : (auto.lastRunStatus === "failed" || auto.lastRunStatus === "blocked_by_risk") ? "#ef4444" : (auto.lastRunStatus === "skipped_no_confirmation" || auto.lastRunStatus === "skipped_no_action") ? "#94a3b8" : undefined
                   const hasCrew = !!(auto as any).crew
                   return (
                     <div key={auto.id} style={{
@@ -1182,7 +1218,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           }}>
                             {hasCrew
                               ? t("crew.rolesCount").replace("{n}", String((auto as any).crew.roles.length))
-                              : (auto.prompt || auto.command || "—")}
+                              : (auto.prompt || auto.command || "??")}
                           </div>
                           {/* Last run status bar */}
                           {auto.lastRunAt && (
@@ -1191,7 +1227,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             }}>
                               <StatusDot status={auto.lastRunStatus} />
                               <span style={{ color: statusColor, fontWeight: 600 }}>
-                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "circuit_broken" ? t("crew.report.status.circuit_broken") : auto.lastRunStatus === "blocked_by_risk" ? "Blocked" : auto.lastRunStatus === "skipped_no_confirmation" ? "Skipped" : auto.lastRunStatus === "failed" ? "Failed" : "—"}
+                                {auto.lastRunStatus === "success" ? "OK" : auto.lastRunStatus === "timeout" ? "Timeout" : auto.lastRunStatus === "circuit_broken" ? t("crew.report.status.circuit_broken") : auto.lastRunStatus === "blocked_by_risk" ? "Blocked" : auto.lastRunStatus === "skipped_no_confirmation" || auto.lastRunStatus === "skipped_no_action" ? "Skipped" : auto.lastRunStatus === "failed" ? "Failed" : "??"}
                               </span>
                               <span style={{ color: "var(--text-secondary)", opacity: 0.6 }}>
                                 {formatTime(auto.lastRunAt)}
@@ -1228,7 +1264,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 background: "var(--icon-bg)", color: "var(--text-secondary)", fontWeight: 600,
                               }}>
                                 {AGENTS.find((a) => a.id === auto.agentId)?.name || auto.agentId}
-                                {(auto as any).model ? ` · ${(auto as any).model}` : ""}
+                                {(auto as any).model ? ` 繚 ${(auto as any).model}` : ""}
                               </span>
                             )}
                             <span style={{
@@ -1321,15 +1357,15 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           ) : (
                             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                               {results.slice(-5).reverse().map((r) => {
-                                const displayText = r.summary || r.output || ""
+                                const report = buildAutomationReport(r)
                                 const statusLabel = r.status === "success" ? "Success"
                                   : r.status === "timeout" ? "Timeout"
                                   : r.status === "blocked_by_risk" ? "Blocked"
-                                  : r.status === "skipped_no_confirmation" ? "Skipped"
+                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" ? "Skipped"
                                   : "Failed"
                                 const statusColor = r.status === "success" ? "#22c55e"
                                   : r.status === "timeout" ? "#f59e0b"
-                                  : r.status === "skipped_no_confirmation" ? "#94a3b8"
+                                  : r.status === "skipped_no_confirmation" || r.status === "skipped_no_action" ? "#94a3b8"
                                   : "#ef4444"
                                 return (
                                   <div key={r.id} style={{
@@ -1344,19 +1380,122 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         </span>
                                       </div>
                                       <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} · {formatDuration(r.finishedAt - r.startedAt)}
+                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} 繚 {formatDuration(r.finishedAt - r.startedAt)}
                                       </div>
                                     </div>
-                                    {displayText && (
+                                    {report.summary && (
                                       <div style={{
-                                        fontSize: 12, lineHeight: 1.5,
-                                        color: "var(--text-secondary)",
-                                        whiteSpace: "pre-wrap", wordBreak: "break-word",
-                                        maxHeight: 120, overflowY: "auto",
-                                        background: "var(--glass-border)", padding: "8px 10px", borderRadius: 8,
+                                        marginTop: 8,
+                                        padding: "10px 12px",
+                                        borderRadius: 10,
+                                        background: "var(--glass-border)",
+                                        border: "1px solid rgba(55,172,192,0.16)",
                                       }}>
-                                        {displayText}
+                                        <div style={{
+                                          fontSize: 10,
+                                          fontWeight: 700,
+                                          color: "#37ACC0",
+                                          textTransform: "uppercase",
+                                          letterSpacing: 1.2,
+                                          marginBottom: 6,
+                                        }}>
+                                          {t("automation.summaryReport")}
+                                        </div>
+                                        <div style={{
+                                          fontSize: 12,
+                                          lineHeight: 1.6,
+                                          color: "var(--text-primary)",
+                                          whiteSpace: "pre-wrap",
+                                          wordBreak: "break-word",
+                                        }}>
+                                          {report.summary}
+                                        </div>
                                       </div>
+                                    )}
+
+                                    {report.sections.length > 0 && (
+                                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                                        {report.sections.map((section) => {
+                                          const accent = REPORT_SECTION_ACCENT[section.key]
+                                          return (
+                                            <div
+                                              key={`${r.id}-${section.key}`}
+                                              style={{
+                                                padding: "10px 12px",
+                                                borderRadius: 10,
+                                                background: accent.glow,
+                                                border: `1px solid ${accent.glow}`,
+                                                boxShadow: `inset 3px 0 0 ${accent.color}`,
+                                              }}
+                                            >
+                                              <div style={{
+                                                fontSize: 10,
+                                                fontWeight: 700,
+                                                color: accent.color,
+                                                textTransform: "uppercase",
+                                                letterSpacing: 1.2,
+                                                marginBottom: 8,
+                                              }}>
+                                                {getReportSectionTitle(section.key)}
+                                              </div>
+                                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                                {section.items.map((item, index) => (
+                                                  <div key={`${r.id}-${section.key}-${index}`} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                                                    <div style={{
+                                                      width: 6,
+                                                      height: 6,
+                                                      marginTop: 6,
+                                                      borderRadius: "50%",
+                                                      background: accent.color,
+                                                      flexShrink: 0,
+                                                    }} />
+                                                    <div style={{
+                                                      fontSize: 12,
+                                                      lineHeight: 1.55,
+                                                      color: "var(--text-primary)",
+                                                      whiteSpace: "pre-wrap",
+                                                      wordBreak: "break-word",
+                                                    }}>
+                                                      {item}
+                                                    </div>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    )}
+
+                                    {report.fullLog && (
+                                      <details style={{ marginTop: 8 }}>
+                                        <summary style={{
+                                          cursor: "pointer",
+                                          fontSize: 11,
+                                          fontWeight: 700,
+                                          color: "var(--text-secondary)",
+                                          listStyle: "none",
+                                          userSelect: "none",
+                                        }}>
+                                          {t("automation.fullLog")}
+                                        </summary>
+                                        <div style={{
+                                          marginTop: 8,
+                                          fontSize: 12,
+                                          lineHeight: 1.5,
+                                          color: "var(--text-secondary)",
+                                          whiteSpace: "pre-wrap",
+                                          wordBreak: "break-word",
+                                          maxHeight: 180,
+                                          overflowY: "auto",
+                                          background: "rgba(15,23,42,0.08)",
+                                          padding: "10px 12px",
+                                          borderRadius: 8,
+                                          border: "1px solid var(--glass-border)",
+                                        }}>
+                                          {report.fullLog}
+                                        </div>
+                                      </details>
                                     )}
                                   </div>
                                 )
@@ -1456,7 +1595,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               ))}
             </div>
 
-            {/* Template list — grouped by category */}
+            {/* Template list ??grouped by category */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: "50dvh", overflowY: "auto" }}>
               {(() => {
                 // Filter templates
@@ -1568,11 +1707,11 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               }}
             />
 
-            {/* 2. Prompt input — crew mode shows role cards, template shows collapsed, manual shows textarea */}
+            {/* 2. Prompt input ??crew mode shows role cards, template shows collapsed, manual shows textarea */}
             {formCrew ? (
               /* ---- CREW MODE: Prompt + Role card list ---- */
               <div style={{ width: "100%", marginBottom: 0 }}>
-                {/* User prompt — what should this crew work on */}
+                {/* User prompt ??what should this crew work on */}
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
                   {t("automation.prompt") || "Prompt"}
                 </div>
@@ -1666,8 +1805,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{roleName}</div>
                             <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                               {t("crew.phase").replace("{n}", String(role.phase))}
-                              {isParallel && ` · ${t("crew.parallel")}`}
-                              {role.estimatedTokens ? ` · ~${role.estimatedTokens.toLocaleString()} tok` : ""}
+                              {isParallel && ` 繚 ${t("crew.parallel")}`}
+                              {role.estimatedTokens ? ` 繚 ~${role.estimatedTokens.toLocaleString()} tok` : ""}
                             </div>
                           </div>
                           <IconChevron expanded={isExpanded} />
@@ -1921,7 +2060,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               </div>
             )}
 
-            {/* 2b. Keyword-matched template suggestions — appears as user types */}
+            {/* 2b. Keyword-matched template suggestions ??appears as user types */}
             {promptMatches.length > 0 && !formTemplateId && (
               <div style={{
                 marginTop: 6, marginBottom: 10, padding: "8px 10px", borderRadius: 10,
@@ -1973,7 +2112,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               </div>
             )}
 
-            {/* Browse templates link — always visible when no template applied */}
+            {/* Browse templates link ??always visible when no template applied */}
             {!formTemplateId && (
               <div style={{ marginTop: 6, marginBottom: 10 }}>
                 <button onClick={() => setTemplateTab(templateTab === "all" ? "recommended" : "all")} style={{
@@ -2358,7 +2497,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
             {/* 6. Buttons */}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              {/* Launch session now — only for pure-prompt templates (not crew) */}
+              {/* Launch session now ??only for pure-prompt templates (not crew) */}
               {onLaunchSession && !formCrew && formPrompt.trim() && (
                 <button onClick={() => {
                   localStorage.setItem("agentrune_session_prefill", formPrompt.trim())
@@ -2430,7 +2569,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               display: "flex", alignItems: "center", justifyContent: "center",
               flexShrink: 0,
             }}>
-              {"←"}
+              {"X"}
             </button>
             <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
               {t("automation.editPrompt") || "Edit Prompt"}
@@ -2556,7 +2695,7 @@ function TemplateCard({ tmpl, isPinned, tplName, tplDesc, t, onPin, onUse }: {
   )
 }
 
-/** Simple pick card for the pick page — solid colors, no backdrop blur */
+/** Simple pick card for the pick page ??solid colors, no backdrop blur */
 function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, onDelete }: {
   tmpl: AutomationTemplate
   tplName: (t: AutomationTemplate) => string
@@ -2620,7 +2759,7 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
   )
 }
 
-/** Crew template pick card — shows role avatars and role count */
+/** Crew template pick card ??shows role avatars and role count */
 function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
   tmpl: AutomationTemplate
   t: (key: string) => string
@@ -2654,7 +2793,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
         flex: 1, minWidth: 0, padding: "12px 8px 12px 14px",
         background: "none", border: "none", cursor: "pointer", textAlign: "left",
       }}>
-        {/* Role avatar row — Lucide icons */}
+        {/* Role avatar row ??Lucide icons */}
         <div style={{ display: "flex", flexShrink: 0 }}>
           {roles.slice(0, 4).map((r, i) => (
             <div key={r.id} style={{
@@ -2681,7 +2820,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{name}</div>
           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
           <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 3 }}>
-            {t("crew.rolesCount").replace("{n}", String(roles.length))} · {tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
+            {t("crew.rolesCount").replace("{n}", String(roles.length))} 繚 {tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
           </div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>

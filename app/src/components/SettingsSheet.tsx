@@ -139,6 +139,8 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
   const codexModels: { value: CodexModel; label: string }[] = [
     { value: "default", label: "Default" },
     { value: "gpt-5", label: "GPT-5" },
+    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-5.3", label: "GPT-5.3" },
     { value: "gpt-5-codex", label: "GPT-5 Codex" },
     { value: "codex-mini-latest", label: "Codex Mini" },
   ]
@@ -473,7 +475,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
             <div style={sectionLabelStyle}>{t("settings.codexModel")}</div>
             <div style={{
               display: "grid",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
               gap: 10,
               padding: "16px 20px",
               borderRadius: 20,
@@ -509,6 +511,32 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                   {m.label}
                 </button>
               ))}
+              <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={settings.codexModel === "default" ? "" : settings.codexModel}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    onChange({ ...settings, codexModel: value.trim() ? value : "default" })
+                  }}
+                  placeholder="gpt-5.4"
+                  style={{
+                    width: "100%",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid var(--glass-border)",
+                    background: "var(--glass-bg)",
+                    color: "var(--text-primary)",
+                    fontSize: 13,
+                    fontFamily: "monospace",
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", opacity: 0.8 }}>
+                  {t("settings.codexModelDesc") || "Leave empty for default, or enter any safe Codex model id such as gpt-5.4."}
+                </div>
+              </div>
             </div>
           </div>
         )}

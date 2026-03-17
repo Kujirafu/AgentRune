@@ -42,3 +42,12 @@ app/android/local.properties
 .idea/
 *.iml
 .vscode/
+
+# Local QA / scratch outputs
+.superpowers/
+docs/superpowers/
+tmp/
+tmp-*.json
+tmp-*.png
+app/test-results/
+cli/coverage/

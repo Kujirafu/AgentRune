@@ -3,6 +3,7 @@ import { useState, useEffect } from "react"
 import ReactMarkdown from "react-markdown"
 import { SpringOverlay } from "./SpringOverlay"
 import { useLocale } from "../lib/i18n"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 interface InsightSheetProps {
   open: boolean
@@ -33,9 +34,10 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
   }, [open])
 
   const generateInsight = async () => {
+    if (!canUseApi(apiBase)) return
     setLoading(true)
     try {
-      const res = await fetch(`${apiBase}/api/insight/generate`, {
+      const res = await fetch(buildApiUrl("/api/insight/generate", apiBase), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId, sessionId }),
@@ -56,10 +58,11 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
   }
 
   const handleSubmit = async () => {
+    if (!canUseApi(apiBase)) return
     setSubmitting(true)
     setSubmitResult(null)
     try {
-      const res = await fetch(`${apiBase}/api/insight/submit`, {
+      const res = await fetch(buildApiUrl("/api/insight/submit", apiBase), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceText, title }),
@@ -203,7 +206,7 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
               lineHeight: 1.7,
               color: "var(--text-primary)",
             }}>
-              <ReactMarkdown>{markdown}</ReactMarkdown>
+              <ReactMarkdown urlTransform={(url) => url.startsWith("http://") || url.startsWith("https://") ? url : ""}>{markdown}</ReactMarkdown>
             </div>
           )}
           {!loading && !empty && sourceText.length < 200 && sourceText.length > 0 && (

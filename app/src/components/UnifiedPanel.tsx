@@ -16,6 +16,7 @@ import { useLocale } from "../lib/i18n"
 import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -365,11 +366,11 @@ export function UnifiedPanel({
   // --- Fetch automation counts ---
   useEffect(() => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl || projects.length === 0) return
+    if (!canUseApi(serverUrl) || projects.length === 0) return
     const counts = new Map<string, number>()
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(`${serverUrl}/api/automations/${p.id}`)
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
         if (res.ok) {
           const autos: { enabled: boolean }[] = await res.json()
           const enabled = autos.filter((a) => a.enabled).length
@@ -383,12 +384,12 @@ export function UnifiedPanel({
   useEffect(() => {
     if (activeTab !== "schedules") return
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return
+    if (!canUseApi(serverUrl)) return
     setAutomationsLoading(true)
     // Fetch for all projects
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(`${serverUrl}/api/automations/${p.id}`)
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
         if (res.ok) return { projectId: p.id, items: await res.json() }
       } catch {}
       return { projectId: p.id, items: [] }
@@ -499,11 +500,11 @@ export function UnifiedPanel({
     if (cached && latestEventTs <= cached.timestamp) return
 
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return
+    if (!canUseApi(serverUrl)) return
 
     setSummaryLoading(prev => new Set(prev).add(projectId))
     try {
-      const res = await fetch(`${serverUrl}/api/project-summary`, {
+      const res = await fetch(buildApiUrl("/api/project-summary", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ projectId }),
@@ -661,9 +662,8 @@ export function UnifiedPanel({
 
   const callCleanupAPI = async (text: string, aid: string): Promise<string> => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return text
     try {
-      const res = await fetch(`${serverUrl}/api/voice-cleanup`, {
+      const res = await fetch(buildApiUrl("/api/voice-cleanup", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, agentId: aid }),
@@ -689,7 +689,7 @@ export function UnifiedPanel({
     if (isEdit) {
       const serverUrl = localStorage.getItem("agentrune_server") || ""
       try {
-        const res = await fetch(`${serverUrl}/api/voice-edit`, {
+        const res = await fetch(buildApiUrl("/api/voice-edit", serverUrl), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ original: voiceEditOriginal.current, instruction: raw }),
@@ -1332,10 +1332,19 @@ export function UnifiedPanel({
                               flexShrink: 0,
                             }}
                           >
-                            <button
+                            <div
+                              role="button"
+                              tabIndex={0}
                               onClick={() => {
                                 if (longPressFired.current) return
                                 onSelectSession(session.id)
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault()
+                                  if (longPressFired.current) return
+                                  onSelectSession(session.id)
+                                }
                               }}
                               onTouchStart={() => {
                                 longPressFired.current = false
@@ -1440,7 +1449,7 @@ export function UnifiedPanel({
                                   <MicIcon size={14} />
                                 </button>
                               </div>
-                            </button>
+                            </div>
                           </div>
                         )
                       })}
@@ -1507,7 +1516,7 @@ export function UnifiedPanel({
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
-                {t("overview.newProject") || "New Project"}
+                {t("overview.newSession") || "New Session"}
               </button>
             )}
           </div>
@@ -1594,7 +1603,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, {
+                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), {
                               method: "PATCH", headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ enabled: !auto.enabled }),
                             })
@@ -1637,7 +1646,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, { method: "DELETE" })
+                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), { method: "DELETE" })
                             setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                           } catch {}
                         }}
@@ -1669,7 +1678,7 @@ export function UnifiedPanel({
                             if (!resultsData.has(auto.id)) {
                               const serverUrl = localStorage.getItem("agentrune_server") || ""
                               try {
-                                const res = await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}/results`)
+                                const res = await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}/results`, serverUrl))
                                 if (res.ok) {
                                   const data = await res.json()
                                   setResultsData(prev => new Map(prev).set(auto.id, data))
@@ -2436,7 +2445,7 @@ export function UnifiedPanel({
                 if (e.key === "Enter" && projectRenameValue.trim()) {
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
                   try {
-                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                    await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ name: projectRenameValue.trim() }),
@@ -2472,7 +2481,7 @@ export function UnifiedPanel({
                   if (!projectRenameValue.trim()) return
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
                   try {
-                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                    await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ name: projectRenameValue.trim() }),

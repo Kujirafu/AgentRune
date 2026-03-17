@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useLocale } from "../lib/i18n"
 import type { CrewExecutionReport, CrewRoleResult } from "../data/automation-types"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 interface CrewReportSheetProps {
   open: boolean
@@ -56,13 +57,14 @@ export default function CrewReportSheet({ open, automationId, automationName, se
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [expandedRole, setExpandedRole] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const apiUrl = useCallback((path: string) => buildApiUrl(path, serverUrl), [serverUrl])
 
   const fetchReports = useCallback(async () => {
-    if (!automationId || !serverUrl) return
+    if (!automationId || !canUseApi(serverUrl)) return
     setLoading(true)
     try {
       // Extract projectId from URL context — use generic endpoint
-      const resp = await fetch(`${serverUrl}/api/automations/_/${automationId}/crew-reports`)
+      const resp = await fetch(apiUrl(`/api/automations/_/${automationId}/crew-reports`))
       if (resp.ok) {
         const data = await resp.json()
         setReports(data)
@@ -73,7 +75,7 @@ export default function CrewReportSheet({ open, automationId, automationName, se
     } finally {
       setLoading(false)
     }
-  }, [automationId, serverUrl])
+  }, [apiUrl, automationId, serverUrl])
 
   useEffect(() => {
     if (open) {

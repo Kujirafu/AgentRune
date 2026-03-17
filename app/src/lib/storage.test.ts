@@ -5,6 +5,8 @@ import {
   getRecentCommands,
   addRecentCommand,
   getApiBase,
+  canUseApi,
+  buildApiUrl,
   getVolumeKeysEnabled,
   setVolumeKeysEnabled,
   getKilledSessionIds,
@@ -163,6 +165,32 @@ describe("getApiBase", () => {
   it("returns empty string when not Capacitor environment", () => {
     // jsdom does not have window.Capacitor
     expect(getApiBase()).toBe("")
+  })
+})
+
+describe("buildApiUrl / canUseApi", () => {
+  it("uses same-origin relative paths on web even when a server URL is stored", () => {
+    localStorage.setItem("agentrune_server", "https://example.trycloudflare.com")
+    expect(canUseApi()).toBe(true)
+    expect(buildApiUrl("/api/automations/proj-1")).toBe("/api/automations/proj-1")
+  })
+
+  it("uses the configured daemon base on Capacitor", () => {
+    ;(window as any).Capacitor = { isNativePlatform: () => true }
+    localStorage.setItem("agentrune_server", "http://127.0.0.1:3457/")
+    expect(getApiBase()).toBe("http://127.0.0.1:3457/")
+    expect(canUseApi()).toBe(true)
+    expect(buildApiUrl("/api/automations/proj-1")).toBe("http://127.0.0.1:3457/api/automations/proj-1")
+    delete (window as any).Capacitor
+  })
+
+  it("keeps same-origin relative URLs on Capacitor web runtime", () => {
+    ;(window as any).Capacitor = { isNativePlatform: () => false }
+    localStorage.setItem("agentrune_server", "https://example.trycloudflare.com")
+    expect(getApiBase()).toBe("")
+    expect(canUseApi()).toBe(true)
+    expect(buildApiUrl("/api/project-summary")).toBe("/api/project-summary")
+    delete (window as any).Capacitor
   })
 })
 

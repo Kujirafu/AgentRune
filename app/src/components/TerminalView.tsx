@@ -16,16 +16,20 @@ import { InputBar } from "./InputBar"
 import { DetailPanel } from "./DetailPanel"
 import { FileBrowser } from "./FileBrowser"
 import { useLocale } from "../lib/i18n/index.js"
+import { buildSessionAttachMessage } from "../lib/session-attach"
 
 interface TerminalViewProps {
   project: Project
   agentId: string
   sessionId?: string
   resumeSessionId?: string  // Claude Code session ID to resume (--resume <id>)
+  shouldResumeAgent?: boolean
   sessionToken: string
   send: (msg: Record<string, unknown>) => boolean
   on: (type: string, handler: (msg: Record<string, unknown>) => void) => (() => void)
   onBack: () => void
+  onLaunchSession?: (projectId: string, agentId: string) => void
+  onKillSession?: (sessionId: string) => void
 }
 
 interface IdleSuggestion {
@@ -42,7 +46,18 @@ function stripAnsiForDetection(str: string): string {
     .replace(/[\x00-\x08\x0b-\x1f]/g, "")
 }
 
-export function TerminalView({ project, agentId, sessionId, resumeSessionId, send, on, onBack }: TerminalViewProps) {
+export function TerminalView({
+  project,
+  agentId,
+  sessionId,
+  resumeSessionId,
+  shouldResumeAgent = false,
+  send,
+  on,
+  onBack,
+  onLaunchSession,
+  onKillSession,
+}: TerminalViewProps) {
   const { t, locale } = useLocale()
   const [settings, setSettings] = useState<ProjectSettings>(() => getSettings(project.id))
 
@@ -142,9 +157,53 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
   }
 
   const handleSettingsChange = useCallback((newSettings: ProjectSettings) => {
+    const prev = settings
     setSettings(newSettings)
     saveSettings(project.id, newSettings)
-  }, [project.id])
+
+    const relaunchSession = () => {
+      if (!sessionId || !onKillSession || !onLaunchSession) return false
+      onKillSession(sessionId)
+      setTimeout(() => onLaunchSession(project.id, agentId), 500)
+      return true
+    }
+
+    if (agentId === "codex") {
+      const codexChanged =
+        newSettings.codexModel !== prev.codexModel
+        || newSettings.codexMode !== prev.codexMode
+        || newSettings.codexReasoningEffort !== prev.codexReasoningEffort
+      if (codexChanged) relaunchSession()
+    }
+
+    if (agentId === "cursor") {
+      const cursorChanged =
+        newSettings.cursorMode !== prev.cursorMode
+        || newSettings.cursorModel !== prev.cursorModel
+        || newSettings.cursorSandbox !== prev.cursorSandbox
+      if (cursorChanged) relaunchSession()
+    }
+
+    if (agentId === "gemini") {
+      const geminiChanged =
+        newSettings.geminiModel !== prev.geminiModel
+        || newSettings.geminiApprovalMode !== prev.geminiApprovalMode
+        || newSettings.geminiSandbox !== prev.geminiSandbox
+      if (geminiChanged) relaunchSession()
+    }
+
+    if (agentId === "aider") {
+      const aiderChanged =
+        newSettings.aiderModel !== prev.aiderModel
+        || newSettings.aiderAutoCommit !== prev.aiderAutoCommit
+        || newSettings.aiderArchitect !== prev.aiderArchitect
+      if (aiderChanged) relaunchSession()
+    }
+
+    if (agentId === "openclaw" && newSettings.openclawProvider !== prev.openclawProvider) {
+      relaunchSession()
+    }
+  }, [agentId, onKillSession, onLaunchSession, project.id, sessionId, settings])
 
   const sendInput = useCallback((data: string) => {
     send({ type: "input", data })
@@ -514,14 +573,24 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
     parserRef.current.clear()
     lastScreenTextRef.current = ""
 
-    const attach = () => send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath(), isAgentResume: !!resumeSessionId, claudeSessionId: resumeSessionId || undefined, settings: { model: settings.model, bypass: settings.bypass, planMode: settings.planMode, autoEdit: settings.autoEdit, fastMode: settings.fastMode, locale } })
+    const attach = () => send(buildSessionAttachMessage({
+      projectId: project.id,
+      agentId,
+      sessionId,
+      autoSaveKeys: getAutoSaveKeysEnabled(),
+      autoSaveKeysPath: getAutoSaveKeysPath(),
+      shouldResumeAgent,
+      claudeSessionId: resumeSessionId || undefined,
+      settings: getSettings(project.id),
+      locale,
+    }))
     attach()
 
     const unsub = on("__ws_open__", () => {
       attach()
     })
     return unsub
-  }, [project.id, agentId, sessionId, send, on])
+  }, [project.id, agentId, sessionId, send, on, locale, resumeSessionId, shouldResumeAgent])
 
   const thinkingBlocks = parserRef.current.getThinkingBlocks()
   const codeBlocks = parserRef.current.getCodeBlocks()
@@ -707,7 +776,4 @@ export function TerminalView({ project, agentId, sessionId, resumeSessionId, sen
     </div>
   )
 }
-
-
-
 

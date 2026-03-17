@@ -27,7 +27,7 @@ export interface AgentDef {
   slashCommands?: SlashCommand[]
 }
 
-export type CodexModel = "default" | "gpt-5" | "gpt-5-codex" | "codex-mini-latest"
+export type CodexModel = string
 export type CodexMode = "default" | "full-auto" | "danger-full-access"
 export type CodexReasoningEffort = "default" | "low" | "medium" | "high" | "xhigh"
 export type AiderModel = "default" | "gpt-4o" | "claude-3.5-sonnet" | "deepseek-chat" | "o3-mini"

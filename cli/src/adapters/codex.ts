@@ -3,6 +3,38 @@ import type { AgentAdapter } from "./types.js"
 import type { AgentEvent, ParseContext } from "../shared/types.js"
 import { makeEventId } from "./types.js"
 
+function buildDecisionTitle(text: string): string {
+  if (/(trust|trusted).*(workspace|folder)|workspace.*(trust|trusted)|folder.*(trust|trusted)/i.test(text)) {
+    return "Trust workspace"
+  }
+  if (/(sandbox|permission)/i.test(text)) {
+    return "Permission requested"
+  }
+  return "Approval requested"
+}
+
+function buildDecisionOptions(text: string): AgentEvent["decision"] {
+  if (/\(y\/n\/a\)/i.test(text)) {
+    return {
+      options: [
+        { label: "Allow Once", input: "y\n", style: "primary" },
+        { label: "Always Allow", input: "a\n", style: "primary" },
+        { label: "Deny", input: "n\n", style: "danger" },
+      ],
+    }
+  }
+
+  const approveLabel = /(trust|trusted).*(workspace|folder)|workspace.*(trust|trusted)|folder.*(trust|trusted)/i.test(text)
+    ? "Trust"
+    : "Approve"
+  return {
+    options: [
+      { label: approveLabel, input: "y\n", style: "primary" },
+      { label: "Deny", input: "n\n", style: "danger" },
+    ],
+  }
+}
+
 export const codexAdapter: AgentAdapter = {
   id: "codex",
   name: "Codex CLI",
@@ -38,22 +70,22 @@ export const codexAdapter: AgentAdapter = {
       })
     }
 
-    // Approval prompt
-    if (/\[approve\]|\[deny\]|approve this/i.test(chunk)) {
+    // Approval / trust prompt. Codex often uses simple y/n/a prompts instead of arrow-key TUI menus.
+    const promptText = (ctx.buffer || chunk).split("\n").slice(-8).join("\n").trim()
+    const hasApprovalKeywords = /(approve|approval|allow|deny|permission|trust|trusted|workspace|folder|sandbox)/i.test(promptText)
+    const hasPromptMarkers = /\[approve\]|\[deny\]|approve this|\(y\/n\/a\)|\[Y\/n\]|\[y\/N\]|\(y\/N\)|\(yes\/no\)|\[yes\/no\]/i.test(promptText)
+    if (hasApprovalKeywords && hasPromptMarkers) {
+      const lines = promptText.split("\n").map((line) => line.trim()).filter(Boolean)
+      const detail = lines.slice(-3).join("\n").slice(0, 400)
       events.push({
         id: makeEventId(),
         timestamp: Date.now(),
         type: "decision_request",
         status: "waiting",
-        title: "Approval requested",
-        detail: chunk.trim().split("\n")[0].slice(0, 200),
-        raw: chunk,
-        decision: {
-          options: [
-            { label: "Approve", input: "y\n", style: "primary" },
-            { label: "Deny", input: "n\n", style: "danger" },
-          ],
-        },
+        title: buildDecisionTitle(promptText),
+        detail,
+        raw: promptText,
+        decision: buildDecisionOptions(promptText),
       })
     }
 

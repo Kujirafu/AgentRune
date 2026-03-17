@@ -4,7 +4,7 @@ import { createPortal } from "react-dom"
 import type { Project, ProjectSettings, AppSession } from "../types"
 import type { AgentEvent } from "../types"
 import { AGENTS } from "../types"
-import { getSettings, saveSettings, addRecentCommand, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../lib/storage"
+import { getSettings, saveSettings, addRecentCommand, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath, buildApiUrl } from "../lib/storage"
 import { EventCard } from "./EventCard"
 import { ProgressCard } from "./ProgressCard"
 import type { AgentStatus } from "./StatusIndicator"
@@ -22,6 +22,7 @@ import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
 import { trackSessionStart, trackSettingsChange, trackSlashCommand, trackMessageSend, trackDecision, trackVoiceInput, trackTabSwitch } from "../lib/analytics"
+import { buildSessionAttachMessage } from "../lib/session-attach"
 
 // iOS-like spring curve
 const SPRING = "cubic-bezier(0.32, 0.72, 0, 1)"
@@ -36,6 +37,7 @@ interface MissionControlProps {
   project: Project
   agentId: string
   sessionId?: string
+  shouldResumeAgent?: boolean
   sessionToken: string
   send: (msg: Record<string, unknown>) => boolean
   on: (type: string, handler: (msg: Record<string, unknown>) => void) => (() => void)
@@ -72,6 +74,7 @@ export function MissionControl({
   project,
   agentId,
   sessionId,
+  shouldResumeAgent = false,
   send,
   on,
   onBack,
@@ -374,10 +377,9 @@ export function MissionControl({
 
   // LLM cleanup — fast timeout, non-blocking
   const mcCleanupText = async (text: string): Promise<string> => {
-    const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl || !text.trim()) return text
+    if (!text.trim()) return text
     try {
-      const res = await fetch(`${serverUrl}/api/voice-cleanup`, {
+      const res = await fetch(buildApiUrl("/api/voice-cleanup", localStorage.getItem("agentrune_server") || ""), {
         method: "POST",
         headers: { "content-type": "application/json", "x-agent-id": agentId || "claude" },
         body: JSON.stringify({ text }),
@@ -405,10 +407,8 @@ export function MissionControl({
   }
 
   const mcApplyVoiceEdit = async (original: string, instruction: string): Promise<string> => {
-    const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return original
     try {
-      const res = await fetch(`${serverUrl}/api/voice-edit`, {
+      const res = await fetch(buildApiUrl("/api/voice-edit", localStorage.getItem("agentrune_server") || ""), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ original, instruction }),
@@ -790,6 +790,15 @@ export function MissionControl({
       }
     }
 
+    const relaunchSession = (message: string) => {
+      if (!sessionId || !onLaunchSession) return false
+      showToast(message, 3000)
+      onKillSession(sessionId)
+      setEvents([])
+      setTimeout(() => onLaunchSession(project.id, agentId), 500)
+      return true
+    }
+
     // Send settings changes to running Claude session
     if (agentId === "claude") {
       // Model change — clear current input first, then /model <name>
@@ -850,6 +859,52 @@ export function MissionControl({
           setEvents([])
           setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
         }
+      }
+    }
+
+    if (agentId === "codex") {
+      const codexChanged =
+        newSettings.codexModel !== prev.codexModel
+        || newSettings.codexMode !== prev.codexMode
+        || newSettings.codexReasoningEffort !== prev.codexReasoningEffort
+      if (codexChanged) {
+        relaunchSession(t("mc.settingsRestarting") || "Re-launching session to apply settings...")
+      }
+    }
+
+    if (agentId === "cursor") {
+      const cursorChanged =
+        newSettings.cursorMode !== prev.cursorMode
+        || newSettings.cursorModel !== prev.cursorModel
+        || newSettings.cursorSandbox !== prev.cursorSandbox
+      if (cursorChanged) {
+        relaunchSession(t("mc.settingsRestarting") || "Re-launching session to apply settings...")
+      }
+    }
+
+    if (agentId === "gemini") {
+      const geminiChanged =
+        newSettings.geminiModel !== prev.geminiModel
+        || newSettings.geminiApprovalMode !== prev.geminiApprovalMode
+        || newSettings.geminiSandbox !== prev.geminiSandbox
+      if (geminiChanged) {
+        relaunchSession(t("mc.settingsRestarting") || "Re-launching session to apply settings...")
+      }
+    }
+
+    if (agentId === "aider") {
+      const aiderChanged =
+        newSettings.aiderModel !== prev.aiderModel
+        || newSettings.aiderAutoCommit !== prev.aiderAutoCommit
+        || newSettings.aiderArchitect !== prev.aiderArchitect
+      if (aiderChanged) {
+        relaunchSession(t("mc.settingsRestarting") || "Re-launching session to apply settings...")
+      }
+    }
+
+    if (agentId === "openclaw") {
+      if (newSettings.openclawProvider !== prev.openclawProvider) {
+        relaunchSession(t("mc.settingsRestarting") || "Re-launching session to apply settings...")
       }
     }
   }, [project.id, settings, agentId, sessionId, send, showToast, t, onKillSession, onLaunchSession])
@@ -1284,15 +1339,15 @@ export function MissionControl({
             e.type === "decision_request" && e.status === "waiting" && e.detail === event.detail
           )) return prev
         }
-        // Content dedup: only for recent non-decision events (last 5)
-        if (event.type !== "decision_request") {
-          const evtTitle = (event.title || "").slice(0, 40)
-          if (evtTitle) {
-            const recentSlice = prev.slice(-5)
-            for (const e of recentSlice) {
-              const pTitle = (e.title || "").slice(0, 40)
-              if (pTitle === evtTitle) return prev
-            }
+        // Content dedup: keep response events verbatim, but collapse repeated
+        // non-response noise that arrives during reconnect/scrollback parsing.
+        if (event.type !== "decision_request" && event.type !== "response") {
+          const recentSlice = prev.slice(-5)
+          for (const e of recentSlice) {
+            if (e.type !== event.type) continue
+            if ((e.title || "") !== (event.title || "")) continue
+            if ((e.detail || "") !== (event.detail || "")) continue
+            return prev
           }
         }
         // Insert in timestamp order (late-arriving events go to correct position)
@@ -1520,7 +1575,16 @@ export function MissionControl({
         setApiKeyInput("")
         if (msg.restarted && msg.newSessionId) {
           // Session was restarted with the new API key — re-attach
-          send({ type: "attach", projectId: project.id, agentId, sessionId: msg.newSessionId as string, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath() })
+          send(buildSessionAttachMessage({
+            projectId: project.id,
+            agentId,
+            sessionId: msg.newSessionId as string,
+            autoSaveKeys: getAutoSaveKeysEnabled(),
+            autoSaveKeysPath: getAutoSaveKeysPath(),
+            settings: getSettings(project.id),
+            locale,
+            shouldResumeAgent: true,
+          }))
           setEvents(prev => [...prev, {
             id: `apikey_${Date.now()}`, timestamp: Date.now(),
             type: "info" as const, status: "completed" as const,
@@ -1533,7 +1597,16 @@ export function MissionControl({
     unsubs.push(on("__ws_open__", () => {
       // Re-attach to session so server restores WS connection mapping
       if (sessionId) {
-        send({ type: "attach", projectId: project.id, agentId, sessionId, autoSaveKeys: getAutoSaveKeysEnabled(), autoSaveKeysPath: getAutoSaveKeysPath() })
+        send(buildSessionAttachMessage({
+          projectId: project.id,
+          agentId,
+          sessionId,
+          autoSaveKeys: getAutoSaveKeysEnabled(),
+          autoSaveKeysPath: getAutoSaveKeysPath(),
+          settings: getSettings(project.id),
+          locale,
+          shouldResumeAgent,
+        }))
       }
     }))
 
@@ -1544,7 +1617,7 @@ export function MissionControl({
         idleTimerRef.current = null
       }
     }
-  }, [on, send, agent, settings, project.id, agentId, sessionId, t])
+  }, [on, send, agent, settings, project.id, agentId, sessionId, t, locale, shouldResumeAgent])
 
   // Android back button — close overlays first (innermost → outermost)
   useEffect(() => {

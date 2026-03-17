@@ -16,6 +16,11 @@ import { auditLog, pruneAuditLogs } from "./audit-log.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
+import { buildAutomationSocialInstructions, detectAutomationSocialMode, extractAutomationSocialDirective, outputNeedsManualIntervention } from "./automation-social.js"
+import { buildRecentSocialPostPromptContext, findDuplicateSocialPost, formatSocialDuplicateMatch, rememberSocialPost } from "./social-dedup.js"
+import { recordPublishedSocialPost } from "./social-history.js"
+import { publishSocialPost } from "./social-publisher.js"
+import { extractAutomationSummary } from "./automation-summary.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
@@ -236,7 +241,7 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_no_action" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
   // Crew execution
   crew?: CrewConfig
 }
@@ -249,7 +254,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken" | "interrupted" | "pending_reauth"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken" | "interrupted" | "pending_reauth"
   riskReport?: SkillRiskReport
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
   crewReport?: CrewExecutionReport  // set for crew automation runs
@@ -836,16 +841,59 @@ export class AutomationManager {
     this.nextRunAtMap.delete(id)
   }
 
+  private buildRecentRunPromptContext(automationId: string): string | null {
+    const recentRuns = (this.results.get(automationId) || [])
+      .slice(-3)
+      .reverse()
+
+    if (recentRuns.length === 0) return null
+
+    const lines = recentRuns.map((result) => {
+      const summary = (result.summary || extractAutomationSummary(result.output || "", result.status))
+        .replace(/\s+/g, " ")
+        .trim()
+      const compactSummary = summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
+      return `- ${this.formatAutomationTimestamp(result.finishedAt)} | ${result.status} | ${compactSummary || "no summary"}`
+    })
+
+    return [
+      "[Recent Automation Memory]",
+      "Recent runs of this exact automation:",
+      ...lines,
+      "Build on the latest run state instead of repeating the same output. If nothing materially changed, say so briefly and avoid redundant work.",
+    ].join("\n")
+  }
+
+  private formatAutomationTimestamp(timestamp: number): string {
+    try {
+      return new Intl.DateTimeFormat("zh-TW", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(new Date(timestamp))
+    } catch {
+      return new Date(timestamp).toISOString()
+    }
+  }
+
   /** Build the agent command args + prompt file for an automation.
    *  Prompt is written to a temp file and piped via stdin (child_process.spawn).
    */
   private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string } | null {
     const rawPrompt = auto.prompt || ""
     let promptText = wrapPromptWithLocale(rawPrompt)
+    const socialMode = detectAutomationSocialMode(auto)
+    const recentRunContext = this.buildRecentRunPromptContext(auto.id)
 
     // Legacy raw command field is no longer supported for direct execution (security: command injection risk).
     if (auto.command && !auto.prompt) {
       promptText = wrapPromptWithLocale(auto.command)
+    }
+
+    if (recentRunContext) {
+      promptText = `${recentRunContext}\n\n${promptText}`
     }
 
     // Inject skill instruction into prompt if specified
@@ -883,6 +931,15 @@ export class AutomationManager {
     const constraintsBlock = formatConstraintsForPrompt(constraintSet)
     if (constraintsBlock) {
       promptText = `${constraintsBlock}\n\n${promptText}`
+    }
+
+    if (socialMode) {
+      const recentSocialContext = buildRecentSocialPostPromptContext(socialMode.platform)
+      promptText = [
+        buildAutomationSocialInstructions(socialMode),
+        recentSocialContext,
+        promptText,
+      ].filter(Boolean).join("\n\n")
     }
 
     // Write prompt (with agent protocol) to file
@@ -1160,6 +1217,7 @@ export class AutomationManager {
     let output = ""
     let exitCode: number | null = null
     let status: AutomationResult["status"] = "success"
+    const socialMode = detectAutomationSocialMode(auto)
 
     try {
       // Create a temporary PTY session for this automation
@@ -1348,6 +1406,71 @@ export class AutomationManager {
         const violations = monitor.getViolations()
         output += `\n\n--- Monitor Report ---\nViolations: ${violations.length}\n${violations.map(v => `[${v.severity}] ${v.type}: ${v.description} — "${v.matchedText}"`).join("\n")}`
       }
+      if (socialMode && status === "success") {
+        const directive = extractAutomationSocialDirective(output, socialMode.platform)
+        if (directive?.kind === "post") {
+          const duplicateMatch = findDuplicateSocialPost({
+            platform: directive.platform,
+            text: directive.text,
+          })
+
+          if (duplicateMatch) {
+            output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: skipped\nReason: duplicate content matched a recently published post\nDuplicate Of: ${formatSocialDuplicateMatch(duplicateMatch)}\nSource: ${directive.source || "unknown"}`
+            status = "skipped_no_action"
+          } else {
+            const publishResult = await publishSocialPost({
+              platform: directive.platform,
+              text: directive.text,
+              source: directive.source,
+              reason: directive.reason,
+            })
+            if (publishResult.success) {
+              output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: yes\nPost ID: ${publishResult.postId}\nSource: ${directive.source || "unknown"}`
+
+              const dedupeResult = rememberSocialPost({
+                platform: directive.platform,
+                text: directive.text,
+                postId: publishResult.postId,
+                source: directive.source,
+                reason: directive.reason,
+                recordType: directive.recordType,
+                recordTitle: directive.recordTitle,
+                recordMetrics: directive.recordMetrics,
+                publishedAt: Date.now(),
+              })
+              if (dedupeResult.success) {
+                output += `\nDuplicate Guard: ${dedupeResult.stored ? "recorded" : "already recorded"}`
+              } else {
+                output += `\nDuplicate Guard: failed\nDuplicate Guard Error: ${dedupeResult.error || "Unknown duplicate history error"}`
+              }
+
+              const historyResult = recordPublishedSocialPost({
+                platform: directive.platform,
+                recordType: directive.recordType,
+                recordTitle: directive.recordTitle,
+                recordMetrics: directive.recordMetrics,
+              })
+              if (historyResult.success) {
+                output += `\nMaterials Updated: ${historyResult.skipped ? "already up to date" : "yes"}\nMaterials Path: ${historyResult.path || "unknown"}`
+              } else {
+                output += `\nMaterials Updated: no\nMaterials Error: ${historyResult.error || "Unknown materials update error"}`
+              }
+            } else {
+              output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: no\nError: ${publishResult.error || "Unknown publish error"}`
+              status = "failed"
+            }
+          }
+        } else if (directive?.kind === "skip") {
+          output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: skipped\nReason: ${directive.reason}\nSource: ${directive.source || "unknown"}`
+          status = "skipped_no_action"
+        } else if (outputNeedsManualIntervention(output)) {
+          output += "\n\n--- AgentRune Social Publish ---\nPosted: no\nError: automation requested manual intervention instead of API posting"
+          status = "failed"
+        } else {
+          output += "\n\n--- AgentRune Social Publish ---\nPosted: no\nError: social automation did not emit a publish or skip directive"
+          status = "failed"
+        }
+      }
     } catch (err) {
       output = err instanceof Error ? err.message : String(err)
       status = "failed"
@@ -1360,7 +1483,7 @@ export class AutomationManager {
       finishedAt: Date.now(),
       exitCode,
       output,
-      summary: AutomationManager.extractSummary(output, status),
+      summary: extractAutomationSummary(output, status),
       status,
     }
 
@@ -1381,9 +1504,9 @@ export class AutomationManager {
         const durationStr = durationMs < 60000 ? `${Math.round(durationMs / 1000)}s` : `${Math.round(durationMs / 60000)}m`
         vault.writeProgress({
           title: `[Automation] ${auto.name}`,
-          status: status === "success" ? "done" : "blocked",
-          summary: `${status === "success" ? "Completed" : status === "timeout" ? "Timed out" : "Failed"} in ${durationStr}${worktree ? ` (branch: ${worktree.branch})` : ""}`,
-          nextSteps: status !== "success" ? ["Check automation output for details"] : [],
+          status: status === "success" || status === "skipped_no_action" ? "done" : "blocked",
+          summary: `${status === "success" ? "Completed" : status === "skipped_no_action" ? "Skipped" : status === "timeout" ? "Timed out" : "Failed"} in ${durationStr}${worktree ? ` (branch: ${worktree.branch})` : ""}`,
+          nextSteps: status !== "success" && status !== "skipped_no_action" ? ["Check automation output for details"] : [],
           details: output.length > 2000 ? output.slice(-2000) : output,
         })
       } catch (err) {
@@ -1813,7 +1936,7 @@ export class AutomationManager {
         const jsonlActivity = extractJSONLActivity(cwd, roleStart)
         if (jsonlActivity) roleOutput = jsonlActivity
       }
-      const summary = AutomationManager.extractSummary(roleOutput, result.timedOut ? "timeout" : "success")
+      const summary = extractAutomationSummary(roleOutput, result.timedOut ? "timeout" : "success")
 
       return {
         roleId: role.id,

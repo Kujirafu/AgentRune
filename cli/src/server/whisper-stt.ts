@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, createWriteStream, unlinkSync, chmodSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { homedir, platform, arch, cpus } from "node:os"
-import { spawn, execSync } from "node:child_process"
+import { spawn, execSync, execFileSync } from "node:child_process"
 import { pipeline } from "node:stream/promises"
 import { log } from "../shared/logger.js"
 
@@ -185,7 +185,7 @@ function findFfmpeg(): string {
 
   // Try PATH first
   try {
-    execSync("ffmpeg -version", { stdio: "ignore" })
+    execFileSync("ffmpeg", ["-version"], { stdio: "ignore" })
     _ffmpegPath = "ffmpeg"
     return _ffmpegPath
   } catch {}

@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocale } from "../lib/i18n/index.js"
 import type { AgentEvent } from "../types"
+import { buildApiUrl } from "../lib/storage"
 
 interface EventCardProps {
   event: AgentEvent
@@ -89,15 +90,15 @@ function looksLikeMarkdown(text: string): boolean {
 
 /** Extract image URL from user message text containing upload paths */
 function extractImageUrl(text: string, apiBase?: string, projectId?: string): string | null {
-  if (!apiBase || !projectId) return null
+  if (!projectId) return null
   // Match paths like .../.agentrune/uploads/1234_photo.png
   const m = text.match(/[^\s]*\.agentrune[/\\]uploads[/\\]([^\s"']+\.(?:png|jpg|jpeg|gif|webp))/i)
-  if (m) return `${apiBase}/api/uploads/${projectId}/${m[1].replace(/\\/g, "/").split("/").pop()}`
+  if (m) return buildApiUrl(`/api/uploads/${projectId}/${m[1].replace(/\\/g, "/").split("/").pop()}`, apiBase || "")
   // Match [Image: source: path] pattern
   const im = text.match(/\[Image:\s*source:\s*([^\]]+\.(?:png|jpg|jpeg|gif|webp))\]/i)
   if (im) {
     const fn = im[1].replace(/\\/g, "/").split("/").pop()
-    return `${apiBase}/api/uploads/${projectId}/${fn}`
+    return buildApiUrl(`/api/uploads/${projectId}/${fn}`, apiBase || "")
   }
   return null
 }
@@ -463,7 +464,7 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
                     </div>
                     {cleanDetail && (
                       <div className="ec-md">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedDetail}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url.startsWith("http://") || url.startsWith("https://") ? url : ""}>{renderedDetail}</ReactMarkdown>
                       </div>
                     )}
                   </div>
@@ -486,7 +487,7 @@ export const EventCard = React.memo(function EventCard({ event, onDecision, onQu
                     .ec-md hr { border: none; border-top: 1px solid var(--glass-border); margin: 8px 0; }
                   `}</style>
                   <div className="ec-md">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedDetail}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url.startsWith("http://") || url.startsWith("https://") ? url : ""}>{renderedDetail}</ReactMarkdown>
                   </div>
                   </>
                 )}

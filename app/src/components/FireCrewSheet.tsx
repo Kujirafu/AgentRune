@@ -6,6 +6,7 @@ import { BUILTIN_CHAINS, isParallelGroup, resolveChainText } from "../lib/skillC
 import type { CrewConfig } from "../data/automation-types"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 import { trackCrewStart } from "../lib/analytics"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 interface FireCrewSheetProps {
   open: boolean
@@ -58,8 +59,13 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [phaseGate, setPhaseGate] = useState(false)
   const { sheetRef, handlers } = useSwipeToDismiss({ onDismiss: onClose })
+  const apiUrl = (path: string) => buildApiUrl(path, serverUrl)
 
   const handleFire = async (crew: CrewConfig, templateName: string) => {
+    if (!canUseApi(serverUrl)) {
+      setResult({ ok: false, msg: "Server unavailable" })
+      return
+    }
     setFiring(true)
     setResult(null)
 
@@ -92,7 +98,7 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
     }
 
     try {
-      const res = await fetch(`${serverUrl}/api/automations/${projectId}/fire`, {
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/fire`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
