@@ -3,6 +3,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import type { AgentEvent } from "../types"
 import { useLocale } from "../lib/i18n"
 import { SpringOverlay } from "./SpringOverlay"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 
 // ─── Types ──────────────────────────────────────────────────────
 interface DiffPanelProps {
@@ -286,6 +287,9 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
   const diffRecorderRef = useRef<MediaRecorder | null>(null)
   const diffChunksRef = useRef<Blob[]>([])
   const diffStreamRef = useRef<MediaStream | null>(null)
+  const requestBase = apiBase || localStorage.getItem("agentrune_server") || ""
+  const apiReady = canUseApi(requestBase)
+  const apiUrl = useCallback((path: string) => buildApiUrl(path, requestBase), [requestBase])
 
   const stopDiffRecording = useCallback(() => {
     const recorder = diffRecorderRef.current
@@ -300,10 +304,9 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
   }, [])
 
   const transcribeDiffAudio = useCallback(async (audioBlob: Blob) => {
-    const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl || audioBlob.size < 100) return
+    if (!apiReady || audioBlob.size < 100) return
     try {
-      const res = await fetch(`${serverUrl}/api/voice-transcribe`, {
+      const res = await fetch(apiUrl("/api/voice-transcribe"), {
         method: "POST",
         headers: { "content-type": "application/octet-stream" },
         body: audioBlob,
@@ -313,7 +316,7 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
         setEditInput(prev => prev ? prev + " " + (data.cleaned || data.text || "") : (data.cleaned || data.text || ""))
       }
     } catch {}
-  }, [])
+  }, [apiReady, apiUrl])
 
   const toggleVoice = useCallback(async () => {
     // Use shared voice overlay from MissionControl
@@ -377,14 +380,14 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
   // Fetch diff from git API when event.diff is missing
   useEffect(() => {
     if (!event || event.diff) { setGitDiff(null); return }
-    if (!projectId || !apiBase) { setGitDiff(null); return }
+    if (!projectId || !apiReady) { setGitDiff(null); return }
     const fp = event.title?.replace(/^(Edited|Created) /, "") || ""
     if (!fp || fp === "File") { setGitDiff(null); return }
     const key = `${event.id}:${fp}`
     if (gitDiffFetchedRef.current === key) return
     gitDiffFetchedRef.current = key
     setGitDiffLoading(true)
-    fetch(`${apiBase}/api/git/diff?project=${encodeURIComponent(projectId)}&file=${encodeURIComponent(fp)}`)
+    fetch(apiUrl(`/api/git/diff?project=${encodeURIComponent(projectId)}&file=${encodeURIComponent(fp)}`))
       .then(r => r.json())
       .then((data: { before?: string; after?: string }) => {
         if (data.before || data.after) {
@@ -395,7 +398,7 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
       })
       .catch(() => setGitDiff(null))
       .finally(() => setGitDiffLoading(false))
-  }, [event, projectId, apiBase])
+  }, [apiReady, apiUrl, event, projectId])
 
   // Use event.diff if available, otherwise gitDiff
   const activeDiff = event?.diff || (gitDiff ? { filePath, before: gitDiff.before, after: gitDiff.after } : null)
@@ -438,12 +441,12 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
 
   // ─── Stage/Revert API calls ───────────────────────────────────
   const callGitAction = useCallback(async (action: "stage" | "revert", hunkIds?: number[]) => {
-    if (!apiBase || !projectId) return
+    if (!apiReady || !projectId) return
     const fp = activeDiff?.filePath || filePath
     if (!fp || fp === "File") return
 
     try {
-      const resp = await fetch(`${apiBase}/api/git/${action}`, {
+      const resp = await fetch(apiUrl(`/api/git/${action}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project: projectId, filePath: fp, hunks: hunkIds }),
@@ -454,7 +457,7 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
     } catch {
       return false
     }
-  }, [apiBase, projectId, activeDiff?.filePath, filePath])
+  }, [apiReady, apiUrl, projectId, activeDiff?.filePath, filePath])
 
   const handleHunkAction = useCallback(async (hunkId: number, action: "stage" | "revert") => {
     setActionLoading(hunkId)
@@ -650,7 +653,7 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
         </div>
 
         {/* Action buttons */}
-        {!state && apiBase && projectId && (
+                {!state && apiReady && projectId && (
           <div style={{ display: "flex", gap: 4 }}>
             <button
               onClick={() => handleHunkAction(hunk.id, "stage")}
@@ -1036,7 +1039,7 @@ export function DiffPanel({ event, allDiffEvents, onClose, onSelectEvent, projec
             Diff Review
           </div>
           {/* Stage All / Revert All buttons */}
-          {hasDiff && hunks.length > 0 && apiBase && projectId && (
+                  {hasDiff && hunks.length > 0 && apiReady && projectId && (
             <div style={{ display: "flex", gap: 4 }}>
               <button
                 onClick={() => handleAllAction("stage")}

@@ -349,7 +349,7 @@ export function DetailPanel({ open, onClose, thinkingBlocks, codeBlocks, toolBlo
                       .dp-md th { background: rgba(255,255,255,0.05); font-weight: 600; }
                     `}</style>
                     <div className="dp-md">
-                      <ReactMarkdown>{block.content}</ReactMarkdown>
+                      <ReactMarkdown urlTransform={(url) => url.startsWith("http://") || url.startsWith("https://") ? url : ""}>{block.content}</ReactMarkdown>
                     </div>
                   </>
                 ) : (

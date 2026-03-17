@@ -166,6 +166,28 @@ export function trackLogin() {
   track("login", {})
 }
 
+// ─── Onboarding events ──────────────────────────────────────────
+
+export function trackOnboardingView(page: number) {
+  track("onboarding_view", { page })
+}
+
+export function trackOnboardingSkip() {
+  track("onboarding_skip", {})
+}
+
+export function trackOnboardingComplete() {
+  track("onboarding_complete", {})
+}
+
+export function trackConnectStep(step: number) {
+  track("connect_step", { step })
+}
+
+export function trackConnectEscape() {
+  track("connect_escape", {})
+}
+
 // ─── Phase 2: New events ────────────────────────────────────────
 
 export function trackScreenView(screen: string, from?: string) {

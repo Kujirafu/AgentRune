@@ -1,23 +1,41 @@
 // tunnel.ts
 // Manages a Cloudflare Quick Tunnel for remote access.
-// Quick tunnels require no account — just `cloudflared tunnel --url http://localhost:PORT`
-// The tunnel URL is parsed from stderr output and registered with AgentLore.
+// Quick tunnels require no account: `cloudflared tunnel --url http://localhost:PORT`
+// The tunnel URL is parsed from cloudflared output and registered with AgentLore.
 
-import { spawn, execFileSync, execSync } from "node:child_process"
-import { existsSync, mkdirSync, createWriteStream, chmodSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs"
+import { spawn, execFileSync } from "node:child_process"
+import {
+  chmodSync,
+  createWriteStream,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { arch, homedir, platform } from "node:os"
 import { join } from "node:path"
-import { homedir, platform, arch } from "node:os"
 import { pipeline } from "node:stream/promises"
 import { log } from "../shared/logger.js"
 
-const BIN_DIR = join(homedir(), ".agentrune", "bin")
-/** Per-port tunnel state file — prevents port 3456/3457 from overwriting each other */
+const STATE_DIR = join(homedir(), ".agentrune")
+const BIN_DIR = join(STATE_DIR, "bin")
+const QUICK_TUNNEL_API_URL = "https://api.trycloudflare.com/tunnel"
+const TRY_CLOUDFLARE_HOSTNAME = /^[a-z0-9-]+\.trycloudflare\.com$/i
+const TUNNEL_URL_REGEX = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i
+const DEFAULT_RATE_LIMIT_WAIT_SECONDS = 40 * 60
+const TRANSIENT_API_ERROR_WAIT_SECONDS = 5 * 60
+const MAX_RATE_LIMIT_WAIT_SECONDS = 6 * 60 * 60
+
 function tunnelStateFile(port?: number): string {
   const suffix = port ? `-${port}` : ""
-  return join(homedir(), ".agentrune", `tunnel${suffix}.json`)
+  return join(STATE_DIR, `tunnel${suffix}.json`)
 }
-// Legacy: still check old path for backward compat on first reuse
-const TUNNEL_STATE_FILE_LEGACY = join(homedir(), ".agentrune", "tunnel.json")
+
+const TUNNEL_STATE_FILE_LEGACY = join(STATE_DIR, "tunnel.json")
+const RATE_LIMIT_STATE_FILE = join(STATE_DIR, "tunnel-rate-limit.json")
 
 interface TunnelState {
   pid: number
@@ -25,112 +43,287 @@ interface TunnelState {
   startedAt: number
 }
 
-/** Save tunnel state so daemon restarts can reuse the existing cloudflared */
-function saveTunnelState(pid: number, url: string, port?: number): void {
+interface RateLimitState {
+  until: number
+  updatedAt: number
+  reason: string
+}
+
+function unrefStream(stream: NodeJS.ReadableStream | null | undefined): void {
+  const maybeUnref = stream as NodeJS.ReadableStream & { unref?: () => void }
+  maybeUnref.unref?.()
+}
+
+function ensureStateDir(): void {
+  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true })
+}
+
+function isStatePathUnsafe(path: string): boolean {
   try {
-    writeFileSync(tunnelStateFile(port), JSON.stringify({ pid, url, startedAt: Date.now() } satisfies TunnelState))
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+function unlinkIfExists(path: string): void {
+  try {
+    unlinkSync(path)
   } catch {}
 }
 
-/** Check if a process is alive by PID */
+function writeStateJson(path: string, payload: unknown): void {
+  try {
+    if (isStatePathUnsafe(path)) {
+      log.warn(`[Tunnel] Refusing to write symlink state file: ${path}`)
+      return
+    }
+    ensureStateDir()
+    writeFileSync(path, JSON.stringify(payload))
+    try { chmodSync(path, 0o600) } catch {}
+  } catch {}
+}
+
+function readStateText(path: string): string | null {
+  if (!existsSync(path)) return null
+  if (isStatePathUnsafe(path)) {
+    log.warn(`[Tunnel] Ignoring symlink state file: ${path}`)
+    unlinkIfExists(path)
+    return null
+  }
+  try {
+    return readFileSync(path, "utf-8")
+  } catch {
+    return null
+  }
+}
+
+function parsePositiveInt(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const parsed = Number.parseInt(value, 10)
+    if (Number.isInteger(parsed) && parsed > 0) return parsed
+  }
+  return null
+}
+
+function clampWaitSeconds(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback
+  return Math.min(Math.ceil(value), MAX_RATE_LIMIT_WAIT_SECONDS)
+}
+
+function isQuickTunnelUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false
+  try {
+    const url = new URL(value)
+    return url.protocol === "https:"
+      && TRY_CLOUDFLARE_HOSTNAME.test(url.hostname)
+      && (!url.pathname || url.pathname === "/")
+      && !url.search
+      && !url.hash
+  } catch {
+    return false
+  }
+}
+
+function saveTunnelState(pid: number, url: string, port?: number): void {
+  const normalizedPid = parsePositiveInt(pid)
+  if (!normalizedPid || !isQuickTunnelUrl(url)) return
+  writeStateJson(tunnelStateFile(port), {
+    pid: normalizedPid,
+    url,
+    startedAt: Date.now(),
+  } satisfies TunnelState)
+}
+
+function readTunnelState(path: string): TunnelState | null {
+  const raw = readStateText(path)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as Partial<TunnelState>
+    const pid = parsePositiveInt(parsed.pid)
+    if (!pid || !isQuickTunnelUrl(parsed.url)) return null
+    return {
+      pid,
+      url: parsed.url,
+      startedAt: parsePositiveInt(parsed.startedAt) ?? Date.now(),
+    }
+  } catch {
+    return null
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
+  const normalizedPid = parsePositiveInt(pid)
+  if (!normalizedPid) return false
   try {
     if (platform() === "win32") {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: "utf-8", timeout: 5000 })
-      return out.includes(String(pid))
+      const out = execFileSync("tasklist", ["/FI", `PID eq ${normalizedPid}`, "/NH"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        windowsHide: true,
+      })
+      return out.includes(String(normalizedPid))
     }
-    process.kill(pid, 0)
+    process.kill(normalizedPid, 0)
     return true
   } catch {
     return false
   }
 }
 
-/** Try to reuse an existing cloudflared process from a previous daemon session */
+function parseRetryAfterSeconds(value: string | null): number | null {
+  if (!value) return null
+  const trimmed = value.trim()
+  if (/^\d+$/.test(trimmed)) {
+    return clampWaitSeconds(Number.parseInt(trimmed, 10), DEFAULT_RATE_LIMIT_WAIT_SECONDS)
+  }
+  const retryAt = Date.parse(trimmed)
+  if (Number.isNaN(retryAt)) return null
+  return clampWaitSeconds((retryAt - Date.now()) / 1000, DEFAULT_RATE_LIMIT_WAIT_SECONDS)
+}
+
+let rateLimitedUntil = 0
+
+function applyRateLimit(waitSeconds: number, reason: string): number {
+  const wait = clampWaitSeconds(waitSeconds, DEFAULT_RATE_LIMIT_WAIT_SECONDS)
+  rateLimitedUntil = Date.now() + wait * 1000
+  writeStateJson(RATE_LIMIT_STATE_FILE, {
+    until: rateLimitedUntil,
+    updatedAt: Date.now(),
+    reason,
+  } satisfies RateLimitState)
+  return wait
+}
+
+function clearRateLimitState(): void {
+  rateLimitedUntil = 0
+  unlinkIfExists(RATE_LIMIT_STATE_FILE)
+}
+
+function loadRateLimitState(): void {
+  if (rateLimitedUntil > Date.now()) return
+  const raw = readStateText(RATE_LIMIT_STATE_FILE)
+  if (!raw) return
+  try {
+    const parsed = JSON.parse(raw) as Partial<RateLimitState>
+    const until = parsePositiveInt(parsed.until)
+    if (until && until > Date.now()) {
+      rateLimitedUntil = until
+      return
+    }
+  } catch {}
+  clearRateLimitState()
+}
+
+function getRateLimitRemainingSeconds(): number {
+  loadRateLimitState()
+  const remainingMs = rateLimitedUntil - Date.now()
+  if (remainingMs <= 0) {
+    if (rateLimitedUntil > 0) clearRateLimitState()
+    return 0
+  }
+  return Math.ceil(remainingMs / 1000)
+}
+
+function extractCloudflareBackoff(message: string): { waitSeconds: number; reason: string } | null {
+  const retryAfterMatch = message.match(/retry-after[:=\s]+(\d+)/i) || message.match(/wait\s+(\d+)s/i)
+  if (retryAfterMatch) {
+    return {
+      waitSeconds: clampWaitSeconds(Number.parseInt(retryAfterMatch[1], 10), DEFAULT_RATE_LIMIT_WAIT_SECONDS),
+      reason: "cloudflared-429",
+    }
+  }
+  if (/error code:\s*1015/i.test(message) || /429 Too Many Requests/i.test(message)) {
+    return {
+      waitSeconds: DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+      reason: "cloudflared-429",
+    }
+  }
+  if (
+    /status_code\s*=\s*"?(5\d\d)/i.test(message)
+    || /(?:500|502|503)\s+(?:Internal Server Error|Bad Gateway|Service Unavailable)/i.test(message)
+  ) {
+    return {
+      waitSeconds: TRANSIENT_API_ERROR_WAIT_SECONDS,
+      reason: "cloudflared-5xx",
+    }
+  }
+  return null
+}
+
 async function tryReuseExisting(localPort: number): Promise<{ url: string; pid: number } | null> {
-  // Check port-specific state file first, then legacy
   const stateFile = existsSync(tunnelStateFile(localPort)) ? tunnelStateFile(localPort)
     : existsSync(TUNNEL_STATE_FILE_LEGACY) ? TUNNEL_STATE_FILE_LEGACY
     : null
   if (!stateFile) return null
+
+  const state = readTunnelState(stateFile)
+  if (!state) {
+    unlinkIfExists(stateFile)
+    return null
+  }
+
+  if (!isProcessAlive(state.pid)) {
+    log.dim(`Previous cloudflared (PID ${state.pid}) is dead - will start new one`)
+    unlinkIfExists(stateFile)
+    return null
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8000)
   try {
-    const raw = readFileSync(stateFile, "utf-8")
-    const state: TunnelState = JSON.parse(raw)
-    if (!state.pid || !state.url) return null
-
-    // Check if cloudflared process is still alive
-    if (!isProcessAlive(state.pid)) {
-      log.dim(`Previous cloudflared (PID ${state.pid}) is dead — will start new one`)
-      try { unlinkSync(stateFile) } catch {}
-      return null
-    }
-
-    // Process is alive — verify the tunnel URL is actually reachable
-    try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 8000)
-      const res = await fetch(`${state.url}/api/auth/check`, { signal: controller.signal })
-      clearTimeout(timeout)
-      // Even 401/403 means cloudflared is routing traffic — that's good
-      if (res.status < 500) {
-        log.info(`Reusing existing cloudflared (PID ${state.pid}): ${state.url}`)
-        return { url: state.url, pid: state.pid }
-      }
-    } catch {
-      // URL not reachable — BUT the process might just need time to reconnect
-      // since the local daemon just restarted. Give it a pass if process is alive.
-      log.info(`Reusing existing cloudflared (PID ${state.pid}): ${state.url} (URL check pending — local daemon just started)`)
+    const res = await fetch(`${state.url}/api/auth/check`, { signal: controller.signal })
+    if (res.status < 500) {
+      log.info(`Reusing existing cloudflared (PID ${state.pid}): ${state.url}`)
       return { url: state.url, pid: state.pid }
     }
-
-    return null
   } catch {
-    try { unlinkSync(stateFile) } catch {}
-    return null
+    log.info(`Reusing existing cloudflared (PID ${state.pid}): ${state.url} (URL check pending - local daemon just started)`)
+    return { url: state.url, pid: state.pid }
+  } finally {
+    clearTimeout(timeout)
   }
+
+  return null
 }
 
-// Rate limit tracking — shared across restart attempts
-let rateLimitedUntil = 0
-
-/**
- * Check Cloudflare Quick Tunnel API for rate limiting.
- * Returns seconds to wait (0 if not rate limited).
- */
 export async function checkCloudflareRateLimit(): Promise<number> {
-  // If we already know we're rate limited, return remaining time
-  const now = Date.now()
-  if (rateLimitedUntil > now) {
-    return Math.ceil((rateLimitedUntil - now) / 1000)
-  }
+  const cachedWait = getRateLimitRemainingSeconds()
+  if (cachedWait > 0) return cachedWait
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 5000)
-    const res = await fetch("https://api.trycloudflare.com/tunnel", {
-      method: "HEAD",
+    const res = await fetch(QUICK_TUNNEL_API_URL, {
+      method: "GET",
       signal: controller.signal,
     })
-    clearTimeout(timeout)
     if (res.status === 429) {
-      const retryAfter = res.headers.get("retry-after")
-      const seconds = retryAfter ? parseInt(retryAfter, 10) : 300
-      const wait = isNaN(seconds) ? 300 : seconds
-      rateLimitedUntil = Date.now() + wait * 1000
-      log.warn(`Cloudflare rate limited — Retry-After: ${wait}s`)
+      const wait = applyRateLimit(
+        parseRetryAfterSeconds(res.headers.get("retry-after")) ?? DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+        "api-429",
+      )
+      log.warn(`Cloudflare rate limited - Retry-After: ${wait}s`)
       return wait
     }
-    // Not rate limited — clear any stale state
-    rateLimitedUntil = 0
+    if (res.status >= 500) {
+      const wait = applyRateLimit(TRANSIENT_API_ERROR_WAIT_SECONDS, `api-${res.status}`)
+      log.warn(`Cloudflare API error (${res.status}) - waiting ${wait}s before retry`)
+      return wait
+    }
+    clearRateLimitState()
     return 0
   } catch {
-    // Can't reach API — don't block, let cloudflared try
     return 0
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
 function getCloudflaredInfo(): { url: string; binName: string } {
   const os = platform()
-  const a = arch()
+  const machineArch = arch()
   if (os === "win32") {
     return {
       url: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe",
@@ -138,14 +331,13 @@ function getCloudflaredInfo(): { url: string; binName: string } {
     }
   }
   if (os === "darwin") {
-    const suffix = a === "arm64" ? "darwin-arm64" : "darwin-amd64"
+    const suffix = machineArch === "arm64" ? "darwin-arm64" : "darwin-amd64"
     return {
       url: `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${suffix}`,
       binName: "cloudflared",
     }
   }
-  // Linux
-  const suffix = a === "arm64" ? "linux-arm64" : "linux-amd64"
+  const suffix = machineArch === "arm64" ? "linux-arm64" : "linux-amd64"
   return {
     url: `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${suffix}`,
     binName: "cloudflared",
@@ -153,15 +345,16 @@ function getCloudflaredInfo(): { url: string; binName: string } {
 }
 
 function findCloudflared(): string | null {
-  // Check our own bin dir first
   const { binName } = getCloudflaredInfo()
   const localPath = join(BIN_DIR, binName)
   if (existsSync(localPath)) return localPath
 
-  // Check system PATH
   try {
     const bin = platform() === "win32" ? "where" : "which"
-    const result = execFileSync(bin, ["cloudflared"], { encoding: "utf-8" }).trim().split("\n")[0]
+    const result = execFileSync(bin, ["cloudflared"], {
+      encoding: "utf-8",
+      windowsHide: true,
+    }).trim().split(/\r?\n/)[0]
     if (result && existsSync(result)) return result
   } catch {}
 
@@ -169,11 +362,16 @@ function findCloudflared(): string | null {
 }
 
 async function downloadCloudflared(): Promise<string> {
+  ensureStateDir()
   if (!existsSync(BIN_DIR)) mkdirSync(BIN_DIR, { recursive: true })
+
   const { url, binName } = getCloudflaredInfo()
   const dest = join(BIN_DIR, binName)
+  if (isStatePathUnsafe(dest)) {
+    throw new Error(`Refusing to overwrite symlinked cloudflared binary: ${dest}`)
+  }
 
-  log.info(`Downloading cloudflared...`)
+  log.info("Downloading cloudflared...")
   const res = await fetch(url, { redirect: "follow" })
   if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status}`)
   const ws = createWriteStream(dest)
@@ -183,29 +381,26 @@ async function downloadCloudflared(): Promise<string> {
     try { chmodSync(dest, 0o755) } catch {}
   }
 
-  log.info(`cloudflared installed → ${dest}`)
+  log.info(`cloudflared installed - ${dest}`)
   return dest
 }
 
 export interface TunnelHandle {
-  url: string           // e.g. https://xxx-yyy.trycloudflare.com
+  url: string
   stop: () => void
-  /** Called when tunnel restarts with a new URL */
   onRestart?: (newUrl: string) => void
 }
 
-/** Launch a single cloudflared process and resolve when URL is ready */
 function launchOnce(binPath: string, localPort: number): Promise<{ url: string; proc: ReturnType<typeof spawn> }> {
   return new Promise((resolve, reject) => {
     const proc = spawn(binPath, [
-      "tunnel", "--url", `http://localhost:${localPort}`,
+      "tunnel",
+      "--url",
+      `http://localhost:${localPort}`,
       "--no-autoupdate",
     ], {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      // Detach cloudflared so it survives daemon restarts (new process group).
-      // safe-restart.sh uses tree-kill (/T) which kills daemon's process tree,
-      // but detached processes are in their own group and survive.
       detached: true,
     })
 
@@ -215,25 +410,22 @@ function launchOnce(binPath: string, localPort: number): Promise<{ url: string; 
       if (!resolved) {
         resolved = true
         proc.kill()
-        reject(new Error("Tunnel startup timeout (30s). stderr: " + stderr.slice(-500)))
+        reject(new Error(`Tunnel startup timeout (30s). stderr: ${stderr.slice(-500)}`))
       }
     }, 30000)
 
-    const urlRegex = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/
-
     const tryResolve = (text: string) => {
       if (resolved) return
-      const match = text.match(urlRegex) || stderr.match(urlRegex)
-      if (match) {
-        resolved = true
-        clearTimeout(timeout)
-        log.info(`Tunnel ready: ${match[0]}`)
-        // Unref so daemon can exit without waiting for detached cloudflared
-        proc.unref()
-        if (proc.stdout) proc.stdout.unref()
-        if (proc.stderr) proc.stderr.unref()
-        resolve({ url: match[0], proc })
-      }
+      const match = text.match(TUNNEL_URL_REGEX) || stderr.match(TUNNEL_URL_REGEX)
+      if (!match) return
+
+      resolved = true
+      clearTimeout(timeout)
+      log.info(`Tunnel ready: ${match[0]}`)
+      proc.unref()
+      unrefStream(proc.stdout)
+      unrefStream(proc.stderr)
+      resolve({ url: match[0], proc })
     }
 
     proc.stderr.on("data", (chunk: Buffer) => {
@@ -247,75 +439,88 @@ function launchOnce(binPath: string, localPort: number): Promise<{ url: string; 
     })
 
     proc.on("error", (err) => {
-      if (!resolved) {
-        resolved = true
-        clearTimeout(timeout)
-        reject(new Error(`Failed to start cloudflared: ${err.message}`))
-      }
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeout)
+      reject(new Error(`Failed to start cloudflared: ${err.message}`))
     })
 
     proc.on("exit", (code) => {
-      if (!resolved) {
-        resolved = true
-        clearTimeout(timeout)
-        reject(new Error(`cloudflared exited with code ${code}. stderr: ${stderr.slice(-500)}`))
-      }
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeout)
+      reject(new Error(`cloudflared exited with code ${code}. stderr: ${stderr.slice(-500)}`))
     })
   })
 }
 
-/**
- * Kill orphan cloudflared processes from other ports.
- * E.g., if port 3456 daemon is down but its cloudflared (detached) still lives,
- * we clean it up to free Cloudflare connection quota.
- */
-export function cleanupOrphanTunnels(activePort: number): void {
-  const stateDir = join(homedir(), ".agentrune")
-  if (!existsSync(stateDir)) return
+function isPortListening(port: number): boolean {
+  const normalizedPort = parsePositiveInt(port)
+  if (!normalizedPort) return false
+
   try {
-    const files = readdirSync(stateDir).filter(f => /^tunnel-\d+\.json$/.test(f))
+    const output = execFileSync("netstat", ["-ano"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      windowsHide: true,
+    })
+    return output.split(/\r?\n/).some((line) => {
+      const columns = line.trim().split(/\s+/)
+      if (columns.length < 4) return false
+      const localAddress = columns[1] ?? ""
+      return localAddress.endsWith(`:${normalizedPort}`) && columns.some((column) => /LISTEN/i.test(column))
+    })
+  } catch {
+    return false
+  }
+}
+
+export function cleanupOrphanTunnels(activePort: number): void {
+  if (!existsSync(STATE_DIR)) return
+
+  try {
+    const files = readdirSync(STATE_DIR).filter((file) => /^tunnel-\d+\.json$/.test(file))
     for (const file of files) {
       const portMatch = file.match(/^tunnel-(\d+)\.json$/)
       if (!portMatch) continue
-      const port = parseInt(portMatch[1], 10)
-      if (port === activePort) continue // don't touch our own tunnel
 
-      const fullPath = join(stateDir, file)
-      try {
-        const state: TunnelState = JSON.parse(readFileSync(fullPath, "utf-8"))
-        if (state.pid && isProcessAlive(state.pid)) {
-          // Check if that port's daemon is actually running
-          try {
-            const netstatOut = execSync(`netstat -ano | findstr ":${port}.*LISTEN"`, { encoding: "utf-8", timeout: 5000 })
-            if (netstatOut.trim()) continue // daemon on that port is alive, leave tunnel alone
-          } catch {
-            // netstat found nothing — daemon is dead, kill the orphan cloudflared
+      const port = Number.parseInt(portMatch[1], 10)
+      if (port === activePort) continue
+
+      const fullPath = join(STATE_DIR, file)
+      const state = readTunnelState(fullPath)
+      if (!state) {
+        unlinkIfExists(fullPath)
+        continue
+      }
+
+      if (isProcessAlive(state.pid) && !isPortListening(port)) {
+        log.info(`[Tunnel] Killing orphan cloudflared PID ${state.pid} (port ${port} daemon is down)`)
+        try {
+          if (platform() === "win32") {
+            execFileSync("taskkill", ["/F", "/PID", String(state.pid)], {
+              stdio: "ignore",
+              windowsHide: true,
+            })
+          } else {
+            process.kill(state.pid, "SIGTERM")
           }
-          log.info(`[Tunnel] Killing orphan cloudflared PID ${state.pid} (port ${port} daemon is down)`)
-          try {
-            execFileSync("taskkill", ["/F", "/PID", String(state.pid)], { stdio: "ignore", windowsHide: true })
-          } catch {}
-        }
-        // Clean up state file either way
-        try { unlinkSync(fullPath) } catch {}
-      } catch {}
+        } catch {}
+      }
+
+      unlinkIfExists(fullPath)
     }
-    // Also clean legacy tunnel.json if it exists and has a dead process
+
     if (existsSync(TUNNEL_STATE_FILE_LEGACY)) {
-      try {
-        const state: TunnelState = JSON.parse(readFileSync(TUNNEL_STATE_FILE_LEGACY, "utf-8"))
-        if (!state.pid || !isProcessAlive(state.pid)) {
-          unlinkSync(TUNNEL_STATE_FILE_LEGACY)
-        }
-      } catch {
-        try { unlinkSync(TUNNEL_STATE_FILE_LEGACY) } catch {}
+      const legacyState = readTunnelState(TUNNEL_STATE_FILE_LEGACY)
+      if (!legacyState || !isProcessAlive(legacyState.pid)) {
+        unlinkIfExists(TUNNEL_STATE_FILE_LEGACY)
       }
     }
   } catch {}
 }
 
 export async function startTunnel(localPort: number): Promise<TunnelHandle> {
-  // Clean up orphan cloudflared from dead daemons on other ports
   cleanupOrphanTunnels(localPort)
 
   let binPath = findCloudflared()
@@ -327,28 +532,30 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
   let restarting = false
   let currentProc: ReturnType<typeof spawn> | null = null
 
-  // Try to reuse an existing cloudflared process (survives daemon restarts)
   const existing = await tryReuseExisting(localPort)
 
   let initialUrl: string
   if (existing) {
-    // Reuse — no new cloudflared spawned, no Cloudflare rate limit risk
     initialUrl = existing.url
   } else {
-    // Launch fresh cloudflared
+    const preCheckWait = await checkCloudflareRateLimit()
+    if (preCheckWait > 0) {
+      throw new Error(`Cloudflare unavailable (wait ${preCheckWait}s) - skipping tunnel launch`)
+    }
+
     const result = await launchOnce(binPath, localPort)
     initialUrl = result.url
     currentProc = result.proc
     saveTunnelState(result.proc.pid!, result.url, localPort)
   }
 
+  let healthCheckTimer: NodeJS.Timeout | null = null
+
   const handle: TunnelHandle = {
     url: initialUrl,
     stop: () => {
       stopped = true
       if (healthCheckTimer) clearInterval(healthCheckTimer)
-      // Don't kill cloudflared on stop — let it survive for next daemon start.
-      // Only clean up if this is a full shutdown (not a restart).
     },
   }
 
@@ -356,19 +563,22 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
     try {
       if (stopped || restarting) return
       restarting = true
+
       if (currentProc) {
         try { currentProc.kill() } catch {}
         currentProc = null
       }
+
       for (let attempt = 1; attempt <= 3; attempt++) {
         if (stopped) return
-        // Check rate limit before each attempt
+
         const waitSeconds = await checkCloudflareRateLimit()
         if (waitSeconds > 0) {
           log.dim(`Cloudflare rate limited, waiting ${waitSeconds}s before attempt ${attempt}...`)
-          await new Promise(r => setTimeout(r, waitSeconds * 1000))
+          await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000))
           if (stopped) return
         }
+
         try {
           const result = await launchOnce(binPath!, localPort)
           handle.url = result.url
@@ -381,74 +591,71 @@ export async function startTunnel(localPort: number): Promise<TunnelHandle> {
           return
         } catch (err: any) {
           log.warn(`Tunnel restart attempt ${attempt}/3 failed: ${err.message}`)
-          // Parse cloudflared stderr for rate limit hints
-          const retryMatch = err.message?.match(/retry.after[:\s]*(\d+)/i)
-          if (retryMatch) {
-            rateLimitedUntil = Date.now() + parseInt(retryMatch[1], 10) * 1000
+          const backoff = extractCloudflareBackoff(String(err?.message ?? ""))
+          if (backoff) {
+            const wait = applyRateLimit(backoff.waitSeconds, backoff.reason)
+            log.dim(`[Tunnel] Applying Cloudflare cooldown from cloudflared output: ${wait}s`)
           }
-          if (attempt < 3) await new Promise(r => setTimeout(r, 10000))
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 10000))
         }
       }
-      log.error("Tunnel restart failed after 3 attempts — daemon continues in LAN-only mode")
+
+      log.error("Tunnel restart failed after 3 attempts - daemon continues in LAN-only mode")
       restarting = false
     } catch (err: any) {
-      // Safety net: never let tunnel restart crash the daemon
       log.error(`[Tunnel] doRestart unexpected error (daemon continues): ${err.message}`)
       restarting = false
     }
   }
 
-  // Auto-restart on exit (unless manually stopped)
-  const watchExit = (p: ReturnType<typeof spawn>) => {
-    p.on("exit", (code) => {
+  const watchExit = (proc: ReturnType<typeof spawn>) => {
+    proc.on("exit", (code) => {
       if (stopped) return
-      log.warn(`Tunnel exited (code ${code}) — restarting in 3s...`)
+      log.warn(`Tunnel exited (code ${code}) - restarting in 3s...`)
       setTimeout(() => doRestart().catch((err) => log.error(`[Tunnel] Exit restart failed: ${err.message}`)), 3000)
     })
   }
 
-  // Only watch exit if we spawned a new process (reused ones are unmanaged)
   if (currentProc) {
     watchExit(currentProc)
   }
 
-  // Health check function — verify tunnel URL is reachable
   const runHealthCheck = async () => {
     if (stopped || restarting || !handle.url) return
-    // Skip health check if rate limited — don't trigger restart that will also be blocked
-    if (rateLimitedUntil > Date.now()) {
-      log.dim(`Skipping health check — Cloudflare rate limited for ${Math.ceil((rateLimitedUntil - Date.now()) / 1000)}s`)
+
+    const waitSeconds = getRateLimitRemainingSeconds()
+    if (waitSeconds > 0) {
+      log.dim(`Skipping health check - Cloudflare rate limited for ${waitSeconds}s`)
       return
     }
+
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 10000)
       const res = await fetch(`${handle.url}/api/auth/check`, { signal: controller.signal })
-      clearTimeout(timeout)
-      if (res.ok) return // healthy
-      // For reused tunnels, a 502/503 right after daemon restart is expected
-      // (cloudflared routes to localhost but daemon hasn't started yet)
-      // Only restart tunnel if it's consistently failing
+      if (res.ok) return
+
       if (!currentProc && res.status >= 500) {
-        log.dim(`Reused tunnel returned ${res.status} — may need time for daemon to start`)
+        log.dim(`Reused tunnel returned ${res.status} - may need time for daemon to start`)
         return
       }
-      log.warn(`Tunnel health check failed: HTTP ${res.status} — restarting tunnel`)
+
+      log.warn(`Tunnel health check failed: HTTP ${res.status} - restarting tunnel`)
     } catch (err: any) {
-      // For reused tunnels, don't immediately restart on health check failure
       if (!currentProc) {
-        log.dim(`Reused tunnel health check failed: ${err.message} — will retry`)
+        log.dim(`Reused tunnel health check failed: ${err.message} - will retry`)
         return
       }
-      log.warn(`Tunnel health check failed: ${err.message} — restarting tunnel`)
+      log.warn(`Tunnel health check failed: ${err.message} - restarting tunnel`)
+    } finally {
+      clearTimeout(timeout)
     }
+
     doRestart().catch((err) => log.error(`[Tunnel] Health-check restart failed: ${err.message}`))
   }
 
-  // First check after 15s — catch dead-on-arrival tunnel URLs early
   setTimeout(runHealthCheck, 15_000)
-  // Then every 60s
-  const healthCheckTimer = setInterval(runHealthCheck, 60_000)
+  healthCheckTimer = setInterval(runHealthCheck, 60_000)
 
   return handle
 }

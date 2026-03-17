@@ -16,8 +16,10 @@ const PhaseGateSheet = lazy(() => import("./components/PhaseGateSheet"))
 import { App as CapApp } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
+import { getSessionActivityNotificationId, getSessionActivityNotificationKey } from "./lib/session-activity"
 // framer-motion deferred to lazy-loaded components only (saves ~133 KB initial load)
-import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch } from "./lib/analytics"
+import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch, trackOnboardingSkip, trackOnboardingComplete, trackConnectStep, trackConnectEscape } from "./lib/analytics"
+import { OnboardingCarousel } from "./components/OnboardingCarousel"
 
 // ─── Error Boundary ──────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -72,7 +74,8 @@ function getWsUrl(): string {
   const server = getServerUrl()
   if (!server) {
     const proto = location.protocol === "https:" ? "wss:" : "ws:"
-    return `${proto}//${location.host}`
+    // Web dev mode goes through Vite's /ws proxy to reach the local daemon.
+    return `${proto}//${location.host}/ws`
   }
   return server.replace(/^http/, "ws")
 }
@@ -669,6 +672,10 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
   const [setupOs, setSetupOs] = useState<"mac" | "windows">("mac")
   // Auto-expand QR section if already logged in to AgentLore (next step is scanning)
   const [showAdvanced, setShowAdvanced] = useState(!!localStorage.getItem("agentrune_phone_token"))
+  // Step wizard: 1 = login AgentLore, 2 = install CLI, "escape" = QR/manual
+  const isLoggedIn = !!localStorage.getItem("agentrune_phone_token")
+  const [wizardStep, setWizardStep] = useState<1 | 2 | "escape">(isLoggedIn ? 2 : 1)
+  const [showLearnMore, setShowLearnMore] = useState(false)
   // Persist polling code across app kills — resume on restart
   const [pollingCode, setPollingCode] = useState<string | null>(
     () => localStorage.getItem("agentrune_polling_code")
@@ -693,6 +700,7 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
         if (data.data.userId) localStorage.setItem("agentrune_user_id", data.data.userId)
         // Re-identify telemetry with real userId
         identifyUser(); trackLogin()
+        setWizardStep(2)
         if (onLogin) {
           onLogin(token)
         } else {
@@ -837,6 +845,15 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
     return <QrScannerView onScan={handleQrScan} onCancel={() => setScanning(false)} />
   }
 
+  // Show onboarding carousel from "Learn more" button
+  if (showLearnMore) {
+    return <OnboardingCarousel onComplete={() => setShowLearnMore(false)} />
+  }
+
+  const cmd = setupOs === "mac"
+    ? "curl -fsSL https://agentlore.vercel.app/install.sh | sh"
+    : "irm https://agentlore.vercel.app/install.ps1 | iex"
+
   return (
     <div style={{
       height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center",
@@ -847,96 +864,139 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
         background: "var(--glass-bg)", backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
         border: "1px solid var(--glass-border)", boxShadow: "var(--glass-shadow)",
       }}>
+        {/* Header */}
         <div style={{ fontSize: 36, fontWeight: 700, marginBottom: 4, letterSpacing: -1, color: "var(--text-primary)" }}>
           AgentRune
         </div>
-        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 28, letterSpacing: 2, textTransform: "uppercase", fontWeight: 600, opacity: 0.7 }}>
-          {t("app.connectToComputer")}
+
+        {/* Step indicator */}
+        <div style={{
+          fontSize: 11, color: "var(--text-secondary)", marginBottom: 24,
+          letterSpacing: 1, fontWeight: 600, opacity: 0.6,
+        }}>
+          {wizardStep === "escape" ? t("app.advancedConnect") : t("connect.step").replace("{step}", String(wizardStep))}
         </div>
 
-        {/* AgentLore login status badge */}
-        {localStorage.getItem("agentrune_phone_token") ? (
+        {/* ── Step 1: Login AgentLore ── */}
+        {wizardStep === 1 && (<>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)", marginBottom: 20 }}>
+            {t("connect.step1.title")}
+          </div>
+
+          {/* Benefits list */}
+          <div style={{ textAlign: "left", marginBottom: 20 }}>
+            {[
+              { icon: "M3 15a4 4 0 0 0 4 4h9a5 5 0 1 0-.1-9.999 5.002 5.002 0 1 0-9.78 2.096A4.001 4.001 0 0 0 3 15z", text: t("connect.step1.benefit1"), color: "#4ade80" },
+              { icon: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5", text: t("connect.step1.benefit2"), color: "#60a5fa" },
+              { icon: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2", text: t("connect.step1.benefit3"), color: "#eab308" },
+            ].map((b, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "10px 12px", borderRadius: 12, marginBottom: 6,
+                background: `${b.color}08`, border: `1px solid ${b.color}20`,
+              }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                  background: `${b.color}15`, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={b.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d={b.icon} />
+                  </svg>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{b.text}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Login CTA */}
+          <button
+            disabled={!!pollingCode}
+            onClick={() => {
+              setError("")
+              const code = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+                .map(b => b.toString(16).padStart(2, "0")).join("")
+              const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
+              savePollingCode(code)
+              setStatus(t("app.waitingForBrowserLogin"))
+              window.open(authUrl, "_system")
+            }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              width: "100%", padding: "16px", borderRadius: 14, marginBottom: 12,
+              border: "none",
+              background: pollingCode ? "rgba(55,172,192,0.15)" : "#37ACC0",
+              color: pollingCode ? "#37ACC0" : "#fff",
+              fontSize: 16, fontWeight: 700,
+              cursor: pollingCode ? "default" : "pointer",
+              boxShadow: pollingCode ? "none" : "0 4px 20px rgba(55,172,192,0.3)",
+            }}
+          >
+            {pollingCode ? (
+              <>
+                <span style={{ width: 18, height: 18, border: "2px solid rgba(55,172,192,0.4)", borderTopColor: "#37ACC0", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+                {t("app.waitingForBrowserLogin")}
+              </>
+            ) : (
+              <>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+                </svg>
+                {t("connect.step1.login")}
+              </>
+            )}
+          </button>
+          {pollingCode && (
+            <button
+              onClick={() => { savePollingCode(null); setStatus(""); }}
+              style={{ fontSize: 12, color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer", marginBottom: 8, opacity: 0.6 }}
+            >
+              {t("app.cancel")}
+            </button>
+          )}
+
+          {/* Divider */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0" }}>
+            <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", opacity: 0.5 }}>{t("app.or") || "or"}</span>
+            <div style={{ flex: 1, height: 1, background: "var(--glass-border)" }} />
+          </div>
+
+          {/* Escape hatch */}
+          <button
+            onClick={() => { trackConnectEscape(); setWizardStep("escape"); }}
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--text-secondary)", fontSize: 13, fontWeight: 500,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              width: "100%", padding: "8px",
+            }}
+          >
+            {t("connect.step1.haveCli")}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          </button>
+        </>)}
+
+        {/* ── Step 2: Install CLI ── */}
+        {wizardStep === 2 && (<>
+          {/* Success badge */}
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            padding: "10px 16px", borderRadius: 12, marginBottom: 16,
+            padding: "10px 16px", borderRadius: 12, marginBottom: 20,
             background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.3)",
           }}>
             <span style={{ color: "#4ade80", fontSize: 15 }}>&#10003;</span>
             <span style={{ color: "#4ade80", fontSize: 13, fontWeight: 600 }}>
-              {t("app.agentLoreConnected")}
+              {t("connect.step2.connected")}
             </span>
           </div>
-        ) : (
-          <>
-        {/* AgentLore Login — Polling-based (no deep link) */}
-        <button
-          disabled={!!pollingCode}
-          onClick={() => {
-            setError("")
-            const code = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-              .map(b => b.toString(16).padStart(2, "0")).join("")
-            const authUrl = `https://agentlore.vercel.app/zh-TW/agentrune/mobile-auth?code=${code}`
-            savePollingCode(code)
-            setStatus(t("app.waitingForBrowserLogin"))
-            // Use _system to open real Chrome — Browser.open() uses Chrome Custom Tab
-            // which Google blocks with disallowed_useragent for OAuth flows
-            window.open(authUrl, "_system")
-          }}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
-            width: "100%", padding: "16px", borderRadius: 14, marginBottom: 12,
-            border: "1.5px solid rgba(59,130,246,0.5)",
-            background: pollingCode ? "rgba(59,130,246,0.06)" : "rgba(59,130,246,0.12)",
-            color: "var(--accent-primary)", fontSize: 16, fontWeight: 700,
-            cursor: pollingCode ? "default" : "pointer", opacity: pollingCode ? 0.7 : 1,
-          }}
-        >
-          {pollingCode ? (
-            <>
-              <span style={{ width: 18, height: 18, border: "2px solid rgba(59,130,246,0.4)", borderTopColor: "rgba(59,130,246,0.9)", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
-              {t("app.waitingForBrowserLogin")}
-            </>
-          ) : (
-            <>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
-              </svg>
-              {t("settings.loginAgentLore")}
-            </>
-          )}
-        </button>
-        {pollingCode && (
-          <button
-            onClick={() => { savePollingCode(null); setStatus(""); }}
-            style={{ fontSize: 12, color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer", marginBottom: 8, opacity: 0.6 }}
-          >
-            {t("app.cancel")}
-          </button>
-        )}
 
-        <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 20, opacity: 0.7, lineHeight: 1.5 }}>
-          {t("app.loginAgentLoreHint")}
-        </div>
-          </>
-        )}
-
-        {/* Setup your computer */}
-        <div style={{
-          marginBottom: 16, padding: 16, borderRadius: 16,
-          background: "var(--icon-bg)", border: "1px solid var(--glass-border)",
-          textAlign: "left",
-        }}>
-          <div style={{
-            fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8,
-            display: "flex", alignItems: "center", gap: 6,
-          }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-            {t("app.setupComputer")}
+          <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)", marginBottom: 6 }}>
+            {t("connect.step2.title")}
           </div>
-          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.5 }}>
-            {t("app.setupComputerHint")}
+          <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16, opacity: 0.7 }}>
+            {t("connect.step2.instruction")}
           </div>
 
           {/* OS tab selector */}
@@ -954,61 +1014,31 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
                 background: setupOs === os.key ? "rgba(55, 172, 192, 0.12)" : "transparent",
                 color: setupOs === os.key ? "#37ACC0" : "var(--text-secondary)",
                 fontSize: 12, fontWeight: 600, transition: "all 0.2s",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
               }}>
-                {os.key === "mac" ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 17V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10" /><rect x="2" y="17" width="20" height="4" rx="1" />
-                  </svg>
-                ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
-                  </svg>
-                )}
                 {os.label}
               </button>
             ))}
           </div>
 
-          {/* Terminal label */}
-          <div style={{
-            fontSize: 10, fontWeight: 600, color: "var(--text-secondary)",
-            marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5,
-          }}>
-            {setupOs === "mac" ? "Terminal / Bash" : "PowerShell"}
-          </div>
-
           {/* Command display */}
           <div style={{
-            padding: "10px 12px", borderRadius: 10,
+            padding: "10px 12px", borderRadius: 10, marginBottom: 10,
             background: "var(--card-bg)", border: "1px solid var(--glass-border)",
             fontFamily: "'JetBrains Mono', monospace",
             fontSize: 11, color: "var(--text-primary)",
             wordBreak: "break-all", lineHeight: 1.6,
-            position: "relative",
           }}>
-            {setupOs === "mac"
-              ? "curl -fsSL https://agentlore.vercel.app/install.sh | sh"
-              : "irm https://agentlore.vercel.app/install.ps1 | iex"}
+            {cmd}
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
             <button
               onClick={async () => {
-                const cmd = setupOs === "mac"
-                  ? "curl -fsSL https://agentlore.vercel.app/install.sh | sh"
-                  : "irm https://agentlore.vercel.app/install.ps1 | iex"
-                try {
-                  await navigator.clipboard.writeText(cmd)
-                  setStatus(t("app.copied"))
-                  setTimeout(() => setStatus(""), 2000)
-                } catch { }
+                try { await navigator.clipboard.writeText(cmd); setStatus(t("app.copied")); setTimeout(() => setStatus(""), 2000) } catch {}
               }}
               style={{
                 flex: 1, padding: "10px", borderRadius: 10,
-                border: "1px solid var(--glass-border)",
-                background: "var(--glass-bg)",
-                color: "var(--text-primary)",
-                fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                color: "var(--text-primary)", fontSize: 12, fontWeight: 600, cursor: "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
               }}
             >
@@ -1019,25 +1049,12 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
             </button>
             <button
               onClick={async () => {
-                const cmd = setupOs === "mac"
-                  ? "curl -fsSL https://agentlore.vercel.app/install.sh | sh"
-                  : "irm https://agentlore.vercel.app/install.ps1 | iex"
-                try {
-                  if (navigator.share) {
-                    await navigator.share({ title: "AgentRune Setup", text: cmd })
-                  } else {
-                    await navigator.clipboard.writeText(cmd)
-                    setStatus(t("app.copied"))
-                    setTimeout(() => setStatus(""), 2000)
-                  }
-                } catch { }
+                try { if (navigator.share) await navigator.share({ title: "AgentRune", text: cmd }); else { await navigator.clipboard.writeText(cmd); setStatus(t("app.copied")); setTimeout(() => setStatus(""), 2000) } } catch {}
               }}
               style={{
                 flex: 1, padding: "10px", borderRadius: 10,
-                border: "1px solid rgba(55, 172, 192, 0.3)",
-                background: "rgba(55, 172, 192, 0.08)",
-                color: "#37ACC0",
-                fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: "1px solid rgba(55,172,192,0.3)", background: "rgba(55,172,192,0.08)",
+                color: "#37ACC0", fontSize: 12, fontWeight: 600, cursor: "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
               }}
             >
@@ -1047,25 +1064,48 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
               {t("app.shareCommand")}
             </button>
           </div>
-        </div>
 
-        {/* Advanced: QR / Manual */}
-        <button
-          onClick={() => setShowAdvanced(!showAdvanced)}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            width: "100%", padding: "10px", borderRadius: 12, marginBottom: showAdvanced ? 16 : 0,
-            border: "1px solid var(--glass-border)", background: "transparent",
-            color: "var(--text-secondary)", fontSize: 13, fontWeight: 500, cursor: "pointer",
-          }}
-        >
-          {t("app.advancedConnect")}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ transform: showAdvanced ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
+          {/* Detecting */}
+          <div style={{ fontSize: 13, color: "var(--text-secondary)", opacity: 0.6, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            <span style={{ width: 12, height: 12, border: "2px solid rgba(55,172,192,0.3)", borderTopColor: "#37ACC0", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+            {t("connect.step2.detecting")}
+          </div>
 
-        {showAdvanced && (<>
+          {/* QR scan shortcut */}
+          <button
+            onClick={() => setScanning(true)}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              width: "100%", padding: "12px", borderRadius: 12, marginBottom: 8,
+              border: "1px solid var(--glass-border)", background: "transparent",
+              color: "var(--text-secondary)", fontSize: 13, fontWeight: 500, cursor: "pointer",
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+            </svg>
+            {t("app.scanQrToPair")}
+          </button>
+        </>)}
+
+        {/* ── Escape: QR / Manual ── */}
+        {wizardStep === "escape" && (<>
+          {/* Back button */}
+          <button
+            onClick={() => setWizardStep(1)}
+            style={{
+              display: "flex", alignItems: "center", gap: 4, marginBottom: 16,
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--text-secondary)", fontSize: 13,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+            {t("app.cancel")}
+          </button>
+
           {/* QR Scan */}
           <button
             onClick={() => setScanning(true)}
@@ -1101,26 +1141,17 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
             <button
               onClick={handleManualConnect}
               style={{
-                padding: "12px 18px", borderRadius: 14, border: "1px solid rgba(59,130,246,0.3)",
-                background: "rgba(59,130,246,0.1)", color: "var(--accent-primary)",
+                padding: "12px 18px", borderRadius: 14, border: "1px solid rgba(55,172,192,0.3)",
+                background: "rgba(55,172,192,0.1)", color: "#37ACC0",
                 fontSize: 14, fontWeight: 600, cursor: "pointer",
               }}
             >
               {t("app.connect")}
             </button>
           </div>
-
-          <div style={{
-            marginTop: 8, padding: "12px 16px", borderRadius: 14,
-            background: "var(--icon-bg)", border: "1px solid var(--glass-border)",
-          }}>
-            <div
-              style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6, opacity: 0.7 }}
-              dangerouslySetInnerHTML={{ __html: t("app.serverInstructions") }}
-            />
-          </div>
         </>)}
 
+        {/* Status & Error (shared) */}
         {status && (
           <div style={{ color: "#4ade80", fontSize: 13, marginTop: 12 }}>{status}</div>
         )}
@@ -1133,15 +1164,16 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
           </div>
         )}
 
-        {/* VPN warning */}
-        <div style={{
-          marginTop: 12, padding: "10px 14px", borderRadius: 14,
-          background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)",
-        }}>
-          <div style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5, opacity: 0.9 }}>
-            {t("app.vpnWarning")}
-          </div>
-        </div>
+        {/* Learn more — re-view onboarding */}
+        <button
+          onClick={() => setShowLearnMore(true)}
+          style={{
+            marginTop: 16, background: "none", border: "none", cursor: "pointer",
+            color: "var(--text-secondary)", fontSize: 12, opacity: 0.5,
+          }}
+        >
+          {t("connect.learnMore")}
+        </button>
       </div>
     </div>
   )
@@ -1339,6 +1371,10 @@ async function checkForUpdate(): Promise<{ version: string; url: string; notes: 
 
 export function App() {
   const { t } = useLocale()
+  // Onboarding — shown once on first app open (Capacitor only)
+  const [showOnboarding, setShowOnboarding] = useState(() =>
+    isCapacitor() && !localStorage.getItem("onboarding_seen")
+  )
   // Cloud mode: user logged in via AgentLore — reactive state so login completes without reload
   const [isCloudMode, setIsCloudMode] = useState(() => !!localStorage.getItem("agentrune_phone_token"))
   const [serverReady, setServerReady] = useState(() => IS_DEV_PREVIEW || !needsServerSetup())
@@ -1368,6 +1404,7 @@ export function App() {
   const [activeAgentId, setActiveAgentId] = useState<string>("terminal")
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [resumeSessionId, setResumeSessionId] = useState<string | undefined>(undefined)
+  const [shouldResumeCurrentSession, setShouldResumeCurrentSession] = useState(false)
   const [viewMode, setViewModeRaw] = useState<"board" | "terminal">("board")
   const setViewMode = useCallback((mode: "board" | "terminal") => {
     setViewModeRaw(mode)
@@ -1376,7 +1413,7 @@ export function App() {
   const [activeSessions, setActiveSessions] = useState<AppSession[]>([])
   const [diffEvent, setDiffEvent] = useState<AgentEvent | null>(null)
   const [allDiffEvents, setAllDiffEvents] = useState<AgentEvent[]>([])
-  const [cliUpdate, setCliUpdate] = useState<{ latest: string; current: string } | null>(null)
+  const [cliUpdate, setCliUpdate] = useState<{ latest: string; current: string; changelog?: string } | null>(null)
   const requestVoiceRef = useRef<((callback: (text: string) => void, label?: string) => void) | null>(null)
   const [sessionEventsMap, setSessionEventsMap] = useState<Map<string, AgentEvent[]>>(new Map())
   const [theme, setTheme] = useState<"light" | "dark">(
@@ -1384,6 +1421,7 @@ export function App() {
   )
   const { connect, send, on, wsConnected } = useWs()
   const [pendingPhaseGate, setPendingPhaseGate] = useState<PhaseGateRequest | null>(null)
+  const sessionStartRef = useRef<number>(0)
 
   // ─── Auto Update Check ─────────────────────────────────────────
   // Flow: detect new release → record timestamp → 12h later push notification
@@ -1551,7 +1589,7 @@ export function App() {
   // Listen for CLI update notification from daemon
   useEffect(() => {
     return on("cli_update_available", (msg) => {
-      setCliUpdate({ latest: msg.latest as string, current: msg.current as string })
+      setCliUpdate({ latest: msg.latest as string, current: msg.current as string, changelog: msg.changelog as string | undefined })
     })
   }, [on])
 
@@ -1615,13 +1653,16 @@ export function App() {
     return on("attached", (msg) => {
       const sessionId = msg.sessionId as string
       const branch = (msg.worktreeBranch as string | null) || null
+      if (sessionId && sessionId === currentSessionId) {
+        setShouldResumeCurrentSession(true)
+      }
       if (sessionId && branch) {
         setActiveSessions((prev) =>
           prev.map((s) => s.id === sessionId ? { ...s, worktreeBranch: branch } : s)
         )
       }
     })
-  }, [on])
+  }, [currentSessionId, on])
 
   // Theme: apply dark class to <html>
   useEffect(() => {
@@ -1672,6 +1713,7 @@ export function App() {
 
     // Track last notification time per session to avoid spamming (throttle 30s)
     const lastNotifTime = new Map<string, number>()
+    const notifiedActivityKeys = new Map<string, number>()
 
     const unsub = on("session_activity", (msg) => {
       if (!getNotificationsEnabled()) return
@@ -1680,6 +1722,14 @@ export function App() {
       const eventTitle = msg.eventTitle as string
       const agentStatus = msg.agentStatus as string
       if (!sid) return
+      const eventKey = getSessionActivityNotificationKey({
+        sessionId: sid,
+        eventId: msg.eventId as string | undefined,
+        eventType: msg.eventType as string | undefined,
+        eventTitle,
+        agentStatus,
+      })
+      if (eventKey && notifiedActivityKeys.has(eventKey)) return
 
       // Throttle: max 1 notification per session per 30s
       const now = Date.now()
@@ -1689,9 +1739,27 @@ export function App() {
       // Decision request — agent needs user confirmation (like LINE notification)
       if (agentStatus === "waiting") {
         lastNotifTime.set(sid, now)
+        if (eventKey) {
+          notifiedActivityKeys.set(eventKey, now)
+          if (notifiedActivityKeys.size > 200) {
+            const cutoff = now - 12 * 60 * 60 * 1000
+            for (const [key, seenAt] of notifiedActivityKeys) {
+              if (seenAt < cutoff || notifiedActivityKeys.size > 160) {
+                notifiedActivityKeys.delete(key)
+              }
+            }
+          }
+        }
+        const notifId = getSessionActivityNotificationId({
+          sessionId: sid,
+          eventId: msg.eventId as string | undefined,
+          eventType: msg.eventType as string | undefined,
+          eventTitle,
+          agentStatus,
+        }) || Date.now()
         LocalNotifications.schedule({
           notifications: [{
-            id: now,
+            id: notifId,
             title: t("notification.agentBlocked"),
             body: eventTitle ? eventTitle.slice(0, 200) : t("notification.needsConfirm"),
             smallIcon: "ic_launcher",
@@ -1741,15 +1809,23 @@ export function App() {
         ? Math.round((result.finishedAt - result.startedAt) / 1000)
         : 0
       const durationStr = duration > 60 ? `${Math.floor(duration / 60)}m ${duration % 60}s` : `${duration}s`
+      const title = result.status === "success"
+        ? `${name} completed`
+        : result.status === "skipped_no_action"
+          ? `${name} skipped`
+          : `${name} failed`
+      const body = result.status === "success"
+        ? `Finished in ${durationStr}`
+        : result.status === "skipped_no_action"
+          ? `No post sent: preconditions not met (${durationStr})`
+          : `Status: ${result.status} (${durationStr})`
       // Use stable ID based on automation ID — duplicate notifications replace instead of stacking
       const notifId = autoId ? Math.abs(hashCode(`done_${autoId}`)) % 2147483647 : Date.now()
       LocalNotifications.schedule({
         notifications: [{
           id: notifId,
-          title: result.status === "success" ? `${name} completed` : `${name} failed`,
-          body: result.status === "success"
-            ? `Finished in ${durationStr}`
-            : `Status: ${result.status} (${durationStr})`,
+          title,
+          body,
           smallIcon: "ic_launcher",
         }],
       }).catch(() => {})
@@ -1992,6 +2068,14 @@ export function App() {
       }
     }
 
+    // Onboarding carousel — first time only
+    if (showOnboarding) {
+      return <OnboardingCarousel onComplete={() => {
+        trackOnboardingComplete()
+        setShowOnboarding(false)
+      }} />
+    }
+
     if (!serverReady) {
       return <ConnectScreen onConnected={() => { setServerReady(true); recheckAuth() }} onLogin={handleLogin} />
     }
@@ -2015,7 +2099,7 @@ export function App() {
   }
 
   // Session timing for session_end tracking
-  const sessionStartTimeRef = useRef<number>(0)
+  const sessionStartTimeRef = sessionStartRef
 
   // Launch handler — creates a new session
   // Optional resumeAgentSessionId: Claude Code session ID to resume (--resume <id>)
@@ -2028,6 +2112,7 @@ export function App() {
     setActiveAgentId(agentId)
     setCurrentSessionId(sessionId)
     setResumeSessionId(resumeAgentSessionId)
+    setShouldResumeCurrentSession(false)
     saveLastProject(projectId)
     setActiveSessions((prev) => [...prev, { id: sessionId, projectId, agentId }])
     setScreen("session")
@@ -2043,6 +2128,7 @@ export function App() {
       setSelectedProject(session.projectId)
       setActiveAgentId(session.agentId)
       setCurrentSessionId(sessionId)
+      setShouldResumeCurrentSession(true)
       // For recoverable sessions, pass the Claude session ID so daemon can --resume
       if (session.status === "recoverable" && session.claudeSessionId) {
         setResumeSessionId(session.claudeSessionId)
@@ -2063,6 +2149,7 @@ export function App() {
       setSelectedProject(session.projectId)
       setActiveAgentId(session.agentId)
       setCurrentSessionId(sessionId)
+      setShouldResumeCurrentSession(true)
       saveLastProject(session.projectId)
       setScreen("session")
       setViewMode("terminal")
@@ -2074,6 +2161,9 @@ export function App() {
     // Persist locally first so session won't reappear even if server call fails
     addKilledSessionId(sessionId)
     setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId))
+    if (currentSessionId === sessionId) {
+      setShouldResumeCurrentSession(false)
+    }
     try {
       await fetch(`${getApiBase()}/api/sessions/${sessionId}/kill`, { method: "POST" })
     } catch { }
@@ -2144,10 +2234,13 @@ export function App() {
                   agentId={activeAgentId}
                   sessionId={currentSessionId || undefined}
                   resumeSessionId={resumeSessionId}
+                  shouldResumeAgent={shouldResumeCurrentSession}
                   sessionToken={sessionToken}
                   send={send}
                   on={on}
                   onBack={() => setViewMode("board")}
+                  onLaunchSession={handleLaunch}
+                  onKillSession={handleKill}
                 />
               </Suspense>
             </div>
@@ -2162,6 +2255,7 @@ export function App() {
                   project={sessionProject!}
                   agentId={activeAgentId}
                   sessionId={currentSessionId || undefined}
+                  shouldResumeAgent={shouldResumeCurrentSession}
                   sessionToken={sessionToken}
                   send={send}
                   on={on}
@@ -2259,25 +2353,34 @@ export function App() {
                 position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
                 background: "linear-gradient(90deg, #f59e0b, #d97706)", color: "#fff",
                 padding: "8px 16px", fontSize: 13, fontWeight: 500,
-                display: "flex", alignItems: "center", justifyContent: "space-between",
               }}>
-                <span>AgentRune v{cliUpdate.latest} {t("update.available") || "available"} (v{cliUpdate.current})</span>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => {
-                    navigator.clipboard?.writeText(
-                      navigator.userAgent.includes("Win")
-                        ? "irm https://agentrune.com/install.ps1 | iex"
-                        : "curl -fsSL https://agentrune.com/install.sh | bash"
-                    )
-                  }} style={{
-                    background: "rgba(255,255,255,0.2)", border: "none", color: "#fff",
-                    padding: "4px 12px", borderRadius: 4, fontSize: 12, cursor: "pointer",
-                  }}>{t("update.copyCommand") || "Copy update command"}</button>
-                  <button onClick={() => setCliUpdate(null)} style={{
-                    background: "none", border: "none", color: "rgba(255,255,255,0.7)",
-                    fontSize: 16, cursor: "pointer", padding: "0 4px",
-                  }}>x</button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span>AgentRune v{cliUpdate.latest} {t("update.available") || "available"} (v{cliUpdate.current})</span>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => {
+                      navigator.clipboard?.writeText(
+                        navigator.userAgent.includes("Win")
+                          ? "irm https://agentrune.com/install.ps1 | iex"
+                          : "curl -fsSL https://agentrune.com/install.sh | bash"
+                      )
+                    }} style={{
+                      background: "rgba(255,255,255,0.2)", border: "none", color: "#fff",
+                      padding: "4px 12px", borderRadius: 4, fontSize: 12, cursor: "pointer",
+                    }}>{t("update.copyCommand") || "Copy update command"}</button>
+                    <button onClick={() => setCliUpdate(null)} style={{
+                      background: "none", border: "none", color: "rgba(255,255,255,0.7)",
+                      fontSize: 16, cursor: "pointer", padding: "0 4px",
+                    }}>x</button>
+                  </div>
                 </div>
+                {cliUpdate.changelog && (
+                  <div style={{
+                    marginTop: 6, fontSize: 12, opacity: 0.9,
+                    whiteSpace: "pre-line", lineHeight: 1.4, maxHeight: 80, overflow: "auto",
+                  }}>
+                    {cliUpdate.changelog}
+                  </div>
+                )}
               </div>
             )}
             <LaunchPad

@@ -11,6 +11,7 @@ import type { AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
+import { buildApiUrl, canUseApi } from "../lib/storage"
 import { ChainBuilder } from "./ChainBuilder"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
@@ -299,11 +300,11 @@ export function ProjectOverview({
   // Fetch automation counts per project (for project card summary)
   useEffect(() => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl || projects.length === 0) return
+    if (!canUseApi(serverUrl) || projects.length === 0) return
     const counts = new Map<string, number>()
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(`${serverUrl}/api/automations/${p.id}`)
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
         if (res.ok) {
           const autos: { enabled: boolean }[] = await res.json()
           const enabled = autos.filter((a) => a.enabled).length
@@ -317,9 +318,9 @@ export function ProjectOverview({
   useEffect(() => {
     if (sessionTab !== "schedules" || !selectedProjectForSessions) return
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return
+    if (!canUseApi(serverUrl)) return
     setAutomationsLoading(true)
-    fetch(`${serverUrl}/api/automations/${selectedProjectForSessions}`)
+    fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}`, serverUrl))
       .then((r) => r.ok ? r.json() : [])
       .then((data) => setProjectAutomations(Array.isArray(data) ? data : []))
       .catch(() => setProjectAutomations([]))
@@ -418,9 +419,8 @@ export function ProjectOverview({
 
   const callCleanupAPI = async (text: string, aid: string): Promise<string> => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return text
     try {
-      const res = await fetch(`${serverUrl}/api/voice-cleanup`, {
+      const res = await fetch(buildApiUrl("/api/voice-cleanup", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, agentId: aid }),
@@ -446,7 +446,7 @@ export function ProjectOverview({
     if (isEdit) {
       const serverUrl = localStorage.getItem("agentrune_server") || ""
       try {
-        const res = await fetch(`${serverUrl}/api/voice-edit`, {
+        const res = await fetch(buildApiUrl("/api/voice-edit", serverUrl), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ original: voiceEditOriginal.current, instruction: raw }),
@@ -1171,7 +1171,7 @@ export function ProjectOverview({
                           onClick={async () => {
                             const serverUrl = localStorage.getItem("agentrune_server") || ""
                             try {
-                              await fetch(`${serverUrl}/api/automations/${selectedProjectForSessions}/${auto.id}`, {
+                              await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/${auto.id}`, serverUrl), {
                                 method: "PATCH", headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify({ enabled: !auto.enabled }),
                               })
@@ -1221,7 +1221,7 @@ export function ProjectOverview({
                           onClick={async () => {
                             const serverUrl = localStorage.getItem("agentrune_server") || ""
                             try {
-                              await fetch(`${serverUrl}/api/automations/${selectedProjectForSessions}/${auto.id}`, { method: "DELETE" })
+                              await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/${auto.id}`, serverUrl), { method: "DELETE" })
                               setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                             } catch {}
                           }}
@@ -1551,7 +1551,7 @@ export function ProjectOverview({
                                   const crew = tmpl.crew!
                                   const svr = localStorage.getItem("agentrune_server") || ""
                                   try {
-                                    await fetch(`${svr}/api/automations/${selectedProjectForSessions}/fire`, {
+                                    await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/fire`, svr), {
                                       method: "POST",
                                       headers: { "Content-Type": "application/json" },
                                       body: JSON.stringify({ crew, name: tplName(tmpl) }),

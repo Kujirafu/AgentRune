@@ -16,6 +16,27 @@ import { auditLog, pruneAuditLogs } from "./audit-log.js"
 import { analyzeSkillContent, type SkillRiskReport } from "./skill-analyzer.js"
 import { SkillWhitelist } from "./skill-whitelist.js"
 import { SkillMonitor } from "./skill-monitor.js"
+import {
+  buildAutomationSocialInstructions,
+  detectAutomationSocialMode,
+  extractAutomationSocialDirective,
+  outputIndicatesNoPublishableContent,
+  outputNeedsManualIntervention,
+} from "./automation-social.js"
+import {
+  buildRecentSocialPostPromptContext,
+  clearSocialPublishCooldown,
+  findDuplicateSocialPost,
+  formatSocialDuplicateMatch,
+  formatSocialPublishCooldown,
+  getActiveSocialPublishCooldown,
+  rememberSocialPost,
+  rememberSocialPublishCooldown,
+} from "./social-dedup.js"
+import { recordPublishedSocialPost } from "./social-history.js"
+import { publishSocialPost } from "./social-publisher.js"
+import { extractAutomationSummary } from "./automation-summary.js"
+import { callLlmForSummary, shouldUseLlmSummary } from "./llm-summary.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
@@ -222,6 +243,7 @@ export interface AutomationConfig {
   schedule: AutomationSchedule
   runMode: "local" | "worktree"
   agentId: string
+  locale?: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
   // Trust Layer — trustProfile controls sandboxLevel, requireMergeApproval, requirePlanReview, dailyRunLimit
@@ -236,7 +258,7 @@ export interface AutomationConfig {
   enabled: boolean
   createdAt: number
   lastRunAt?: number
-  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
+  lastRunStatus?: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_no_action" | "circuit_broken" | "interrupted" | "running" | "pending_reauth"
   // Crew execution
   crew?: CrewConfig
 }
@@ -249,7 +271,7 @@ export interface AutomationResult {
   exitCode: number | null
   output: string
   summary?: string
-  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "circuit_broken" | "interrupted" | "pending_reauth"
+  status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken" | "interrupted" | "pending_reauth"
   riskReport?: SkillRiskReport
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
   crewReport?: CrewExecutionReport  // set for crew automation runs
@@ -273,6 +295,19 @@ function getSystemLocale(): string {
   return "en"
 }
 
+function normalizeAutomationLocale(locale?: string): string | undefined {
+  if (!locale || !/^[A-Za-z0-9_-]{2,32}$/.test(locale)) return undefined
+  if (locale.toLowerCase().startsWith("zh")) return "zh-TW"
+  if (locale.toLowerCase().startsWith("ja")) return "ja"
+  if (locale.toLowerCase().startsWith("ko")) return "ko"
+  if (locale.toLowerCase().startsWith("en")) return "en"
+  return locale
+}
+
+function getAutomationLocale(auto?: { locale?: string }): string {
+  return normalizeAutomationLocale(auto?.locale) || getSystemLocale()
+}
+
 const LOCALE_NAMES: Record<string, string> = {
   "zh-TW": "Traditional Chinese (繁體中文)",
   "ja": "Japanese (日本語)",
@@ -280,11 +315,18 @@ const LOCALE_NAMES: Record<string, string> = {
   "en": "English",
 }
 
-export function wrapPromptWithLocale(prompt: string): string {
-  const locale = getSystemLocale()
+export function wrapPromptWithLocale(prompt: string, locale: string = getSystemLocale()): string {
   if (locale === "en") return prompt
   const langName = LOCALE_NAMES[locale] || locale
-  return `[System] Respond in ${langName}. All output, summaries, and reports must be in ${langName}.\n\n${prompt}`
+  const outputStyle =
+    locale === "zh-TW"
+      ? "Use Traditional Chinese for all section headings, summaries, progress reports, tables, and final answers. Do not switch to Korean, Japanese, Simplified Chinese, or English except for unavoidable product names, API field names, or direct quotes."
+      : locale === "ja"
+        ? "Use Japanese for all section headings, summaries, progress reports, tables, and final answers."
+        : locale === "ko"
+          ? "Use Korean for all section headings, summaries, progress reports, tables, and final answers."
+          : `All output, summaries, and reports must be in ${langName}.`
+  return `[System] Respond in ${langName}. ${outputStyle}\n\n${prompt}`
 }
 
 // --- Agent protocol (shared with ws-server) ---
@@ -597,13 +639,14 @@ export class AutomationManager {
     if (this.automations.size >= this.limits.maxAutomations) {
       return { error: `Automation limit reached (max ${this.limits.maxAutomations}). Upgrade to add more.` }
     }
-    const id = `auto_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const id = `auto_${Date.now()}_${randomBytes(4).toString("hex")}`
     const automation: AutomationConfig = {
       ...config,
       id,
       createdAt: Date.now(),
       runMode: config.runMode || "local",
       agentId: config.agentId || "claude",
+      locale: normalizeAutomationLocale(config.locale) || getSystemLocale(),
       trustProfile: config.trustProfile || "supervised",
     }
     // Expand trust profile into concrete settings (unless custom)
@@ -674,7 +717,7 @@ export class AutomationManager {
     return true
   }
 
-  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "timeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
+  update(id: string, updates: Partial<Pick<AutomationConfig, "name" | "command" | "prompt" | "skill" | "schedule" | "enabled" | "runMode" | "agentId" | "locale" | "model" | "templateId" | "bypass" | "trustProfile" | "requireMergeApproval" | "requirePlanReview" | "sandboxLevel" | "dailyRunLimit" | "planReviewTimeoutMinutes" | "timeoutMinutes" | "manifest" | "crew">>): (AutomationConfig & { nextRunAt?: number }) | null {
     const auto = this.automations.get(id)
     if (!auto) return null
 
@@ -689,6 +732,7 @@ export class AutomationManager {
     if (updates.enabled !== undefined) auto.enabled = updates.enabled
     if (updates.runMode !== undefined) auto.runMode = updates.runMode
     if (updates.agentId !== undefined) auto.agentId = updates.agentId
+    if (updates.locale !== undefined) auto.locale = normalizeAutomationLocale(updates.locale) || getSystemLocale()
     if (updates.model !== undefined) auto.model = updates.model
     if (updates.templateId !== undefined) auto.templateId = updates.templateId
     if (updates.bypass !== undefined) auto.bypass = updates.bypass
@@ -751,12 +795,15 @@ export class AutomationManager {
       const ms = (auto.schedule.intervalMinutes || 30) * 60 * 1000
 
       // If last run was recent, delay first execution to respect the interval
+      // If overdue (sinceLastRun >= interval), run immediately instead of waiting another full cycle
       const sinceLastRun = auto.lastRunAt ? Date.now() - auto.lastRunAt : ms
-      const initialDelay = sinceLastRun >= ms ? ms : ms - sinceLastRun
-      const skippedMinutes = Math.round((ms - initialDelay) / 60000)
+      const overdue = sinceLastRun >= ms
+      const initialDelay = overdue ? 0 : ms - sinceLastRun
 
-      if (initialDelay < ms) {
-        log.info(`[Automation] "${auto.name}" last ran ${Math.round(sinceLastRun / 60000)}m ago, next in ${Math.round(initialDelay / 60000)}m (skipping ${skippedMinutes}m)`)
+      if (overdue) {
+        log.info(`[Automation] "${auto.name}" overdue by ${Math.round((sinceLastRun - ms) / 60000)}m — running immediately`)
+      } else if (initialDelay < ms) {
+        log.info(`[Automation] "${auto.name}" last ran ${Math.round(sinceLastRun / 60000)}m ago, next in ${Math.round(initialDelay / 60000)}m`)
       } else {
         log.info(`[Automation] Starting interval for "${auto.name}" every ${auto.schedule.intervalMinutes}m`)
       }
@@ -836,16 +883,59 @@ export class AutomationManager {
     this.nextRunAtMap.delete(id)
   }
 
+  private buildRecentRunPromptContext(automationId: string): string | null {
+    const recentRuns = (this.results.get(automationId) || [])
+      .slice(-3)
+      .reverse()
+
+    if (recentRuns.length === 0) return null
+
+    const lines = recentRuns.map((result) => {
+      const summary = (result.summary || extractAutomationSummary(result.output || "", result.status))
+        .replace(/\s+/g, " ")
+        .trim()
+      const compactSummary = summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
+      return `- ${this.formatAutomationTimestamp(result.finishedAt)} | ${result.status} | ${compactSummary || "no summary"}`
+    })
+
+    return [
+      "[Recent Automation Memory]",
+      "Recent runs of this exact automation:",
+      ...lines,
+      "Build on the latest run state instead of repeating the same output. If nothing materially changed, say so briefly and avoid redundant work.",
+    ].join("\n")
+  }
+
+  private formatAutomationTimestamp(timestamp: number): string {
+    try {
+      return new Intl.DateTimeFormat("zh-TW", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(new Date(timestamp))
+    } catch {
+      return new Date(timestamp).toISOString()
+    }
+  }
+
   /** Build the agent command args + prompt file for an automation.
    *  Prompt is written to a temp file and piped via stdin (child_process.spawn).
    */
   private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string } | null {
     const rawPrompt = auto.prompt || ""
-    let promptText = wrapPromptWithLocale(rawPrompt)
+    let promptText = wrapPromptWithLocale(rawPrompt, getAutomationLocale(auto))
+    const socialMode = detectAutomationSocialMode(auto)
+    const recentRunContext = this.buildRecentRunPromptContext(auto.id)
 
     // Legacy raw command field is no longer supported for direct execution (security: command injection risk).
     if (auto.command && !auto.prompt) {
-      promptText = wrapPromptWithLocale(auto.command)
+      promptText = wrapPromptWithLocale(auto.command, getAutomationLocale(auto))
+    }
+
+    if (recentRunContext) {
+      promptText = `${recentRunContext}\n\n${promptText}`
     }
 
     // Inject skill instruction into prompt if specified
@@ -878,15 +968,24 @@ export class AutomationManager {
       manifest: auto.manifest,
       authorityMap,
       trustProfile: auto.trustProfile,
-      locale: getSystemLocale(),
+      locale: getAutomationLocale(auto),
     })
     const constraintsBlock = formatConstraintsForPrompt(constraintSet)
     if (constraintsBlock) {
       promptText = `${constraintsBlock}\n\n${promptText}`
     }
 
+    if (socialMode) {
+      const recentSocialContext = buildRecentSocialPostPromptContext(socialMode.platform)
+      promptText = [
+        buildAutomationSocialInstructions(socialMode),
+        recentSocialContext,
+        promptText,
+      ].filter(Boolean).join("\n\n")
+    }
+
     // Write prompt (with agent protocol) to file
-    const locale = getSystemLocale()
+    const locale = getAutomationLocale(auto)
     const agentProtocol = buildAgentProtocol(locale)
     const fullPrompt = `[System Instructions]\n${agentProtocol}\n\n[User Prompt]\n${promptText}`
     const promptFilePath = writePromptFile(this.storageDir, auto.id, fullPrompt)
@@ -949,7 +1048,7 @@ export class AutomationManager {
   /** Fire-and-forget: create a temp automation with crew config and execute immediately */
   async fireAndForget(projectId: string, name: string, crew: CrewConfig, sessionContext?: string): Promise<string> {
     if (!this.schedulingEnabled) throw new Error("Automation execution disabled on this daemon (release daemon)");
-    const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const id = `fire_${Date.now()}_${randomBytes(4).toString("hex")}`
     const auto: AutomationConfig = {
       id,
       projectId,
@@ -993,6 +1092,7 @@ export class AutomationManager {
     if (!this.schedulingEnabled) return // release daemon does not execute automations
     const auto = this.automations.get(id)
     if (!auto || (!auto.enabled && !manualTrigger)) return
+    const socialMode = detectAutomationSocialMode(auto)
 
     // Prevent duplicate concurrent execution
     if (this.running.has(id)) {
@@ -1010,49 +1110,94 @@ export class AutomationManager {
     }
 
     try {
-    // Daily rate limit check
-    const todayKey = new Date().toISOString().slice(0, 10)
-    const todayCount = this.dailyExecCount.get(todayKey) || 0
-    if (todayCount >= this.limits.maxDailyExecutions) {
-      log.warn(`[Automation] Daily execution limit reached (${this.limits.maxDailyExecutions}), skipping "${auto.name}"`)
-      return
-    }
-    this.dailyExecCount.set(todayKey, todayCount + 1)
-    // Prune stale daily counts (keep only last 7 days)
-    if (this.dailyExecCount.size > 7) {
-      const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
-      for (const key of this.dailyExecCount.keys()) {
-        if (key < cutoff) this.dailyExecCount.delete(key)
-      }
-    }
+      if (socialMode) {
+        const activeCooldown = getActiveSocialPublishCooldown(socialMode.platform)
+        if (activeCooldown) {
+          const startedAt = Date.now()
+          const output = [
+            "--- AgentRune Social Publish ---",
+            `Platform: ${socialMode.platform}`,
+            "Posted: skipped",
+            "Reason: publish cooldown active",
+            `Cooldown: ${formatSocialPublishCooldown(activeCooldown, startedAt)}`,
+            `Cooldown Reason: ${activeCooldown.reason}`,
+            activeCooldown.error ? `Last Error: ${activeCooldown.error}` : undefined,
+            activeCooldown.source ? `Source: ${activeCooldown.source}` : undefined,
+            manualTrigger ? "Manual Trigger: respected active cooldown" : undefined,
+          ].filter(Boolean).join("\n")
 
-    // Per-automation daily run limit (from Trust Profile)
-    if (auto.dailyRunLimit && auto.dailyRunLimit > 0) {
-      const results = this.results.get(id) || []
-      const todayStart = new Date(todayKey).getTime()
-      const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
-      if (todayRunCount >= auto.dailyRunLimit) {
-        log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
-        auditLog("daily_limit_reached", { todayRunCount, limit: auto.dailyRunLimit }, { automationId: id, automationName: auto.name })
-        const result: AutomationResult = {
-          id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
-          exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
-          status: "skipped_daily_limit",
+          const resultEntry: AutomationResult = {
+            id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
+            automationId: id,
+            startedAt,
+            finishedAt: Date.now(),
+            exitCode: null,
+            output,
+            summary: extractAutomationSummary(output, "skipped_no_action"),
+            status: "skipped_no_action",
+          }
+
+          this.storeResult(id, resultEntry)
+          auto.lastRunAt = resultEntry.finishedAt
+          auto.lastRunStatus = "skipped_no_action"
+          this.saveToDisk()
+
+          log.info(`[Automation] "${auto.name}" skipped: active ${socialMode.platform} publish cooldown`)
+          auditLog(
+            "automation_completed",
+            { status: resultEntry.status, exitCode: resultEntry.exitCode, durationMs: resultEntry.finishedAt - resultEntry.startedAt },
+            { automationId: id, automationName: auto.name },
+          )
+          if (this.onEvent) {
+            this.onEvent({ type: "automation_completed", automation: auto, result: resultEntry })
+          }
+          return
         }
-        this.storeResult(id, result)
-        this.running.delete(id)
-        if (this.onEvent) {
-          this.onEvent({ type: "daily_limit_reached", automationId: id, automationName: auto.name, limit: auto.dailyRunLimit, todayCount: todayRunCount })
-        }
+      }
+
+      // Daily rate limit check
+      const todayKey = new Date().toISOString().slice(0, 10)
+      const todayCount = this.dailyExecCount.get(todayKey) || 0
+      if (todayCount >= this.limits.maxDailyExecutions) {
+        log.warn(`[Automation] Daily execution limit reached (${this.limits.maxDailyExecutions}), skipping "${auto.name}"`)
         return
       }
-    }
+      this.dailyExecCount.set(todayKey, todayCount + 1)
+      // Prune stale daily counts (keep only last 7 days)
+      if (this.dailyExecCount.size > 7) {
+        const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+        for (const key of this.dailyExecCount.keys()) {
+          if (key < cutoff) this.dailyExecCount.delete(key)
+        }
+      }
 
-    const project = this.projects.find((p) => p.id === auto.projectId)
-    if (!project) {
-      log.warn(`[Automation] Project "${auto.projectId}" not found for automation "${auto.name}"`)
-      return
-    }
+      // Per-automation daily run limit (from Trust Profile)
+      if (auto.dailyRunLimit && auto.dailyRunLimit > 0) {
+        const results = this.results.get(id) || []
+        const todayStart = new Date(todayKey).getTime()
+        const todayRunCount = results.filter(r => r.startedAt >= todayStart && r.status !== "skipped_daily_limit").length
+        if (todayRunCount >= auto.dailyRunLimit) {
+          log.warn(`[Automation] Per-automation daily limit reached for "${auto.name}" (${todayRunCount}/${auto.dailyRunLimit})`)
+          auditLog("daily_limit_reached", { todayRunCount, limit: auto.dailyRunLimit }, { automationId: id, automationName: auto.name })
+          const result: AutomationResult = {
+            id: `result_${Date.now()}`, automationId: id, startedAt: Date.now(), finishedAt: Date.now(),
+            exitCode: null, output: `Skipped: daily run limit reached (${todayRunCount}/${auto.dailyRunLimit})`,
+            status: "skipped_daily_limit",
+          }
+          this.storeResult(id, result)
+          this.running.delete(id)
+          if (this.onEvent) {
+            this.onEvent({ type: "daily_limit_reached", automationId: id, automationName: auto.name, limit: auto.dailyRunLimit, todayCount: todayRunCount })
+          }
+          return
+        }
+      }
+
+      const project = this.projects.find((p) => p.id === auto.projectId)
+      if (!project) {
+        log.warn(`[Automation] Project "${auto.projectId}" not found for automation "${auto.name}"`)
+        return
+      }
 
     // ── Security gate: static analysis ──
     const contentToAnalyze = [auto.prompt || "", auto.command || "", auto.skill || ""].join("\n")
@@ -1127,6 +1272,7 @@ export class AutomationManager {
       return
     }
 
+    const locale = getAutomationLocale(auto)
     const built = this.buildAutomationCommand(auto)
     if (!built) {
       log.warn(`[Automation] Could not build command for "${auto.name}" (agent=${auto.agentId})`)
@@ -1160,7 +1306,6 @@ export class AutomationManager {
     let output = ""
     let exitCode: number | null = null
     let status: AutomationResult["status"] = "success"
-
     try {
       // Create a temporary PTY session for this automation
       // Runtime behavior monitor
@@ -1348,19 +1493,125 @@ export class AutomationManager {
         const violations = monitor.getViolations()
         output += `\n\n--- Monitor Report ---\nViolations: ${violations.length}\n${violations.map(v => `[${v.severity}] ${v.type}: ${v.description} — "${v.matchedText}"`).join("\n")}`
       }
+      if (socialMode && status === "success") {
+        const directive = extractAutomationSocialDirective(output, socialMode.platform)
+        if (directive?.kind === "post") {
+          const duplicateMatch = findDuplicateSocialPost({
+            platform: directive.platform,
+            text: directive.text,
+            title: directive.title,
+          })
+
+          if (duplicateMatch) {
+            output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: skipped\nReason: duplicate content matched a recently published post\nDuplicate Of: ${formatSocialDuplicateMatch(duplicateMatch)}\nSource: ${directive.source || "unknown"}`
+            status = "skipped_no_action"
+          } else {
+            const publishResult = await publishSocialPost({
+              platform: directive.platform,
+              text: directive.text,
+              title: directive.title,
+              submolt: directive.submolt,
+              source: directive.source,
+              reason: directive.reason,
+            })
+            if (publishResult.success) {
+              output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: yes\nPost ID: ${publishResult.postId}\nSource: ${directive.source || "unknown"}`
+
+              const cooldownClear = clearSocialPublishCooldown(directive.platform)
+              if (cooldownClear.success) {
+                output += `\nCooldown Guard: ${cooldownClear.cleared ? "cleared" : "not active"}`
+              } else {
+                output += `\nCooldown Guard: clear failed\nCooldown Guard Error: ${cooldownClear.error || "Unknown cooldown clear error"}`
+              }
+
+              const dedupeResult = rememberSocialPost({
+                platform: directive.platform,
+                text: directive.text,
+                title: directive.title,
+                postId: publishResult.postId,
+                source: directive.source,
+                reason: directive.reason,
+                recordType: directive.recordType,
+                recordTitle: directive.recordTitle,
+                recordMetrics: directive.recordMetrics,
+                publishedAt: Date.now(),
+              })
+              if (dedupeResult.success) {
+                output += `\nDuplicate Guard: ${dedupeResult.stored ? "recorded" : "already recorded"}`
+              } else {
+                output += `\nDuplicate Guard: failed\nDuplicate Guard Error: ${dedupeResult.error || "Unknown duplicate history error"}`
+              }
+
+              const historyResult = recordPublishedSocialPost({
+                platform: directive.platform,
+                recordType: directive.recordType,
+                recordTitle: directive.recordTitle,
+                recordMetrics: directive.recordMetrics,
+              })
+              if (historyResult.success) {
+                output += `\nMaterials Updated: ${historyResult.skipped ? "already up to date" : "yes"}\nMaterials Path: ${historyResult.path || "unknown"}`
+              } else {
+                output += `\nMaterials Updated: no\nMaterials Error: ${historyResult.error || "Unknown materials update error"}`
+              }
+            } else {
+              output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: no\nError: ${publishResult.error || "Unknown publish error"}`
+              if (publishResult.cooldownMs && publishResult.cooldownReason) {
+                const cooldownResult = rememberSocialPublishCooldown({
+                  platform: directive.platform,
+                  reason: publishResult.cooldownReason,
+                  cooldownMs: publishResult.cooldownMs,
+                  retryAfterMs: publishResult.retryAfterMs,
+                  statusCode: publishResult.statusCode,
+                  error: publishResult.error,
+                  source: directive.source,
+                })
+                if (cooldownResult.success && cooldownResult.entry) {
+                  output += `\nCooldown Guard: active until ${formatSocialPublishCooldown(cooldownResult.entry)}`
+                } else {
+                  output += `\nCooldown Guard: failed\nCooldown Guard Error: ${cooldownResult.error || "Unknown cooldown persistence error"}`
+                }
+              }
+              status = "failed"
+            }
+          }
+        } else if (directive?.kind === "skip") {
+          output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${directive.platform}\nPosted: skipped\nReason: ${directive.reason}\nSource: ${directive.source || "unknown"}`
+          status = "skipped_no_action"
+        } else if (outputIndicatesNoPublishableContent(output)) {
+          output += `\n\n--- AgentRune Social Publish ---\nPlatform: ${socialMode.platform}\nPosted: skipped\nReason: automation reported that no publishable materials were available`
+          status = "skipped_no_action"
+        } else if (outputNeedsManualIntervention(output)) {
+          output += "\n\n--- AgentRune Social Publish ---\nPosted: no\nError: automation requested manual intervention instead of API posting"
+          status = "failed"
+        } else {
+          output += "\n\n--- AgentRune Social Publish ---\nPosted: no\nError: social automation did not emit a publish or skip directive"
+          status = "failed"
+        }
+      }
     } catch (err) {
-      output = err instanceof Error ? err.message : String(err)
+      log.error(`[Automation] execution error: ${err instanceof Error ? err.message : String(err)}`)
+      output = "Automation execution failed unexpectedly"
       status = "failed"
     }
 
+    let summary = extractAutomationSummary(output, status)
+    if (shouldUseLlmSummary(output)) {
+      try {
+        const humanized = await callLlmForSummary(output, { locale, agentId: auto.agentId })
+        if (humanized?.trim()) summary = humanized.trim()
+      } catch (err) {
+        log.warn(`[Automation] LLM summary failed for "${auto.name}": ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
     const resultEntry: AutomationResult = {
-      id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
       automationId: id,
       startedAt,
       finishedAt: Date.now(),
       exitCode,
       output,
-      summary: AutomationManager.extractSummary(output, status),
+      summary,
       status,
     }
 
@@ -1381,9 +1632,9 @@ export class AutomationManager {
         const durationStr = durationMs < 60000 ? `${Math.round(durationMs / 1000)}s` : `${Math.round(durationMs / 60000)}m`
         vault.writeProgress({
           title: `[Automation] ${auto.name}`,
-          status: status === "success" ? "done" : "blocked",
-          summary: `${status === "success" ? "Completed" : status === "timeout" ? "Timed out" : "Failed"} in ${durationStr}${worktree ? ` (branch: ${worktree.branch})` : ""}`,
-          nextSteps: status !== "success" ? ["Check automation output for details"] : [],
+          status: status === "success" || status === "skipped_no_action" ? "done" : "blocked",
+          summary: `${status === "success" ? "Completed" : status === "skipped_no_action" ? "Skipped" : status === "timeout" ? "Timed out" : "Failed"} in ${durationStr}${worktree ? ` (branch: ${worktree.branch})` : ""}`,
+          nextSteps: status !== "success" && status !== "skipped_no_action" ? ["Check automation output for details"] : [],
           details: output.length > 2000 ? output.slice(-2000) : output,
         })
       } catch (err) {
@@ -1659,7 +1910,7 @@ export class AutomationManager {
     const output = outputParts.join("\n\n---\n\n")
 
     const resultEntry: AutomationResult = {
-      id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
       automationId: id,
       startedAt,
       finishedAt: report.completedAt,
@@ -1689,7 +1940,7 @@ export class AutomationManager {
   /** Execute a single crew role as an agent process */
   private async executeCrewRole(auto: AutomationConfig, role: CrewRole, cwd: string, handoffSummary: string): Promise<CrewRoleResult> {
     const roleStart = Date.now()
-    const locale = getSystemLocale()
+    const locale = getAutomationLocale(auto)
 
     // Build role-specific prompt with persona, handoff, and humanizer
     let rolePrompt = ""
@@ -1719,7 +1970,7 @@ export class AutomationManager {
     }
 
     // Wrap with locale
-    const promptText = wrapPromptWithLocale(rolePrompt)
+    const promptText = wrapPromptWithLocale(rolePrompt, locale)
 
     // Build agent protocol + write prompt file
     const agentProtocol = buildAgentProtocol(locale)
@@ -1813,7 +2064,7 @@ export class AutomationManager {
         const jsonlActivity = extractJSONLActivity(cwd, roleStart)
         if (jsonlActivity) roleOutput = jsonlActivity
       }
-      const summary = AutomationManager.extractSummary(roleOutput, result.timedOut ? "timeout" : "success")
+      const summary = extractAutomationSummary(roleOutput, result.timedOut ? "timeout" : "success")
 
       return {
         roleId: role.id,
@@ -2154,7 +2405,7 @@ export class AutomationManager {
       }
       // Store interrupted result
       this.storeResult(id, {
-        id: `result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        id: `result_${Date.now()}_${randomBytes(3).toString("hex")}`,
         automationId: id,
         startedAt: Date.now(),
         finishedAt: Date.now(),

@@ -299,6 +299,7 @@ export const en: Record<string, string> = {
   "mc.getApiKey": "Get your API key",
   "mc.saveAndRestart": "Save & Restart",
   "mc.apiKeySaved": "API key saved, session restarting...",
+  "mc.settingsRestarting": "Re-launching the session to apply the new settings...",
   "mc.cancel": "Cancel",
   "mc.mergeWorktree": "Merge to Main",
   "mc.mergeWorktreeDesc": "Merge this session's changes into main branch",
@@ -398,6 +399,7 @@ export const en: Record<string, string> = {
 
   // Settings — Codex
   "settings.codexModel": "Codex Model",
+  "settings.codexModelDesc": "Leave empty for the default, or enter any safe Codex model id such as gpt-5.4.",
   "settings.codexModeDefault": "Default",
   "settings.codexModeDefaultDesc": "Use Codex defaults from your config",
   "settings.codexModeFullAuto": "Full Auto",
@@ -748,6 +750,13 @@ export const en: Record<string, string> = {
   "automation.delete": "Delete",
   "automation.loading": "Loading...",
   "automation.noResults": "No results yet.",
+  "automation.summaryReport": "Summary",
+  "automation.whatHappened": "What Happened",
+  "automation.resultReport": "Results",
+  "automation.issuesRisks": "Issues / Risks",
+  "automation.decisionsNext": "Decision Needed / Next Steps",
+  "automation.otherNotes": "Other Notes",
+  "automation.fullLog": "Full Log",
   "automation.created": "Schedule created",
   "automation.updated": "Schedule updated",
   "automation.saveTemplate": "Save",
@@ -1071,6 +1080,30 @@ export const en: Record<string, string> = {
   "chain.step.qaSecurity": "Security & Stress Test",
   "chain.step.qaSecurityFix": "Fix Security Issues",
   "chain.step.qaReport": "Release Readiness Report",
+
+  // Onboarding
+  "onboarding.skip": "Skip",
+  "onboarding.slide1.title": "Control AI Agents from Your Phone",
+  "onboarding.slide1.subtitle": "Launch, monitor, and review AI development work on your computer — anytime, anywhere",
+  "onboarding.slide2.title": "AgentLore Powers Everything",
+  "onboarding.slide2.subtitle": "Knowledge base, Skill Chains, cloud connect, cross-device sync — unlock all by signing in",
+  "onboarding.slide3.title": "3 Minutes to Start",
+  "onboarding.slide3.subtitle": "Sign in → Install CLI → Auto-connect",
+  "onboarding.start": "Get Started",
+
+  // ConnectWizard
+  "connect.step": "Step {step} of 2",
+  "connect.step1.title": "AgentLore Account",
+  "connect.step1.benefit1": "Cloud connect (no IP setup needed)",
+  "connect.step1.benefit2": "AI Knowledge Base & Skill Chains",
+  "connect.step1.benefit3": "Scheduled automation & cross-device sync",
+  "connect.step1.login": "Sign In / Create Account",
+  "connect.step1.haveCli": "Already have CLI? Connect directly",
+  "connect.step2.title": "Connect Your Computer",
+  "connect.step2.connected": "AgentLore Connected",
+  "connect.step2.instruction": "Run this on your computer:",
+  "connect.step2.detecting": "Installed? Detecting...",
+  "connect.learnMore": "Learn more",
 
   // Chain Builder
   "builder.namePlaceholder": "Chain name...",

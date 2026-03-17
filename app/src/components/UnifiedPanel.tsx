@@ -1,4 +1,4 @@
-// components/UnifiedPanel.tsx
+﻿// components/UnifiedPanel.tsx
 // Unified home screen: 3 top-level tabs (Projects / Schedules / Templates)
 // Replaces the 2-panel ProjectOverview with a single vertical-scrolling page.
 import React, { useState, useEffect, useRef, useCallback } from "react"
@@ -7,15 +7,21 @@ import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
 import { AutomationSheet } from "./AutomationSheet"
+import AutomationReportSheet from "./AutomationReportSheet"
 import { BUILTIN_TEMPLATES } from "../data/builtin-templates"
 import { CHAIN_TEMPLATES, BUILTIN_CREWS } from "../data/builtin-crews"
-import type { AutomationTemplate } from "../data/automation-types"
+import type { AutomationResult, AutomationTemplate } from "../data/automation-types"
 import type { ChainDepth } from "../lib/skillChains"
 import { BUILTIN_CHAINS, isParallelGroup, resolveChainText, estimateTokens, getStepCount } from "../lib/skillChains"
 import { useLocale } from "../lib/i18n"
 import { trackProjectSwitch, trackTabSwitch } from "../lib/analytics"
 import { ChainBuilder } from "./ChainBuilder"
 import { PrdPage } from "./PrdPage"
+import { buildApiUrl, canUseApi } from "../lib/storage"
+import {
+  buildAutomationReport,
+  getAutomationResultStatusLabel,
+} from "../lib/automation-report"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -51,7 +57,7 @@ const isCrew = (tmpl: AutomationTemplate) => tmpl.category === "crew" && (tmpl.c
 const isChain = (tmpl: AutomationTemplate) => tmpl.id.startsWith("chain_")
 const isPrompt = (tmpl: AutomationTemplate) => !isChain(tmpl) && !isCrew(tmpl)
 
-// Map builtin template IDs → { CREW_ROLE_ICONS key, circle color }
+// Map builtin template IDs ??{ CREW_ROLE_ICONS key, circle color }
 const BUILTIN_TPL_ICON: Record<string, { icon: string; color: string }> = {
   scan_commits: { icon: "search", color: "#37ACC0" },
   release_notes: { icon: "clipboard-list", color: "#347792" },
@@ -133,8 +139,8 @@ function isLabelNoise(title: string): boolean {
   if (title === "Token usage") return true
   if (/^Thinking\.{0,3}$/i.test(title)) return true
   if (/^Processing\.{0,3}$/i.test(title)) return true
-  if (/^初始化/i.test(title)) return true
-  if (/^工作階段已(開始|結束)$/i.test(title)) return true
+  if (/^思考中\.{0,3}$/i.test(title)) return true
+  if (/^(已更新|最新進度|結果)$/i.test(title)) return true
   if (/^Session (started|ended|resumed)/i.test(title)) return true
   if (/^Permission requested/i.test(title)) return true
   if (/^Agent is requesting/i.test(title)) return true
@@ -194,6 +200,18 @@ function getSessionStatus(events: AgentEvent[]): string {
   return "idle"
 }
 
+function getAutomationResultMeta(status: AutomationResult["status"], locale: "en" | "zh-TW"): { label: string; color: string } {
+  if (status === "success") return { label: getAutomationResultStatusLabel(status, locale), color: "#22c55e" }
+  if (status === "timeout") return { label: getAutomationResultStatusLabel(status, locale), color: "#f59e0b" }
+  if (status === "pending_reauth") return { label: getAutomationResultStatusLabel(status, locale), color: "#FB7185" }
+  if (status === "interrupted") return { label: getAutomationResultStatusLabel(status, locale), color: "#f97316" }
+  if (status === "skipped_no_action" || status === "skipped_no_confirmation" || status === "skipped_daily_limit") {
+    return { label: getAutomationResultStatusLabel(status, locale), color: "#94a3b8" }
+  }
+  if (status === "blocked_by_risk") return { label: getAutomationResultStatusLabel(status, locale), color: "#ef4444" }
+  return { label: getAutomationResultStatusLabel(status, locale), color: "#ef4444" }
+}
+
 function getSessionLabels(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem("agentrune_session_labels") || "{}") } catch { return {} }
 }
@@ -239,6 +257,16 @@ export function UnifiedPanel({
   // --- Locale ---
   const { t, locale } = useLocale()
   const speechLang = locale === "zh-TW" ? "zh-TW" : "en-US"
+  const reportLocale = locale === "zh-TW" ? "zh-TW" : "en"
+  const reportCopy = reportLocale === "zh-TW"
+    ? {
+        viewLabel: "查看完整報告",
+        emptySummary: "這次執行還沒有可讀摘要。",
+      }
+    : {
+        viewLabel: "View Full Report",
+        emptySummary: "No readable summary is available yet.",
+      }
 
   // --- Template helpers ---
   const tplName = (tmpl: AutomationTemplate) => {
@@ -265,7 +293,7 @@ export function UnifiedPanel({
       const ct = t(ck)
       if (ct !== ck) {
         const tokens = tmpl.crew?.tokenBudget
-        return tokens ? `${ct} · ${tokens.toLocaleString()} tokens` : ct
+        return tokens ? `${ct} 繚 ${tokens.toLocaleString()} tokens` : ct
       }
       return tmpl.description
     }
@@ -304,7 +332,8 @@ export function UnifiedPanel({
   const [projectAutomations, setProjectAutomations] = useState<Array<{ id: string; projectId: string; name: string; prompt: string; enabled: boolean; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; templateId?: string; agentId?: string; runMode?: string; skill?: string; nextRunAt?: number; lastResult?: { status: string; startedAt: number; finishedAt?: number; duration?: number } }>>([])
   const [automationsLoading, setAutomationsLoading] = useState(false)
   const [expandedResults, setExpandedResults] = useState<string | null>(null)
-  const [resultsData, setResultsData] = useState<Map<string, Array<{ id: string; status: string; startedAt: number; finishedAt: number; duration?: number; output: string }>>>(new Map())
+  const [resultsData, setResultsData] = useState<Map<string, AutomationResult[]>>(new Map())
+  const [resultReportTarget, setResultReportTarget] = useState<{ automationId: string; automationName: string; resultId: string } | null>(null)
   const [contextSessionId, setContextSessionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -365,11 +394,11 @@ export function UnifiedPanel({
   // --- Fetch automation counts ---
   useEffect(() => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl || projects.length === 0) return
+    if (!canUseApi(serverUrl) || projects.length === 0) return
     const counts = new Map<string, number>()
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(`${serverUrl}/api/automations/${p.id}`)
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
         if (res.ok) {
           const autos: { enabled: boolean }[] = await res.json()
           const enabled = autos.filter((a) => a.enabled).length
@@ -383,12 +412,12 @@ export function UnifiedPanel({
   useEffect(() => {
     if (activeTab !== "schedules") return
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return
+    if (!canUseApi(serverUrl)) return
     setAutomationsLoading(true)
     // Fetch for all projects
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(`${serverUrl}/api/automations/${p.id}`)
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
         if (res.ok) return { projectId: p.id, items: await res.json() }
       } catch {}
       return { projectId: p.id, items: [] }
@@ -499,11 +528,11 @@ export function UnifiedPanel({
     if (cached && latestEventTs <= cached.timestamp) return
 
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return
+    if (!canUseApi(serverUrl)) return
 
     setSummaryLoading(prev => new Set(prev).add(projectId))
     try {
-      const res = await fetch(`${serverUrl}/api/project-summary`, {
+      const res = await fetch(buildApiUrl("/api/project-summary", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ projectId }),
@@ -661,9 +690,8 @@ export function UnifiedPanel({
 
   const callCleanupAPI = async (text: string, aid: string): Promise<string> => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!serverUrl) return text
     try {
-      const res = await fetch(`${serverUrl}/api/voice-cleanup`, {
+      const res = await fetch(buildApiUrl("/api/voice-cleanup", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, agentId: aid }),
@@ -689,7 +717,7 @@ export function UnifiedPanel({
     if (isEdit) {
       const serverUrl = localStorage.getItem("agentrune_server") || ""
       try {
-        const res = await fetch(`${serverUrl}/api/voice-edit`, {
+        const res = await fetch(buildApiUrl("/api/voice-edit", serverUrl), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ original: voiceEditOriginal.current, instruction: raw }),
@@ -715,7 +743,7 @@ export function UnifiedPanel({
 
   const sendVoice = () => {
     if (voiceSessionId && voiceText.trim() && onSessionInput) {
-      onSessionInput(voiceSessionId, `[語音指令] ${voiceText.trim()}\n`)
+      onSessionInput(voiceSessionId, `[隤?誘] ${voiceText.trim()}\n`)
       if (navigator.vibrate) navigator.vibrate(20)
     }
     voiceEditOriginal.current = ""
@@ -934,7 +962,7 @@ export function UnifiedPanel({
             fontSize: 12, color: "var(--text-secondary)",
             fontWeight: 500, marginTop: 4,
           }}>
-            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} · {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
+            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} 繚 {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1108,8 +1136,8 @@ export function UnifiedPanel({
                   marginBottom: 20,
                   borderRadius: 16,
                   background: theme === "dark"
-                    ? "rgba(52,119,146,0.08)"   // #347792 tinted glass — dark
-                    : "rgba(189,209,198,0.15)",  // #BDD1C6 tinted glass — light
+                    ? "rgba(52,119,146,0.08)"   // #347792 tinted glass ??dark
+                    : "rgba(189,209,198,0.15)",  // #BDD1C6 tinted glass ??light
                   backdropFilter: "blur(24px) saturate(1.4)", WebkitBackdropFilter: "blur(24px) saturate(1.4)",
                   border: theme === "dark"
                     ? "1px solid rgba(55,172,192,0.12)"   // #37ACC0 tint border
@@ -1332,10 +1360,19 @@ export function UnifiedPanel({
                               flexShrink: 0,
                             }}
                           >
-                            <button
+                            <div
+                              role="button"
+                              tabIndex={0}
                               onClick={() => {
                                 if (longPressFired.current) return
                                 onSelectSession(session.id)
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault()
+                                  if (longPressFired.current) return
+                                  onSelectSession(session.id)
+                                }
                               }}
                               onTouchStart={() => {
                                 longPressFired.current = false
@@ -1440,7 +1477,7 @@ export function UnifiedPanel({
                                   <MicIcon size={14} />
                                 </button>
                               </div>
-                            </button>
+                            </div>
                           </div>
                         )
                       })}
@@ -1448,7 +1485,7 @@ export function UnifiedPanel({
                     </div>
                   )}
 
-                  {/* No sessions — small dashed card in tray */}
+                  {/* No sessions ??small dashed card in tray */}
                   {sessionCount === 0 && (
                     <div style={{
                       margin: "4px 10px 0",
@@ -1490,7 +1527,7 @@ export function UnifiedPanel({
               )
             })}
 
-            {/* New session button — always visible at bottom of project list */}
+            {/* New session button ??always visible at bottom of project list */}
             {projects.length > 0 && (
               <button
                 onClick={() => setShowNewSheet(true)}
@@ -1507,7 +1544,7 @@ export function UnifiedPanel({
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
-                {t("overview.newProject") || "New Project"}
+                {t("overview.newSession") || "New Session"}
               </button>
             )}
           </div>
@@ -1594,7 +1631,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, {
+                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), {
                               method: "PATCH", headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ enabled: !auto.enabled }),
                             })
@@ -1637,7 +1674,7 @@ export function UnifiedPanel({
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
                           try {
-                            await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}`, { method: "DELETE" })
+                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), { method: "DELETE" })
                             setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                           } catch {}
                         }}
@@ -1669,7 +1706,7 @@ export function UnifiedPanel({
                             if (!resultsData.has(auto.id)) {
                               const serverUrl = localStorage.getItem("agentrune_server") || ""
                               try {
-                                const res = await fetch(`${serverUrl}/api/automations/${auto.projectId}/${auto.id}/results`)
+                                const res = await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}/results`, serverUrl))
                                 if (res.ok) {
                                   const data = await res.json()
                                   setResultsData(prev => new Map(prev).set(auto.id, data))
@@ -1687,7 +1724,7 @@ export function UnifiedPanel({
                             color: auto.lastResult.status === "success" ? "#22c55e" : "#ef4444",
                             fontWeight: 600,
                           }}>
-                            {auto.lastResult.status === "success" ? "OK" : "FAIL"}
+                            {getAutomationResultStatusLabel(auto.lastResult.status as AutomationResult["status"], reportLocale)}
                           </span>
                           <span>{new Date(auto.lastResult.startedAt).toLocaleString()}</span>
                           {auto.lastResult.duration != null && (
@@ -1713,41 +1750,73 @@ export function UnifiedPanel({
                               <div style={{ fontSize: 10, color: "var(--text-secondary)", opacity: 0.5, padding: 8 }}>Loading...</div>
                             )}
                             {(resultsData.get(auto.id) || []).slice().reverse().map((r) => {
+                              const resultMeta = getAutomationResultMeta(r.status, reportLocale)
+                              const rawReport = buildAutomationReport(r, reportLocale)
+                              const report = { ...rawReport, summary: rawReport.summary || reportCopy.emptySummary }
                               const dur = r.finishedAt - r.startedAt
                               const durStr = dur > 60000
                                 ? `${Math.floor(dur / 60000)}m ${Math.round((dur % 60000) / 1000)}s`
                                 : `${Math.round(dur / 1000)}s`
                               return (
-                                <div key={r.id} style={{
-                                  padding: "6px 8px", borderRadius: 8,
-                                  background: "var(--bg-secondary, rgba(0,0,0,0.05))",
-                                  fontSize: 10,
-                                }}>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                                <button
+                                  key={r.id}
+                                  onClick={() => setResultReportTarget({ automationId: auto.id, automationName: auto.name, resultId: r.id })}
+                                  style={{
+                                    padding: "10px 10px 9px",
+                                    borderRadius: 10,
+                                    background: "var(--bg-secondary, rgba(0,0,0,0.05))",
+                                    fontSize: 10,
+                                    border: "1px solid var(--glass-border)",
+                                    textAlign: "left",
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: 8,
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{
                                       width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-                                      background: r.status === "success" ? "#22c55e" : r.status === "timeout" ? "#f59e0b" : "#ef4444",
+                                      background: resultMeta.color,
                                     }} />
-                                    <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
-                                      {r.status === "success" ? "OK" : r.status === "timeout" ? "TIMEOUT" : "FAIL"}
+                                    <span style={{ fontWeight: 700, color: resultMeta.color }}>
+                                      {resultMeta.label}
                                     </span>
                                     <span style={{ color: "var(--text-secondary)" }}>{durStr}</span>
                                     <span style={{ marginLeft: "auto", color: "var(--text-secondary)", opacity: 0.6 }}>
                                       {new Date(r.startedAt).toLocaleString()}
                                     </span>
                                   </div>
-                                  {r.output && (
-                                    <pre style={{
-                                      margin: 0, padding: "4px 6px", borderRadius: 6,
-                                      background: "var(--bg-primary, rgba(0,0,0,0.1))",
-                                      color: "var(--text-secondary)", fontSize: 9, lineHeight: 1.4,
-                                      maxHeight: 120, overflowY: "auto", overflowX: "hidden",
-                                      whiteSpace: "pre-wrap", wordBreak: "break-all",
-                                    }}>
-                                      {r.output.length > 2000 ? r.output.slice(-2000) : r.output}
-                                    </pre>
-                                  )}
-                                </div>
+                                  <div style={{
+                                    padding: "9px 10px",
+                                    borderRadius: 8,
+                                    background: "rgba(255,255,255,0.45)",
+                                    color: "var(--text-primary)",
+                                    fontSize: 11,
+                                    lineHeight: 1.55,
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                  }}>
+                                    {report.summary || reportCopy.emptySummary}
+                                  </div>
+                                  <div style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: 8,
+                                    color: "#37ACC0",
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                  }}>
+                                    <span>{reportCopy.viewLabel}</span>
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                      <polyline points="14 2 14 8 20 8" />
+                                      <line x1="16" y1="13" x2="8" y2="13" />
+                                      <line x1="16" y1="17" x2="8" y2="17" />
+                                    </svg>
+                                  </div>
+                                </button>
                               )
                             })}
                             {resultsData.has(auto.id) && (resultsData.get(auto.id) || []).length === 0 && (
@@ -1957,14 +2026,14 @@ export function UnifiedPanel({
                   const roles = tmpl.crew?.roles || []
                   const isChain = tmpl.id.startsWith("chain_")
                   const isMultiCrew = tmpl.category === "crew" && roles.length > 1
-                  // isChain = single-role skill chain template (tap → ChainBuilder)
-                  // isMultiCrew = multi-role crew (tap → expand to see roles)
-                  // neither = pure prompt template (tap → expand to see prompt)
+                  // isChain = single-role skill chain template (tap ??ChainBuilder)
+                  // isMultiCrew = multi-role crew (tap ??expand to see roles)
+                  // neither = pure prompt template (tap ??expand to see prompt)
                   const chainSlug = isChain ? tmpl.id.replace("chain_", "") : (isMultiCrew ? null : roles[0]?.skillChainSlug)
                   const chain = chainSlug ? BUILTIN_CHAINS.find(c => c.slug === chainSlug) : null
                   const depth = chainDepths[tmpl.id] || "standard"
 
-                  // ─── Chain card: tap opens ChainBuilder, action buttons inline ───
+                  // ??? Chain card: tap opens ChainBuilder, action buttons inline ???
                   if (isChain && chain) {
                     return (
                       <div key={tmpl.id} style={{
@@ -1988,7 +2057,7 @@ export function UnifiedPanel({
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {getStepCount(chain)} {t("crew.chainSteps")} · {estimateTokens(chain, depth).toLocaleString()} tokens
+                            {getStepCount(chain)} {t("crew.chainSteps")} 繚 {estimateTokens(chain, depth).toLocaleString()} tokens
                           </div>
                         </div>
                         {/* Inline action buttons */}
@@ -2033,7 +2102,7 @@ export function UnifiedPanel({
                     )
                   }
 
-                  // ─── Multi-role crew and pure prompt: expandable cards ───
+                  // ??? Multi-role crew and pure prompt: expandable cards ???
                   return (
                     <div key={tmpl.id}>
                       <button
@@ -2096,7 +2165,7 @@ export function UnifiedPanel({
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {isMultiCrew
-                              ? `${roles.length} ${t("fireCrew.roles")} · ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
+                              ? `${roles.length} ${t("fireCrew.roles")} 繚 ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
                               : tplDesc(tmpl)
                             }
                           </div>
@@ -2137,8 +2206,8 @@ export function UnifiedPanel({
                                       {t(r.nameKey) !== r.nameKey ? t(r.nameKey) : r.nameKey}
                                     </div>
                                     <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                      {t("crew.phase").replace("{n}", String(r.phase))} · {(r.estimatedTokens || 0).toLocaleString()} tokens
-                                      {r.skillChainSlug && ` · ${r.skillChainSlug}`}
+                                      {t("crew.phase").replace("{n}", String(r.phase))} 繚 {(r.estimatedTokens || 0).toLocaleString()} tokens
+                                      {r.skillChainSlug && ` 繚 ${r.skillChainSlug}`}
                                     </div>
                                   </div>
                                 </div>
@@ -2237,7 +2306,7 @@ export function UnifiedPanel({
                   return <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{filtered.map(renderCard)}</div>
                 }
 
-                // Group by type: Crew → Chain → Prompt (priority order)
+                // Group by type: Crew ??Chain ??Prompt (priority order)
                 const typeGroups = [
                   { key: "crew", label: t("templates.filterCrew"), test: isCrew },
                   { key: "chain", label: t("templates.filterChain"), test: isChain },
@@ -2436,7 +2505,7 @@ export function UnifiedPanel({
                 if (e.key === "Enter" && projectRenameValue.trim()) {
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
                   try {
-                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                    await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ name: projectRenameValue.trim() }),
@@ -2472,7 +2541,7 @@ export function UnifiedPanel({
                   if (!projectRenameValue.trim()) return
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
                   try {
-                    await fetch(`${serverUrl}/api/projects/${renamingProjectId}`, {
+                    await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ name: projectRenameValue.trim() }),
@@ -2981,6 +3050,15 @@ export function UnifiedPanel({
       )}
       </AnimatePresence>
 
+      <AutomationReportSheet
+        open={!!resultReportTarget}
+        automationName={resultReportTarget?.automationName || ""}
+        results={resultsData.get(resultReportTarget?.automationId || "") || []}
+        selectedResultId={resultReportTarget?.resultId || null}
+        onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)}
+        onClose={() => setResultReportTarget(null)}
+      />
+
       {/* AutomationSheet */}
       <AutomationSheet
         open={showAutomation}
@@ -3175,3 +3253,4 @@ export function UnifiedPanel({
     </div>
   )
 }
+

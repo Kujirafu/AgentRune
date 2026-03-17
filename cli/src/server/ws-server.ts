@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, basename, dirname, isAbsolute, resolve, normalize, sep } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { execFileSync, spawn as childSpawn } from "node:child_process"
-import { randomInt } from "node:crypto"
+import { randomInt, randomBytes } from "node:crypto"
 import * as childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { PtyManager } from "./pty-manager.js"
@@ -31,11 +31,16 @@ import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath,
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
+import { AGENT_INSTALL_INFO, buildAgentLaunch, isLaunchAgentId, normalizeAgentSettings } from "./agent-launch.js"
+import { buildSessionActivityPayload, shouldSendCrashPush } from "./crash-notification.js"
+import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
 import { log } from "../shared/logger.js"
+import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
 import type { AgentEvent, TaskStore, PrdItem, PrdPriority, Project } from "../shared/types.js"
+import type { LaunchAgentId, NormalizedAgentSettings } from "./agent-launch.js"
 
 // --- Terminal Web UI (desktop sync) ---
-function getTerminalHtml(): string {
+function getTerminalHtml(nonce: string): string {
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
@@ -68,11 +73,11 @@ function getTerminalHtml(): string {
 <div id="terminal"></div>
 <div id="input-bar">
   <input id="cmd" placeholder="Type command or message..." autofocus>
-  <button onclick="sendCmd()">Send</button>
+  <button id="send-btn">Send</button>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-<script>
+<script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script nonce="${nonce}">
 const term = new Terminal({ theme: { background: '#1a1a2e', foreground: '#e2e8f0' }, fontSize: 14, cursorBlink: true });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
@@ -126,6 +131,7 @@ function sendCmd() {
 document.getElementById('cmd').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendCmd();
 });
+document.getElementById('send-btn').addEventListener('click', sendCmd);
 
 // Also forward raw keyboard to PTY for interactive use
 term.onData((data) => {
@@ -176,80 +182,44 @@ function ct(key: string, locale?: string, vars?: Record<string, string>): string
   return text
 }
 // Get locale for a session from its stored launch settings
-function getSessionLocale(sessionId: string, launchSettings: Map<string, { agentId: string; settings: Record<string, unknown>; projectId: string }>): string {
-  return (launchSettings.get(sessionId)?.settings?.locale as string) || "en"
+type LaunchSessionState = {
+  agentId: LaunchAgentId
+  settings: NormalizedAgentSettings
+  projectId: string
 }
 
-// --- Agent command builder ---
+function asSettingsRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
 
-function buildAgentProtocol(locale?: string, projectId?: string, localPort: number = 3457): string {
-  // Sanitize locale to prevent shell injection via double-quoted strings
-  const safeLocale = locale ? locale.replace(/[^a-zA-Z0-9_-]/g, "") : ""
-  const langHint = safeLocale ? ` Respond in the user's language (${safeLocale}).` : ""
-  // PRD hint — tell agent how to list and interact with PRDs
-  const safeProjectId = projectId ? projectId.replace(/[^a-zA-Z0-9_-]/g, "_") : ""
-  let prdHint = ""
-  if (safeProjectId) {
-    // Count active PRDs to give agent context
-    const prdDir = join(homedir(), ".agentrune", "prd", safeProjectId)
-    let activeCount = 0
-    try {
-      const files = readdirSync(prdDir).filter(f => f.endsWith(".json"))
-      for (const f of files) {
-        try {
-          const p = JSON.parse(readFileSync(join(prdDir, f), "utf-8"))
-          if (p.status === "active") activeCount++
-        } catch {}
-      }
-    } catch {}
-    if (activeCount > 0) {
-      // Only a short hint here — full API details are in .agentrune/rules.md ## PRD API
-      prdHint = ` PRD: This project has ${activeCount} active PRD(s). See .agentrune/rules.md for PRD API details.`
-    }
-  }
+function getSessionLocale(sessionId: string, launchSettings: Map<string, LaunchSessionState>): string {
+  return launchSettings.get(sessionId)?.settings.locale || "en"
+}
+
+function isPlainNumberDecisionInput(input: string | undefined): boolean {
+  return typeof input === "string" && /^\d+\r?\n?$/.test(input)
+}
+
+function buildCrashRestartOptions(locale?: string) {
+  const isZh = locale?.toLowerCase().startsWith("zh")
   return [
-    "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-    `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
-    "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
-    prdHint,
-  ].join(" ")
+    { label: ct("crash.restartClaude", locale), input: "__restart_agent__claude", style: "primary" as const },
+    { label: ct("crash.restartCodex", locale), input: "__restart_agent__codex", style: "default" as const },
+    { label: ct("crash.restartGemini", locale), input: "__restart_agent__gemini", style: "default" as const },
+    { label: ct("crash.restartAider", locale), input: "__restart_agent__aider", style: "default" as const },
+    { label: ct("crash.restartCursor", locale), input: "__restart_agent__cursor", style: "default" as const },
+    { label: isZh ? "重啟 OpenClaw" : "Restart OpenClaw", input: "__restart_agent__openclaw", style: "default" as const },
+    { label: isZh ? "重啟 Cline" : "Restart Cline", input: "__restart_agent__cline", style: "default" as const },
+    { label: ct("crash.closeSession", locale), input: "__close_session__", style: "danger" as const },
+    { label: ct("crash.ignore", locale), input: "__dismiss_crash__", style: "default" as const },
+  ]
 }
 
-/** Append model, effort, permission-mode, and system-prompt flags to a Claude CLI command */
-function appendClaudeFlags(cmd: string, s: Record<string, unknown>, projectId?: string, port: number = 3457): string {
-  if (s.model && s.model !== "sonnet" && /^[a-zA-Z0-9._-]+$/.test(s.model as string)) cmd += ` --model ${s.model}`
-  if (s.claudeEffort && s.claudeEffort !== "default" && /^(low|medium|high|max)$/.test(s.claudeEffort as string)) cmd += ` --effort ${s.claudeEffort}`
-  if (s.bypass === true) {
-    cmd += " --dangerously-skip-permissions"
-  } else if (s.planMode === true) {
-    cmd += " --permission-mode plan"
-  } else if (s.autoEdit === true) {
-    cmd += " --permission-mode acceptEdits"
-  }
-  cmd += ` --append-system-prompt "${buildAgentProtocol(s.locale as string, projectId, port).replace(/"/g, '\\"')}"`
-  return cmd
-}
-
-function buildAgentCommand(agentId: string, settings?: Record<string, unknown>, projectId?: string, port: number = 3457): string | null {
-  const s = settings || {}
-  switch (agentId) {
-    case "claude": {
-      return appendClaudeFlags("claude", s, projectId, port)
-    }
-    case "codex":
-      return "codex"
-    case "aider":
-      return "aider"
-    case "gemini":
-      return "gemini"
-    case "cursor":
-      return "agent"
-    case "cline":
-      return "cline"
-    default:
-      return null
-  }
-}
+// Legacy agent command builders removed (2026-03-17 security audit).
+// All agent launches now use buildAgentLaunch() from agent-launch.ts
+// which has strict enum allowlists + safe shell quoting.
 
 // --- Projects ---
 
@@ -258,23 +228,17 @@ function getProjectsPath(): string {
 }
 
 function loadProjects(): Project[] {
+  const fallbackProject: Project = {
+    id: "default",
+    name: "Home",
+    cwd: process.env.HOME || process.env.USERPROFILE || ".",
+  }
   const configPath = getProjectsPath()
-  if (!existsSync(configPath)) {
-    return [{
-      id: "default",
-      name: "Home",
-      cwd: process.env.HOME || process.env.USERPROFILE || ".",
-    }]
+  const loaded = loadProjectsFromDisk(configPath, fallbackProject)
+  if (loaded.changed) {
+    saveProjectsToDisk(configPath, loaded.projects)
   }
-  try {
-    return JSON.parse(readFileSync(configPath, "utf-8"))
-  } catch {
-    return [{
-      id: "default",
-      name: "Home",
-      cwd: process.env.HOME || process.env.USERPROFILE || ".",
-    }]
-  }
+  return loaded.projects
 }
 
 // --- Events persistence ---
@@ -512,15 +476,38 @@ const __wsDir = dirname(fileURLToPath(import.meta.url))
 const cliPkgPath = [join(__wsDir, "..", "package.json"), join(__wsDir, "..", "..", "package.json")]
   .find(p => { try { readFileSync(p); return true } catch { return false } })!
 const cliPkg = JSON.parse(readFileSync(cliPkgPath, "utf-8"))
-let updateInfo: { latest: string; current: string } | null = null
+let updateInfo: { latest: string; current: string; changelog?: string } | null = null
+
+/** Compare two semver strings: returns true if b > a */
+function isNewerVersion(current: string, latest: string): boolean {
+  const a = current.split(".").map(Number)
+  const b = latest.split(".").map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((b[i] || 0) > (a[i] || 0)) return true
+    if ((b[i] || 0) < (a[i] || 0)) return false
+  }
+  return false
+}
 
 async function checkCliUpdate(): Promise<void> {
   try {
     const res = await fetch("https://registry.npmjs.org/agentrune/latest", { signal: AbortSignal.timeout(5000) })
     if (!res.ok) return
-    const data = await res.json() as { version?: string }
-    if (data.version && data.version !== cliPkg.version) {
-      updateInfo = { latest: data.version, current: cliPkg.version }
+    const data = await res.json() as { version?: string; changelog?: string }
+    if (data.version && isNewerVersion(cliPkg.version, data.version)) {
+      // Fetch changelog from GitHub release tag
+      let changelog: string | undefined
+      try {
+        const ghRes = await fetch(`https://api.github.com/repos/Kujirafu/AgentRune/releases/tags/v${data.version}`, {
+          signal: AbortSignal.timeout(5000),
+          headers: { Accept: "application/vnd.github.v3+json" },
+        })
+        if (ghRes.ok) {
+          const release = await ghRes.json() as { body?: string }
+          changelog = release.body || undefined
+        }
+      } catch {}
+      updateInfo = { latest: data.version, current: cliPkg.version, changelog }
       log.info(`CLI update available: v${cliPkg.version} → v${data.version}`)
     }
   } catch {}
@@ -545,7 +532,7 @@ export function createServer(portOverride?: number) {
     res.header("X-Frame-Options", "DENY")
     res.header("X-XSS-Protection", "1; mode=block")
     res.header("Referrer-Policy", "no-referrer")
-    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
+    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
     next()
   })
 
@@ -574,7 +561,9 @@ export function createServer(portOverride?: number) {
 
   // Serve terminal web UI at root — enables desktop sync terminal
   app.get("/", (_req, res) => {
-    res.type("html").send(getTerminalHtml())
+    const nonce = randomBytes(16).toString("base64")
+    res.header("Content-Security-Policy", `default-src 'self'; script-src 'nonce-${nonce}' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;`)
+    res.type("html").send(getTerminalHtml(nonce))
   })
 
   // Session tokens for WS auth — Map<token, boundIp>
@@ -676,7 +665,7 @@ export function createServer(portOverride?: number) {
       listenRetries++
       if (listenRetries <= 5) {
         log.warn(`Port ${PORT} busy, retrying in 2s... (${listenRetries}/5)`)
-        setTimeout(() => server.listen(PORT), 2000)
+        setTimeout(() => server.listen(PORT, "127.0.0.1"), 2000)
       } else {
         log.error(`Port ${PORT} still in use after 5 retries. Is another instance running?`)
         process.exit(1)
@@ -1147,7 +1136,7 @@ export function createServer(portOverride?: number) {
     const project = { id, name, cwd: resolvedCwd }
     projects.push(project)
 
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json(project)
   })
 
@@ -1157,7 +1146,7 @@ export function createServer(portOverride?: number) {
     const { name } = req.body
     if (!name) return res.status(400).json({ error: "Missing name" })
     projects[idx].name = name
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json(projects[idx])
   })
 
@@ -1165,7 +1154,7 @@ export function createServer(portOverride?: number) {
     const idx = projects.findIndex((p) => p.id === req.params.id)
     if (idx === -1) return res.status(404).json({ error: "Project not found" })
     projects.splice(idx, 1)
-    writeFileSync(getProjectsPath(), JSON.stringify(projects, null, 2))
+    saveProjectsToDisk(getProjectsPath(), projects)
     res.json({ ok: true })
   })
 
@@ -2960,7 +2949,7 @@ export function createServer(portOverride?: number) {
   })
 
   app.post("/api/automations/:projectId", express.json(), (req, res) => {
-    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, model, bypass, crew } = req.body
+    const { name, command, prompt, skill, templateId, schedule, runMode, agentId, locale, model, bypass, crew } = req.body
     // Crew automations don't need a prompt (roles have their own prompts)
     if (!name || !schedule || (!command && !prompt && !crew)) {
       return res.status(400).json({ error: "name, schedule, and (prompt or command or crew) are required" })
@@ -2975,6 +2964,7 @@ export function createServer(portOverride?: number) {
       schedule,
       runMode: runMode || "local",
       agentId: agentId || "claude",
+      locale: typeof locale === "string" ? locale : undefined,
       model: model || undefined,
       bypass: bypass || false,
       enabled: req.body.enabled !== false,
@@ -3256,8 +3246,9 @@ export function createServer(portOverride?: number) {
   const restartGrace = new Map<string, number>()
   // Track restart attempts — if agent exits again after restart, don't re-trigger crash loop
   const crashRestartCount = new Map<string, number>()
+  const crashPushCooldown = new Map<string, number>()
   // Store launch settings per session so we can restart with the same config
-  const sessionLaunchSettings = new Map<string, { agentId: string; settings: Record<string, unknown>; projectId: string }>()
+  const sessionLaunchSettings = new Map<string, LaunchSessionState>()
 
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
@@ -3266,7 +3257,7 @@ export function createServer(portOverride?: number) {
 
     // Push CLI update notification to app
     if (updateInfo) {
-      ws.send(JSON.stringify({ type: "cli_update_available", latest: updateInfo.latest, current: updateInfo.current }))
+      ws.send(JSON.stringify({ type: "cli_update_available", latest: updateInfo.latest, current: updateInfo.current, changelog: updateInfo.changelog }))
     }
 
     // Auth check for WebSocket
@@ -3362,7 +3353,15 @@ export function createServer(portOverride?: number) {
             return
           }
 
-          const agentId = (msg.agentId as string) || "terminal"
+          const requestedAgentId = (msg.agentId as string) || "terminal"
+          if (requestedAgentId !== "terminal" && !isLaunchAgentId(requestedAgentId)) {
+            ws.send(JSON.stringify({ type: "error", message: `Unsupported agent: ${requestedAgentId}` }))
+            return
+          }
+
+          const agentId: LaunchAgentId | "terminal" = requestedAgentId === "terminal" ? "terminal" : requestedAgentId
+          const rawSettings = asSettingsRecord(msg.settings)
+          const normalizedSettings = normalizeAgentSettings(rawSettings)
           const requestedSessionId = msg.sessionId as string | undefined
 
           // Pre-generate session ID so worktree and PTY share the same key
@@ -3452,6 +3451,7 @@ export function createServer(portOverride?: number) {
             }
             crashPending.delete(sid)
             crashRestartCount.delete(sid)
+            crashPushCooldown.delete(sid)
             // Keep restartGrace active (will expire naturally)
 
             const list = sessionRecentEvents.get(sid)
@@ -3490,12 +3490,7 @@ export function createServer(portOverride?: number) {
                   break
                 }
               }
-              const activityMsg = JSON.stringify({
-                type: "session_activity",
-                sessionId: sid,
-                eventTitle: lastEvent.title,
-                agentStatus: lastEvent.status === "waiting" ? "waiting" : lastEvent.status === "completed" ? "idle" : "working",
-              })
+              const activityMsg = JSON.stringify(buildSessionActivityPayload(sid, lastEvent))
               // Only broadcast activity to clients that are connected (scoped)
               for (const [client, csid] of clientSessions) {
                 if (client.readyState === WebSocket.OPEN) {
@@ -3541,7 +3536,7 @@ export function createServer(portOverride?: number) {
               watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, skipReplay)
               log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
-              watcher = new CodexWatcher(cb)
+              watcher = new CodexWatcher(sessionProject.cwd, cb)
             } else if (agentId === "gemini") {
               watcher = new GeminiWatcher(sessionProject.cwd, cb)
             }
@@ -3624,16 +3619,16 @@ export function createServer(portOverride?: number) {
           }
 
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
+          captureCliEvent("cli_session_created", { agentId, projectId, resumed: alreadyExisted })
 
           // For recoverable sessions (daemon restarted, PTY gone but events persisted):
-          // Only auto-resume when user explicitly opens the session (isAgentResume flag from TerminalView).
-          // MissionControl re-attach on WS reconnect does NOT set isAgentResume, preventing
-          // multiple Claude instances from launching simultaneously and crashing the daemon.
+          // auto-resume only when the client marks this attach as a real session resume.
+          // The app flips this on after the first successful attach so reconnects can
+          // recover existing sessions without treating brand-new launches as recoverable.
           // Safety: 10s cooldown between resume operations to prevent resource exhaustion.
           // Store launch settings for crash recovery (recoverable sessions too)
           if (agentId !== "terminal") {
-            const recoverySettings = msg.settings as Record<string, unknown> | undefined
-            sessionLaunchSettings.set(session.id, { agentId, settings: { ...recoverySettings }, projectId: sessionProject.id })
+            sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
           }
 
           const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
@@ -3648,23 +3643,21 @@ export function createServer(portOverride?: number) {
               restartGrace.set(session.id, now)
               crashPending.delete(session.id)
               const claudeId = (msg.claudeSessionId as string) || sessionClaudeMap.get(requestedSessionId)?.claudeSessionId
-              if (agentId === "claude") {
-                const appSettings = msg.settings as Record<string, unknown> | undefined
-                const s = appSettings || {}
-                // Use --resume <id> if we have the Claude session ID, otherwise --continue (most recent)
-                // Validate claudeId format (UUID-like) to prevent command injection
-                const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
-                const cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, sessionProject.id, PORT)
-                setTimeout(() => {
-                    try {
-                      sessions.write(session.id, `${cmd}\r`)
-                      log.info(`[attach] Recoverable session auto-resume: ${cmd}`)
-                    } catch (err: any) {
-                      log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
-                      try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed" })) } catch {}
-                    }
-                  }, 1500)
-              }
+              const launch = buildAgentLaunch(agentId, normalizedSettings, {
+                projectId: sessionProject.id,
+                port: PORT,
+                continueSession: agentId === "claude",
+                resumeSessionId: agentId === "claude" ? claudeId : undefined,
+              })
+              setTimeout(() => {
+                try {
+                  sessions.write(session.id, `${launch.command}\r`)
+                  log.info(`[attach] Recoverable session auto-resume (${agentId}): ${launch.command}`)
+                } catch (err: any) {
+                  log.error(`[attach] Auto-resume PTY write failed: ${err.message}`)
+                  try { ws.send(JSON.stringify({ type: "session_error", sessionId: session.id, error: "Resume failed" })) } catch {}
+                }
+              }, 1500)
             }
           }
 
@@ -3680,24 +3673,21 @@ export function createServer(portOverride?: number) {
               restartGrace.set(session.id, now)
               crashRestartCount.set(session.id, (crashRestartCount.get(session.id) || 0) + 1)
               const launchInfo = sessionLaunchSettings.get(session.id)
-              const restartAgentId = launchInfo?.agentId || agentId || "claude"
-              const settings = launchInfo?.settings || (msg.settings as Record<string, unknown>) || {}
+              const restartAgentId = launchInfo?.agentId || agentId
+              const settings = launchInfo?.settings || normalizedSettings
               const projectId = launchInfo?.projectId || sessionProject.id
 
-              let cmd: string | null = null
-              if (restartAgentId === "claude") {
-                const claudeId = sessionClaudeMap.get(session.id)?.claudeSessionId
-                const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
-                const s = settings
-                cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, projectId, PORT)
-              } else {
-                cmd = buildAgentCommand(restartAgentId, settings, projectId, PORT)
-              }
-              if (cmd) {
+              const launch = buildAgentLaunch(restartAgentId, settings, {
+                projectId,
+                port: PORT,
+                continueSession: restartAgentId === "claude",
+                resumeSessionId: restartAgentId === "claude" ? sessionClaudeMap.get(session.id)?.claudeSessionId : undefined,
+              })
+              if (launch.command) {
                 setTimeout(() => {
                   try {
-                    sessions.write(session.id, `${cmd}\r`)
-                    log.info(`[CRASH-AUTO-RESUME] Auto-restarting ${restartAgentId} in session ${session.id.slice(0, 8)}: ${cmd}`)
+                    sessions.write(session.id, `${launch.command}\r`)
+                    log.info(`[CRASH-AUTO-RESUME] Auto-restarting ${restartAgentId} in session ${session.id.slice(0, 8)}: ${launch.command}`)
                   } catch (err: any) {
                     log.error(`[CRASH-AUTO-RESUME] PTY write failed: ${err.message}`)
                   }
@@ -3722,16 +3712,7 @@ export function createServer(portOverride?: number) {
           // the agent already has context from the previous conversation).
           if (!alreadyExisted && !requestedSessionId && agentId !== "terminal") {
             // --- Auto-install agent binary if missing ---
-            const agentInstallMap: Record<string, { bin: string; npm?: string; pip?: string; script?: string }> = {
-              claude:   { bin: "claude",   npm: "@anthropic-ai/claude-code" },
-              codex:    { bin: "codex",    npm: "@openai/codex" },
-              openclaw: { bin: "openclaw", npm: "openclaw" },
-              aider:    { bin: "aider",    pip: "aider-chat" },
-              cline:    { bin: "cline",    npm: "@anthropic-ai/cline" },
-              gemini:   { bin: "gemini",   npm: "@google/gemini-cli" },
-              cursor:   { bin: "agent",    script: "curl https://cursor.com/install -fsSL | bash" },
-            }
-            const installInfo = agentInstallMap[agentId]
+            const installInfo = AGENT_INSTALL_INFO[agentId]
             if (installInfo) {
               const isWin = process.platform === "win32"
               let checkAndInstall: string
@@ -3757,14 +3738,13 @@ export function createServer(portOverride?: number) {
             // --- Auto-start agent with settings from frontend ---
             // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
             // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
-            const appSettings = msg.settings as Record<string, unknown> | undefined
             // Store launch settings for crash recovery / restart
-            sessionLaunchSettings.set(session.id, { agentId, settings: { ...appSettings }, projectId: sessionProject.id })
-            const agentCmd = buildAgentCommand(agentId, appSettings, sessionProject.id, PORT)
-            if (agentCmd) {
+            sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
+            const launch = buildAgentLaunch(agentId, normalizedSettings, { projectId: sessionProject.id, port: PORT })
+            if (launch.command) {
               setTimeout(() => {
-                sessions.write(session.id, `${agentCmd}\r`)
-                log.info(`[attach] Agent auto-start: ${agentCmd}`)
+                sessions.write(session.id, `${launch.command}\r`)
+                log.info(`[attach] Agent auto-start: ${launch.command}`)
               }, 1500)
             }
 
@@ -3894,33 +3874,25 @@ export function createServer(portOverride?: number) {
                 restartGrace.set(sessionId, Date.now())
                 crashRestartCount.set(sessionId, (crashRestartCount.get(sessionId) || 0) + 1)
                 // Parse agentId from suffix: __restart_agent__claude → "claude"
-                const ALLOWED_AGENTS = new Set(["claude", "codex", "gemini", "aider", "cursor", "cline"])
                 const rawRestartAgent = inputStr.replace("__restart_agent__", "").trim()
-                const restartAgentId = ALLOWED_AGENTS.has(rawRestartAgent) ? rawRestartAgent : null
+                const restartAgentId = isLaunchAgentId(rawRestartAgent) ? rawRestartAgent : null
                 const launchInfo = sessionLaunchSettings.get(sessionId)
                 // Use explicitly selected agent, fall back to saved launch settings, then default to "claude"
                 const agentId = restartAgentId || launchInfo?.agentId || "claude"
-                const settings = launchInfo?.settings || {}
-                const projectId = launchInfo?.projectId
+                const settings = launchInfo?.settings || normalizeAgentSettings()
+                const projectId = launchInfo?.projectId || sessions.get(sessionId)?.project.id
 
-                // Try to resume with --resume if we have a Claude session ID
-                let cmd: string | null = null
-                if (agentId === "claude") {
-                  const claudeId = sessionClaudeMap.get(sessionId)?.claudeSessionId
-                  const safeClaudeId = claudeId && /^[a-zA-Z0-9_-]+$/.test(claudeId) ? claudeId : null
-                  const s = settings
-                  cmd = appendClaudeFlags(safeClaudeId ? "claude --resume " + safeClaudeId : "claude --continue", s, projectId, PORT)
-                } else {
-                  cmd = buildAgentCommand(agentId, settings, projectId, PORT)
-                }
-                const agentCmd = cmd
-                if (agentCmd) {
-                  sessions.write(sessionId, `${agentCmd}\r`)
-                  log.info(`[CRASH-RESTART] Restarting ${agentId} in session ${sessionId.slice(0, 8)}: ${agentCmd}`)
+                const launch = buildAgentLaunch(agentId, settings, {
+                  projectId,
+                  port: PORT,
+                  continueSession: agentId === "claude",
+                  resumeSessionId: agentId === "claude" ? sessionClaudeMap.get(sessionId)?.claudeSessionId : undefined,
+                })
+                if (launch.command) {
+                  sessions.write(sessionId, `${launch.command}\r`)
+                  log.info(`[CRASH-RESTART] Restarting ${agentId} in session ${sessionId.slice(0, 8)}: ${launch.command}`)
                   // Update launch settings to reflect the new agent choice
-                  if (launchInfo) {
-                    sessionLaunchSettings.set(sessionId, { ...launchInfo, agentId })
-                  }
+                  if (projectId) sessionLaunchSettings.set(sessionId, { agentId, settings, projectId })
                   const restartLoc = getSessionLocale(sessionId, sessionLaunchSettings)
                   const restartEvent: AgentEvent = {
                     id: `restart_${Date.now()}`,
@@ -3963,15 +3935,7 @@ export function createServer(portOverride?: number) {
                   title: ct("crash.title", loc),
                   detail: ct("crash.detail", loc),
                   decision: {
-                    options: [
-                      { label: ct("crash.restartClaude", loc),  input: "__restart_agent__claude",  style: "primary" as const },
-                      { label: ct("crash.restartCodex", loc),   input: "__restart_agent__codex",   style: "default" as const },
-                      { label: ct("crash.restartGemini", loc),  input: "__restart_agent__gemini",  style: "default" as const },
-                      { label: ct("crash.restartAider", loc),   input: "__restart_agent__aider",   style: "default" as const },
-                      { label: ct("crash.restartCursor", loc),  input: "__restart_agent__cursor",  style: "default" as const },
-                      { label: ct("crash.closeSession", loc),   input: "__close_session__",        style: "danger" as const },
-                      { label: ct("crash.ignore", loc),         input: "__dismiss_crash__",        style: "default" as const },
-                    ],
+                    options: buildCrashRestartOptions(loc),
                   },
                 }
                 ws.send(JSON.stringify({ type: "event", event: blockEvent }))
@@ -4586,13 +4550,12 @@ export function createServer(portOverride?: number) {
         // but filter as safety net in case of stale adapter code
         if (e.type === "decision_request" && /Resume Session/i.test(e.title || "")) return false
         if (e.type === "decision_request") {
-          // Distinguish real TUI prompts from detectOptions false positives:
-          // Real TUI menus use arrow-key navigation (\x1b[B = down arrow),
-          // while detectOptions on response text uses plain number keys ("1", "2", etc.)
-          // When JSONL watcher is active, block plain-number decisions (false positives).
           const opts = e.decision?.options || []
           const hasArrowKeys = opts.some((o: any) => /\x1b\[/.test(o.input || ""))
-          if (!hasArrowKeys && opts.length > 0) return false  // plain number = false positive
+          const onlyNumberHotkeys = opts.length > 0 && opts.every((o: any) => isPlainNumberDecisionInput(o.input))
+          // Keep yes/no/a prompts from Codex/Cursor, but still block plain numeric menus that
+          // come from output heuristics instead of real approval UIs.
+          if (!hasArrowKeys && onlyNumberHotkeys) return false
           // Dedup: don't re-emit if same title exists within last 5 seconds
           const recent = sessionRecentEvents.get(sessionId) || []
           const hasSame = recent.some(r =>
@@ -4861,13 +4824,17 @@ export function createServer(portOverride?: number) {
               // (e.g., Claude resumed a completed conversation and exited normally)
             } else {
             // Push notification for session crash
+            const crashDetectedAt = Date.now()
             const alCfg2 = cfg.agentlore
-            if (alCfg2) {
+            if (alCfg2 && shouldSendCrashPush(crashPushCooldown.get(sessionId), crashDetectedAt)) {
               const lastTitle = sessionLastTitle.get(sessionId) || sessionAgentId
+              crashPushCooldown.set(sessionId, crashDetectedAt)
               sendPushNotification(alCfg2, `${sessionAgentId} crashed`, lastTitle, {
                 sessionId,
                 type: "session_crashed",
               }).catch(() => {})
+            } else if (alCfg2) {
+              log.dim(`[CRASH-DETECT] Suppressed duplicate crash push for ${sessionId.slice(0, 8)}`)
             }
             // Emit crash event to clients
             const agentLabel = sessionAgentId.charAt(0).toUpperCase() + sessionAgentId.slice(1)
@@ -4880,15 +4847,7 @@ export function createServer(portOverride?: number) {
               title: ct("crash.exited", loc, { agent: agentLabel }),
               detail: ct("crash.exitedDetail", loc),
               decision: {
-                options: [
-                  { label: ct("crash.restartClaude", loc),  input: "__restart_agent__claude",  style: "primary" as const },
-                  { label: ct("crash.restartCodex", loc),   input: "__restart_agent__codex",   style: "default" as const },
-                  { label: ct("crash.restartGemini", loc),  input: "__restart_agent__gemini",  style: "default" as const },
-                  { label: ct("crash.restartAider", loc),   input: "__restart_agent__aider",   style: "default" as const },
-                  { label: ct("crash.restartCursor", loc),  input: "__restart_agent__cursor",  style: "default" as const },
-                  { label: ct("crash.closeSession", loc),   input: "__close_session__",        style: "danger" as const },
-                  { label: ct("crash.ignore", loc),         input: "__dismiss_crash__",        style: "default" as const },
-                ],
+                options: buildCrashRestartOptions(loc),
               },
             }
             events.push(crashEvent)
@@ -4941,12 +4900,7 @@ export function createServer(portOverride?: number) {
           break
         }
       }
-      const activityMsg = JSON.stringify({
-        type: "session_activity",
-        sessionId,
-        eventTitle: lastEvent.title,
-        agentStatus: lastEvent.status === "waiting" ? "waiting" : lastEvent.status === "completed" ? "idle" : "working",
-      })
+      const activityMsg = JSON.stringify(buildSessionActivityPayload(sessionId, lastEvent))
       for (const [client] of clientSessions) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(activityMsg)
@@ -4956,6 +4910,8 @@ export function createServer(portOverride?: number) {
   })
 
   sessions.on("exit", (sessionId: string) => {
+    captureCliEvent("cli_session_ended", { sessionId: sessionId.slice(0, 20) })
+
     // Push notification for session exit
     const alCfg = cfg.agentlore
     if (alCfg) {
@@ -4982,6 +4938,7 @@ export function createServer(portOverride?: number) {
     crashPending.delete(sessionId)
     restartGrace.delete(sessionId)
     crashRestartCount.delete(sessionId)
+    crashPushCooldown.delete(sessionId)
     lastJsonlActivity.delete(sessionId)
     pendingToolUse.delete(sessionId)
     sessionLaunchSettings.delete(sessionId)
@@ -5038,7 +4995,7 @@ export function createServer(portOverride?: number) {
       // Retry tunnel in background — never crash the daemon
       const retryTunnel = async (attempt: number): Promise<void> => {
         try {
-          if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only`); return }
+          if (attempt > 3) { log.warn(`Tunnel retry exhausted after ${attempt} attempts, staying LAN-only (background recovery active)`); return }
           // Check Cloudflare rate limit first
           const { checkCloudflareRateLimit } = await import("./tunnel.js")
           const waitSeconds = await checkCloudflareRateLimit()
@@ -5081,10 +5038,47 @@ export function createServer(portOverride?: number) {
         }
       }
       retryTunnel(1).catch((e) => log.warn(`[Tunnel] retry error: ${e.message}`))
+
+      // Background recovery: if fast retries all fail, keep trying every 10 min
+      // Checks Cloudflare health (429 + 500) before attempting — won't get banned
+      const bgRecoveryTimer = setInterval(async () => {
+        if (tunnelState.url) { clearInterval(bgRecoveryTimer); return } // already recovered
+        try {
+          const { checkCloudflareRateLimit, startTunnel: bgStartTunnel } = await import("./tunnel.js")
+          const wait = await checkCloudflareRateLimit() // returns >0 for 429 AND 500
+          if (wait > 0) { log.dim(`[Tunnel] Background recovery skipped — Cloudflare unavailable (wait ${wait}s)`); return }
+          log.info("[Tunnel] Background recovery attempt...")
+          const tunnel = await bgStartTunnel(PORT)
+          tunnelState.url = tunnel.url
+          updateGlobalTunnelUrl(tunnel.url)
+          log.info(`[Tunnel] Background recovery succeeded: ${tunnel.url}`)
+          tunnel.onRestart = (newUrl: string) => {
+            tunnelState.url = newUrl
+            updateGlobalTunnelUrl(newUrl)
+            log.info(`Tunnel URL changed: ${newUrl}`)
+            const agentloreConfig = config.agentlore
+            if (agentloreConfig) {
+              const cloudTokenPath = join(getConfigDir(), "cloud-token")
+              const cloudToken = existsSync(cloudTokenPath) ? readFileSync(cloudTokenPath, "utf-8").trim() : ""
+              if (cloudToken) agentloreHeartbeat(agentloreConfig.token, agentloreConfig.deviceId, PORT, cloudToken, newUrl)
+            }
+          }
+          server.on("close", () => tunnel.stop())
+          clearInterval(bgRecoveryTimer)
+        } catch (bgErr: any) {
+          log.dim(`[Tunnel] Background recovery failed: ${bgErr.message?.slice(0, 100)}`)
+        }
+      }, 10 * 60 * 1000) // every 10 minutes
+    }
+
+    // CLI telemetry — init with deviceId and fire cli_started
+    const agentloreConfig = config.agentlore
+    if (agentloreConfig) {
+      initCliTelemetry(agentloreConfig.deviceId)
+      captureCliEvent("cli_started", { port: PORT, platform: process.platform })
     }
 
     // AgentLore heartbeat
-    const agentloreConfig = config.agentlore
     if (agentloreConfig) {
       const cloudTokenPath = join(getConfigDir(), "cloud-token")
       let cloudToken: string

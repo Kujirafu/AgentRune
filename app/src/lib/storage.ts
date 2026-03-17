@@ -1,5 +1,11 @@
 import { ProjectSettings, DEFAULT_SETTINGS } from "../types"
 
+function isNativeCapacitor(): boolean {
+  return typeof window !== "undefined" &&
+    !!(window as any).Capacitor &&
+    (window as any).Capacitor.isNativePlatform?.() === true
+}
+
 export function getSettings(projectId: string): ProjectSettings {
   try {
     const raw = localStorage.getItem(`agentrune_settings_${projectId}`)
@@ -32,9 +38,19 @@ export function addRecentCommand(projectId: string, cmd: string) {
 }
 
 export function getApiBase(): string {
-  const isCapacitor = typeof window !== "undefined" && !!(window as any).Capacitor
-  if (!isCapacitor) return ""
+  if (!isNativeCapacitor()) return ""
   return localStorage.getItem("agentrune_server") || ""
+}
+
+export function canUseApi(serverUrl = ""): boolean {
+  if (!isNativeCapacitor()) return true
+  return !!(getApiBase() || serverUrl)
+}
+
+export function buildApiUrl(path: string, serverUrl = ""): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`
+  const base = isNativeCapacitor() ? (getApiBase() || serverUrl || "").replace(/\/$/, "") : ""
+  return `${base}${normalizedPath}`
 }
 
 export function getVolumeKeysEnabled(): boolean {

@@ -303,6 +303,7 @@ export const zhTW: Record<string, string> = {
   "mc.getApiKey": "取得 API Key",
   "mc.saveAndRestart": "儲存並重啟",
   "mc.apiKeySaved": "API Key 已儲存，正在重啟工作階段...",
+  "mc.settingsRestarting": "正在重啟工作階段以套用新設定...",
   "mc.cancel": "取消",
   "mc.mergeWorktree": "合併到 Main",
   "mc.mergeWorktreeDesc": "將此工作階段的變更合併回主分支",
@@ -402,6 +403,7 @@ export const zhTW: Record<string, string> = {
 
   // 設定 — Codex
   "settings.codexModel": "Codex 模型",
+  "settings.codexModelDesc": "留空使用預設值，或輸入任何安全的 Codex model id，例如 gpt-5.4。",
   "settings.codexModeDefault": "預設",
   "settings.codexModeDefaultDesc": "使用你的 Codex 設定檔預設值",
   "settings.codexModeFullAuto": "全自動",
@@ -752,6 +754,13 @@ export const zhTW: Record<string, string> = {
   "automation.delete": "刪除",
   "automation.loading": "載入中...",
   "automation.noResults": "尚無執行結果",
+  "automation.summaryReport": "摘要報告",
+  "automation.whatHappened": "做了哪些事情",
+  "automation.resultReport": "結果如何",
+  "automation.issuesRisks": "問題 / 風險",
+  "automation.decisionsNext": "需要你決策 / 下一步",
+  "automation.otherNotes": "其他重點",
+  "automation.fullLog": "完整紀錄",
   "automation.created": "排程已建立",
   "automation.updated": "排程已更新",
   "automation.saveTemplate": "儲存工作流",
@@ -1075,6 +1084,30 @@ export const zhTW: Record<string, string> = {
   "chain.step.qaSecurity": "安全 & 壓力測試",
   "chain.step.qaSecurityFix": "修復安全問題",
   "chain.step.qaReport": "上版準備報告",
+
+  // Onboarding
+  "onboarding.skip": "跳過",
+  "onboarding.slide1.title": "用手機控制 AI Agents",
+  "onboarding.slide1.subtitle": "隨時隨地啟動、監控、審核你電腦上的 AI 開發工作",
+  "onboarding.slide2.title": "AgentLore 驅動一切",
+  "onboarding.slide2.subtitle": "知識庫、Skill Chains、雲端連線、跨裝置同步 — 登入即解鎖",
+  "onboarding.slide3.title": "3 分鐘開始",
+  "onboarding.slide3.subtitle": "登入 → 裝 CLI → 自動連線",
+  "onboarding.start": "開始設定",
+
+  // ConnectWizard
+  "connect.step": "步驟 {step} / 2",
+  "connect.step1.title": "AgentLore 帳號",
+  "connect.step1.benefit1": "雲端連線（免設定 IP）",
+  "connect.step1.benefit2": "AI 知識庫 & Skill Chains",
+  "connect.step1.benefit3": "排程自動化 & 跨裝置同步",
+  "connect.step1.login": "登入 / 建立帳號",
+  "connect.step1.haveCli": "已有 CLI？直接連線",
+  "connect.step2.title": "連接你的電腦",
+  "connect.step2.connected": "AgentLore 已連線",
+  "connect.step2.instruction": "在電腦上執行：",
+  "connect.step2.detecting": "裝好了？偵測中...",
+  "connect.learnMore": "了解更多",
 
   // Chain Builder
   "builder.namePlaceholder": "Chain 名稱...",

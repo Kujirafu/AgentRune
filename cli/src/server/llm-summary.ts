@@ -1,90 +1,217 @@
-// llm-summary.ts
-// Calls an LLM to summarize agent activity logs.
-// Priority: claude CLI (uses user's subscription) → Gemini → Anthropic API → OpenAI API
-
-import { readFileSync } from "node:fs"
 import { spawn } from "node:child_process"
-import { join } from "node:path"
 import { log } from "../shared/logger.js"
 
-const SUMMARY_PROMPT = `你是 AI agent 活動摘要工具。你的任務是摘要 agent 的活動記錄。
+type SummaryProvider = "claude" | "openai" | "gemini"
+type SummaryLocale = "zh-TW" | "ja" | "ko" | "en"
 
-規則：
-- 必須用繁體中文回覆（Traditional Chinese），即使活動記錄是英文
-- 3-5 個重點，用「・」開頭
-- 聚焦：完成了什麼、關鍵改動、遇到的錯誤
-- 只輸出摘要文字，不要加標題、不要解釋、不要用 markdown 格式
-- 如果記錄太少（只有 session started 之類），回覆「尚無有意義的活動」`
+export interface LlmSummaryOptions {
+  locale?: string
+  agentId?: string
+}
 
-const TIMEOUT_MS = 30_000
-
-const HOME = process.env.HOME || process.env.USERPROFILE || ""
+const TIMEOUT_MS = 20_000
+const MAX_INPUT_CHARS = 12_000
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g
+const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+const FE_RE = /\x1b[@-Z\\-_]/g
+const CHARSET_RE = /\x1b[()][0-9A-B]/g
+const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g
 
 function findEnvKey(...keys: string[]): string | null {
-  for (const k of keys) {
-    if (process.env[k]) return process.env[k]!
+  for (const key of keys) {
+    const value = process.env[key]
+    if (value) return value
   }
   return null
 }
 
-// --- Claude CLI (uses user's own subscription, free) ---
+function normalizeLocale(locale?: string): SummaryLocale {
+  const value = (locale || "").toLowerCase()
+  if (value.startsWith("zh")) return "zh-TW"
+  if (value.startsWith("ja")) return "ja"
+  if (value.startsWith("ko")) return "ko"
+  return "en"
+}
 
-async function callClaudeCli(text: string): Promise<string> {
+function sanitizeActivityLog(text: string): string {
+  return text
+    .replace(ANSI_RE, "")
+    .replace(OSC_RE, "")
+    .replace(FE_RE, "")
+    .replace(CHARSET_RE, "")
+    .replace(CONTROL_RE, "")
+    .split(/\r?\n/)
+    .filter((line) => !/^__AGENTRUNE_[A-Z0-9_]+\b/.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function trimForModel(text: string): string {
+  if (text.length <= MAX_INPUT_CHARS) return text
+  return text.slice(-MAX_INPUT_CHARS)
+}
+
+function getLocaleInstructions(locale: SummaryLocale): string {
+  if (locale === "zh-TW") {
+    return "請用繁體中文輸出。產品名、模型名、API 欄位名和必要引用可保留原文，不要硬翻。"
+  }
+  if (locale === "ja") {
+    return "Return the report in Japanese. Keep product names, model names, API field names, and direct quotes in their original form when needed."
+  }
+  if (locale === "ko") {
+    return "Return the report in Korean. Keep product names, model names, API field names, and direct quotes in their original form when needed."
+  }
+  return "Return the report in English. Keep product names, model names, API field names, and direct quotes in their original form when needed."
+}
+
+function getSectionLabels(locale: SummaryLocale) {
+  if (locale === "zh-TW") {
+    return {
+      summary: "摘要",
+      actions: "做了哪些事",
+      results: "結果如何",
+      issues: "問題與風險",
+      decisions: "需要你決策",
+    }
+  }
+
+  if (locale === "ja") {
+    return {
+      summary: "要約",
+      actions: "実施内容",
+      results: "結果",
+      issues: "課題とリスク",
+      decisions: "判断が必要",
+    }
+  }
+
+  if (locale === "ko") {
+    return {
+      summary: "요약",
+      actions: "수행 내용",
+      results: "결과",
+      issues: "문제와 리스크",
+      decisions: "결정 필요",
+    }
+  }
+
+  return {
+    summary: "Summary",
+    actions: "What Happened",
+    results: "Outcome",
+    issues: "Issues & Risks",
+    decisions: "Decision Needed",
+  }
+}
+
+export function buildSummaryPrompt(locale?: string): string {
+  const normalized = normalizeLocale(locale)
+  const labels = getSectionLabels(normalized)
+
+  return [
+    "Rewrite the automation execution output into a short, user-facing markdown report.",
+    getLocaleInstructions(normalized),
+    "Requirements:",
+    `- Use GitHub-flavored markdown with short sections like: ## ${labels.summary}, ## ${labels.actions}, ## ${labels.results}, ## ${labels.issues}, ## ${labels.decisions}. Omit empty sections.`,
+    "- Keep it concise: around 120-220 words.",
+    "- Remove shell noise, ANSI junk, duplicated lines, internal markers, and machine-only chatter.",
+    "- Preserve factual details like post IDs, error codes, retry timing, and file paths when they matter.",
+    "- If the run failed or was skipped, say so plainly.",
+    "- Do not mention that you are summarizing or that you are an AI.",
+  ].join("\n")
+}
+
+export function resolveSummaryProviders(agentId?: string): SummaryProvider[] {
+  const normalized = (agentId || "").toLowerCase()
+  if (normalized === "gemini") return ["gemini", "claude", "openai"]
+  if (normalized === "claude" || normalized === "cline") return ["claude", "openai", "gemini"]
+  if (normalized === "codex" || normalized === "cursor" || normalized === "openai") {
+    return ["openai", "claude", "gemini"]
+  }
+  return ["openai", "claude", "gemini"]
+}
+
+export function shouldUseLlmSummary(text: string): boolean {
+  const cleaned = sanitizeActivityLog(text)
+  if (!cleaned) return false
+  if (cleaned.length >= 220) return true
+  const lineCount = cleaned.split(/\r?\n/).filter(Boolean).length
+  return lineCount >= 4 || /---\s*AgentRune\b/i.test(cleaned)
+}
+
+function runCliSummary(command: string, args: string[], input: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const input = `${SUMMARY_PROMPT}\n\n${text}`
-    const child = spawn("claude", ["-p", "--model", "haiku"], {
-      timeout: TIMEOUT_MS,
+    const child = spawn(command, args, {
       env: { ...process.env },
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     })
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM")
+      } catch {
+        // ignore
+      }
+    }, TIMEOUT_MS)
+
     let stdout = ""
     let stderr = ""
+
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString() })
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString() })
-    child.on("error", (err) => reject(new Error(`claude CLI: ${err.message}`)))
+    child.on("error", (err) => {
+      clearTimeout(timer)
+      reject(new Error(`${command}: ${err.message}`))
+    })
     child.on("close", (code) => {
+      clearTimeout(timer)
       const output = stdout.trim()
-      if (code !== 0) return reject(new Error(`claude CLI exit ${code}: ${stderr.slice(0, 200)}`))
-      if (!output) return reject(new Error("claude CLI: empty output"))
+      if (code !== 0) return reject(new Error(`${command} exit ${code}: ${stderr.slice(0, 200)}`))
+      if (!output) return reject(new Error(`${command}: empty output`))
       resolve(output)
     })
+
     child.stdin.write(input)
     child.stdin.end()
   })
 }
 
-// --- API call helpers ---
+async function callClaudeCli(prompt: string, text: string): Promise<string> {
+  return runCliSummary("claude", ["-p", "--model", "haiku"], `${prompt}\n\n${text}`)
+}
 
-async function callGemini(apiKey: string, text: string): Promise<string> {
-  const model = "gemini-2.0-flash"
+async function callGemini(apiKey: string, prompt: string, text: string): Promise<string> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `${SUMMARY_PROMPT}\n\n${text}` }] }],
+          contents: [{ parts: [{ text: `${prompt}\n\n${text}` }] }],
           generationConfig: { maxOutputTokens: 1024 },
         }),
         signal: controller.signal,
       },
     )
-    clearTimeout(timer)
+
     if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`)
     const data = await res.json() as any
-    return data.candidates[0].content.parts[0].text.trim()
-  } catch (e) {
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || ""
+  } finally {
     clearTimeout(timer)
-    throw e
   }
 }
 
-async function callClaude(apiKey: string, text: string): Promise<string> {
+async function callAnthropic(apiKey: string, prompt: string, text: string): Promise<string> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -96,102 +223,128 @@ async function callClaude(apiKey: string, text: string): Promise<string> {
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
-        system: SUMMARY_PROMPT,
+        system: prompt,
         messages: [{ role: "user", content: text }],
       }),
       signal: controller.signal,
     })
-    clearTimeout(timer)
+
     if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`)
     const data = await res.json() as any
-    return data.content[0].text.trim()
-  } catch (e) {
+    return data.content?.[0]?.text?.trim() || ""
+  } finally {
     clearTimeout(timer)
-    throw e
   }
 }
 
-async function callOpenAI(apiKey: string, text: string): Promise<string> {
+async function callOpenAI(apiKey: string, prompt: string, text: string): Promise<string> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "authorization": `Bearer ${apiKey}`,
+        authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         max_tokens: 1024,
         messages: [
-          { role: "system", content: SUMMARY_PROMPT },
+          { role: "system", content: prompt },
           { role: "user", content: text },
         ],
       }),
       signal: controller.signal,
     })
-    clearTimeout(timer)
+
     if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`)
     const data = await res.json() as any
-    return data.choices[0].message.content.trim()
-  } catch (e) {
+    return data.choices?.[0]?.message?.content?.trim() || ""
+  } finally {
     clearTimeout(timer)
-    throw e
   }
 }
 
-// --- Main export ---
-
-export async function callLlmForSummary(activityLog: string): Promise<string | null> {
-  const trimmed = activityLog.trim()
-  if (!trimmed) return null
-
-  // 1. Claude CLI (uses user's own subscription, no API key needed)
-  try {
-    const result = await callClaudeCli(trimmed)
-    log.info("LLM summary: claude CLI (Haiku)")
-    return result
-  } catch (e: any) {
-    log.warn(`LLM summary claude CLI failed: ${e.message}`)
-  }
-
-  // 2. Gemini (free tier)
-  const geminiKey = findEnvKey("GEMINI_API_KEY", "GOOGLE_API_KEY")
-  if (geminiKey) {
+async function callProvider(provider: SummaryProvider, prompt: string, text: string): Promise<string | null> {
+  if (provider === "claude") {
     try {
-      const result = await callGemini(geminiKey, trimmed)
-      log.info("LLM summary: Gemini API key (flash)")
-      return result
-    } catch (e: any) {
-      log.warn(`LLM summary Gemini failed: ${e.message}`)
+      const cliResult = await callClaudeCli(prompt, text)
+      if (cliResult.trim()) {
+        log.info("LLM summary: Claude Haiku via CLI")
+        return cliResult.trim()
+      }
+    } catch (err: any) {
+      log.warn(`LLM summary Claude CLI failed: ${err.message}`)
+    }
+
+    const anthropicKey = findEnvKey("ANTHROPIC_API_KEY")
+    if (anthropicKey && !anthropicKey.includes("...")) {
+      try {
+        const apiResult = await callAnthropic(anthropicKey, prompt, text)
+        if (apiResult.trim()) {
+          log.info("LLM summary: Claude Haiku via API")
+          return apiResult.trim()
+        }
+      } catch (err: any) {
+        log.warn(`LLM summary Anthropic failed: ${err.message}`)
+      }
     }
   }
 
-  // 3. Anthropic API key (skip placeholders)
-  const anthropicKey = findEnvKey("ANTHROPIC_API_KEY")
-  if (anthropicKey && !anthropicKey.includes("...")) {
-    try {
-      const result = await callClaude(anthropicKey, trimmed)
-      log.info("LLM summary: Anthropic API key (Haiku)")
-      return result
-    } catch (e: any) {
-      log.warn(`LLM summary Anthropic failed: ${e.message}`)
+  if (provider === "openai") {
+    const openaiKey = findEnvKey("OPENAI_API_KEY")
+    if (openaiKey) {
+      try {
+        const result = await callOpenAI(openaiKey, prompt, text)
+        if (result.trim()) {
+          log.info("LLM summary: OpenAI Mini")
+          return result.trim()
+        }
+      } catch (err: any) {
+        log.warn(`LLM summary OpenAI failed: ${err.message}`)
+      }
     }
   }
 
-  // 4. OpenAI API key
-  const openaiKey = findEnvKey("OPENAI_API_KEY")
-  if (openaiKey) {
-    try {
-      const result = await callOpenAI(openaiKey, trimmed)
-      log.info("LLM summary: OpenAI API key (gpt-4o-mini)")
-      return result
-    } catch (e: any) {
-      log.warn(`LLM summary OpenAI failed: ${e.message}`)
+  if (provider === "gemini") {
+    const geminiKey = findEnvKey("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    if (geminiKey) {
+      try {
+        const result = await callGemini(geminiKey, prompt, text)
+        if (result.trim()) {
+          log.info("LLM summary: Gemini Flash")
+          return result.trim()
+        }
+      } catch (err: any) {
+        log.warn(`LLM summary Gemini failed: ${err.message}`)
+      }
     }
   }
 
-  log.warn("LLM summary: no working API available")
+  return null
+}
+
+export async function callLlmForSummary(
+  activityLog: string,
+  options: LlmSummaryOptions = {},
+): Promise<string | null> {
+  const cleaned = trimForModel(sanitizeActivityLog(activityLog))
+  if (!cleaned) return null
+
+  const prompt = buildSummaryPrompt(options.locale)
+  const orderedProviders = resolveSummaryProviders(options.agentId)
+  const tried: SummaryProvider[] = []
+
+  for (const provider of orderedProviders) {
+    if (tried.includes(provider)) continue
+    tried.push(provider)
+
+    const result = await callProvider(provider, prompt, cleaned)
+    if (result) return result
+  }
+
+  log.warn("LLM summary: no working lightweight provider available")
   return null
 }
