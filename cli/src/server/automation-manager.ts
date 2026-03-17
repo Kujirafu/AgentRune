@@ -1412,6 +1412,7 @@ export class AutomationManager {
           const duplicateMatch = findDuplicateSocialPost({
             platform: directive.platform,
             text: directive.text,
+            title: directive.title,
           })
 
           if (duplicateMatch) {
@@ -1421,6 +1422,8 @@ export class AutomationManager {
             const publishResult = await publishSocialPost({
               platform: directive.platform,
               text: directive.text,
+              title: directive.title,
+              submolt: directive.submolt,
               source: directive.source,
               reason: directive.reason,
             })
@@ -1430,6 +1433,7 @@ export class AutomationManager {
               const dedupeResult = rememberSocialPost({
                 platform: directive.platform,
                 text: directive.text,
+                title: directive.title,
                 postId: publishResult.postId,
                 source: directive.source,
                 reason: directive.reason,

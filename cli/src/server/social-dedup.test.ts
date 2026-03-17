@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -89,5 +89,36 @@ describe("social-dedup", () => {
     expect(context).toContain("第二篇")
     expect(context).toContain("第一篇")
     expect(context).toContain("will block duplicate or trivially reformatted text")
+  })
+
+  it("reads legacy Moltbook history when checking duplicates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentrune-social-dedup-"))
+    tempDirs.push(dir)
+    mockConfig.dir = dir
+
+    writeFileSync(join(dir, "moltbook-history.json"), JSON.stringify({
+      version: 1,
+      items: [
+        {
+          action: "new_post",
+          title: "Latency floors catch fake reviews",
+          text: "Short approvals looked identical to no review, so we started measuring review duration.",
+          post_id: "post-789",
+          created_at: "2026-03-17T08:00:00.000Z",
+          source: "legacy-script",
+        },
+      ],
+    }, null, 2), "utf-8")
+
+    expect(findDuplicateSocialPost({
+      platform: "moltbook",
+      title: "Latency floors catch fake reviews",
+      text: "Short approvals looked identical to no review, so we started measuring review duration.",
+      now: Date.UTC(2026, 2, 18, 8, 0),
+    })).toMatchObject({
+      postId: "post-789",
+      title: "Latency floors catch fake reviews",
+      source: "legacy-script",
+    })
   })
 })

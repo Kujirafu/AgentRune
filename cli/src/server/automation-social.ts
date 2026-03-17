@@ -1,4 +1,6 @@
-export type AutomationSocialPlatform = "threads"
+import type { SocialPlatform } from "./social-types.js"
+
+export type AutomationSocialPlatform = SocialPlatform
 
 export interface SocialAutomationMode {
   platform: AutomationSocialPlatform
@@ -8,11 +10,13 @@ export interface SocialPostDirective {
   kind: "post"
   platform: AutomationSocialPlatform
   text: string
+  title?: string
   source?: string
   reason?: string
   recordType?: string
   recordTitle?: string
   recordMetrics?: string
+  submolt?: string
 }
 
 export interface SocialSkipDirective {
@@ -32,6 +36,13 @@ const THREADS_HINTS = [
   "graph.threads.net",
 ]
 
+const MOLTBOOK_HINTS = [
+  "moltbook",
+  "www.moltbook.com",
+  "/api/v1/posts",
+  "submolt",
+]
+
 export function detectAutomationSocialMode(auto: {
   name?: string
   prompt?: string
@@ -45,6 +56,10 @@ export function detectAutomationSocialMode(auto: {
     auto.skill || "",
   ].join("\n").toLowerCase()
 
+  if (MOLTBOOK_HINTS.some((hint) => haystack.includes(hint)) || /\bmoltbook\b/i.test(auto.name || "")) {
+    return { platform: "moltbook" }
+  }
+
   if (THREADS_HINTS.some((hint) => haystack.includes(hint)) || /\bthreads\b/i.test(auto.name || "")) {
     return { platform: "threads" }
   }
@@ -53,6 +68,29 @@ export function detectAutomationSocialMode(auto: {
 }
 
 export function buildAutomationSocialInstructions(mode: SocialAutomationMode): string {
+  if (mode.platform === "moltbook") {
+    return [
+      "[AGENTRUNE SOCIAL PUBLISH: Moltbook]",
+      "This automation is expected to publish a REAL Moltbook post via AgentRune.",
+      "AgentRune daemon will perform the actual API publish after you emit a marker. Network access is NOT required for you.",
+      "AgentRune daemon will reject duplicate or trivially reformatted post text, so do not reuse recent copy.",
+      "Do NOT tell the user to post manually.",
+      "Do NOT print secrets, access tokens, cookies, or raw credentials.",
+      "Do NOT call Moltbook APIs directly from the agent.",
+      "Produce a final-ready title and body. Do not leave placeholders.",
+      "If you were given approved materials, stay inside those materials and do not invent unsupported claims.",
+      "",
+      "If a post should be published now, end your final output with exactly one line:",
+      `${SOCIAL_POST_MARKER} {"platform":"moltbook","title":"<final title>","text":"<final post body>","source":"<notes or materials file>","reason":"<why this post was chosen>","submolt":"general"}`,
+      "",
+      "If no post should be published now because of cooldown, missing approval, missing material, or another valid precondition, end your final output with exactly one line:",
+      `${SOCIAL_SKIP_MARKER} {"platform":"moltbook","reason":"<why no post should be published now>","source":"<notes or materials file>"}`,
+      "",
+      "Never wrap these marker lines in a code block.",
+      "Only emit one marker line total.",
+    ].join("\n")
+  }
+
   const platformName = "Threads"
   return [
     `[AGENTRUNE SOCIAL PUBLISH: ${platformName}]`,
@@ -91,6 +129,9 @@ export function extractAutomationSocialDirective(
       if (!parsed || parsed.platform !== expectedPlatform || typeof parsed.text !== "string") return null
       const text = parsed.text.trim()
       if (!text) return null
+      const title = normalizeOptionalString(parsed.title)
+      const submolt = normalizeOptionalString(parsed.submolt)
+      if (parsed.platform === "moltbook" && !title) return null
       return {
         kind: "post",
         platform: parsed.platform,
@@ -100,6 +141,8 @@ export function extractAutomationSocialDirective(
         recordType: normalizeOptionalString(parsed.recordType),
         recordTitle: normalizeOptionalString(parsed.recordTitle),
         recordMetrics: normalizeOptionalString(parsed.recordMetrics),
+        ...(title ? { title } : {}),
+        ...(submolt ? { submolt } : {}),
       }
     }
 
@@ -134,11 +177,13 @@ export function outputNeedsManualIntervention(output: string): boolean {
 function safeParseDirective(raw: string): {
   platform?: AutomationSocialPlatform
   text?: string
+  title?: string
   source?: string
   reason?: string
   recordType?: string
   recordTitle?: string
   recordMetrics?: string
+  submolt?: string
 } | null {
   try {
     const parsed = JSON.parse(raw)
@@ -146,11 +191,13 @@ function safeParseDirective(raw: string): {
     return parsed as {
       platform?: AutomationSocialPlatform
       text?: string
+      title?: string
       source?: string
       reason?: string
       recordType?: string
       recordTitle?: string
       recordMetrics?: string
+      submolt?: string
     }
   } catch {
     return null

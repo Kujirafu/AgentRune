@@ -14,6 +14,13 @@ describe("automation-social", () => {
     })).toEqual({ platform: "threads" })
   })
 
+  it("detects Moltbook automations from prompt references", () => {
+    expect(detectAutomationSocialMode({
+      name: "Moltbook growth",
+      prompt: "Draft a Moltbook post and publish it through /api/v1/posts.",
+    })).toEqual({ platform: "moltbook" })
+  })
+
   it("builds marker instructions for social automations", () => {
     const block = buildAutomationSocialInstructions({ platform: "threads" })
     expect(block).toContain("__AGENTRUNE_SOCIAL_POST__")
@@ -22,6 +29,13 @@ describe("automation-social", () => {
     expect(block).toContain("Do NOT edit the materials library")
     expect(block).toContain("Network access is NOT required for you.")
     expect(block).toContain("reject duplicate or trivially reformatted post text")
+  })
+
+  it("builds Moltbook marker instructions with title support", () => {
+    const block = buildAutomationSocialInstructions({ platform: "moltbook" })
+    expect(block).toContain("\"title\":\"<final title>\"")
+    expect(block).toContain("\"submolt\":\"general\"")
+    expect(block).toContain("Do NOT call Moltbook APIs directly")
   })
 
   it("extracts post directives from final output", () => {
@@ -53,6 +67,23 @@ describe("automation-social", () => {
       platform: "threads",
       reason: "Cooldown has not expired",
       source: "Threads materials index",
+    })
+  })
+
+  it("extracts Moltbook post directives with title", () => {
+    const output = [
+      "Ready to publish.",
+      "__AGENTRUNE_SOCIAL_POST__ {\"platform\":\"moltbook\",\"title\":\"Latency floors catch fake reviews\",\"text\":\"We added review_duration_ms and short approvals stopped looking normal.\",\"source\":\"Moltbook notes\",\"reason\":\"Fresh enough to publish\",\"submolt\":\"general\"}",
+    ].join("\n")
+
+    expect(extractAutomationSocialDirective(output, "moltbook")).toEqual({
+      kind: "post",
+      platform: "moltbook",
+      title: "Latency floors catch fake reviews",
+      text: "We added review_duration_ms and short approvals stopped looking normal.",
+      source: "Moltbook notes",
+      reason: "Fresh enough to publish",
+      submolt: "general",
     })
   })
 

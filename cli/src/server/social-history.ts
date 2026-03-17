@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { loadConfig } from "../shared/config.js"
-import type { SocialPublishPlatform } from "./social-publisher.js"
+import type { SocialPlatform } from "./social-types.js"
 
 const THREADS_MATERIALS_FILE = "Threads素材庫.md"
 
 export interface SocialHistoryRecordRequest {
-  platform: SocialPublishPlatform
+  platform: SocialPlatform
   recordType?: string
   recordTitle?: string
   recordMetrics?: string
@@ -22,6 +22,13 @@ export interface SocialHistoryRecordResult {
 export function recordPublishedSocialPost(request: SocialHistoryRecordRequest): SocialHistoryRecordResult {
   if (request.platform === "threads") {
     return recordThreadsHistory(request)
+  }
+
+  if (request.platform === "moltbook") {
+    return {
+      success: true,
+      skipped: true,
+    }
   }
 
   return {
@@ -119,4 +126,3 @@ function formatLocalMonthDay(date: Date): string {
   const day = String(date.getDate()).padStart(2, "0")
   return `${month}-${day}`
 }
-
