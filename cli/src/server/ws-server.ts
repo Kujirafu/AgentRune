@@ -33,6 +33,7 @@ import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { AGENT_INSTALL_INFO, buildAgentLaunch, isLaunchAgentId, normalizeAgentSettings } from "./agent-launch.js"
 import { buildSessionActivityPayload, shouldSendCrashPush } from "./crash-notification.js"
+import { buildProjectSummaryResponse, buildSessionDigest } from "./project-summary.js"
 import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
 import { log } from "../shared/logger.js"
 import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
@@ -296,6 +297,22 @@ function loadProjectEvents(projectId: string): AgentEvent[] {
   return []
 }
 
+function listPersistedProjectSessionIds(projectId: string): string[] {
+  try {
+    const prefix = projectId.replace(/[^a-zA-Z0-9_-]/g, "_") + "_"
+    return readdirSync(getEventsDir())
+      .filter((file) => file.startsWith(prefix) && file.endsWith(".json"))
+      .map((file) => file.replace(/\.json$/, ""))
+  } catch {
+    return []
+  }
+}
+
+function normalizeSummaryLocale(locale: unknown): "en" | "zh-TW" {
+  const value = typeof locale === "string" ? locale.toLowerCase() : ""
+  return value.startsWith("zh") ? "zh-TW" : "en"
+}
+
 // --- AgentLore heartbeat ---
 
 // Cached sibling daemon info — updated by probeSiblingDaemon, exposed via /api/daemon-info
@@ -532,12 +549,16 @@ export function createServer(portOverride?: number) {
     res.header("X-Frame-Options", "DENY")
     res.header("X-XSS-Protection", "1; mode=block")
     res.header("Referrer-Policy", "no-referrer")
-    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
+    // Electron mode needs 'unsafe-inline' for Vite-built scripts; terminal mode uses nonce-based CSP per-request
+    const csp = appDistPath
+      ? "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"
+      : "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;"
+    res.header("Content-Security-Policy", csp)
     next()
   })
 
   // CORS — allow cross-origin requests (phone app via tunnel)
-  const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost"])
+  const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost", "https://agentlore.vercel.app"])
   function isAllowedOrigin(origin: string | undefined): string | false {
     if (!origin) return "http://localhost" // Same-origin requests have no origin — use localhost as default
     if (ALLOWED_ORIGINS.has(origin)) return origin
@@ -545,6 +566,8 @@ export function createServer(portOverride?: number) {
     if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
     // Allow capacitor with any scheme (http or capacitor)
     if (/^(capacitor|http):\/\/localhost$/.test(origin)) return origin
+    // Allow AgentLore preview deployments
+    if (/^https:\/\/agentlore[a-z0-9-]*\.vercel\.app$/.test(origin)) return origin
     return false
   }
   app.use((_req, res, next) => {
@@ -559,8 +582,22 @@ export function createServer(portOverride?: number) {
     next()
   })
 
-  // Serve terminal web UI at root — enables desktop sync terminal
+  // Serve React app (Electron / desktop mode) or terminal web UI
+  const appDistPath = process.env.AGENTRUNE_APP_DIST
+  if (appDistPath && existsSync(appDistPath)) {
+    // Electron mode: serve pre-built React app as static files
+    app.use(express.static(appDistPath))
+  }
+
+  // Terminal web UI fallback — serves when no React app dist is configured
   app.get("/", (_req, res) => {
+    // If React app is being served, let it handle "/" via static middleware above
+    if (appDistPath && existsSync(appDistPath)) {
+      // static middleware already sent index.html — this won't be reached normally,
+      // but if it is (e.g. index.html missing), fall through to terminal HTML
+      const indexPath = join(appDistPath, "index.html")
+      if (existsSync(indexPath)) return // already handled by express.static
+    }
     const nonce = randomBytes(16).toString("base64")
     res.header("Content-Security-Policy", `default-src 'self'; script-src 'nonce-${nonce}' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;`)
     res.type("html").send(getTerminalHtml(nonce))
@@ -1003,6 +1040,36 @@ export function createServer(portOverride?: number) {
     })
   })
 
+  // --- Social scraper trigger (localhost only, called from AgentLore dashboard) ---
+  app.post("/api/social-scrape", async (req, res) => {
+    const remoteIp = req.socket.remoteAddress || ""
+    const isLocalhost = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1"
+    if (!isLocalhost) {
+      return res.status(403).json({ error: "Forbidden — localhost only" })
+    }
+
+    try {
+      const { execFile } = await import("child_process")
+      const { resolve } = await import("path")
+      const agentlorePath = resolve(process.cwd(), "..", "AgentWiki")
+      const scriptPath = resolve(agentlorePath, "scripts", "social-scraper.ts")
+
+      const child = execFile("npx", ["tsx", scriptPath, "--prod"], {
+        cwd: agentlorePath,
+        env: { ...process.env },
+        timeout: 10 * 60 * 1000, // 10 min max
+      }, (err, stdout, stderr) => {
+        if (err) log.warn(`[social-scrape] finished with error: ${err.message}`)
+        else log.info(`[social-scrape] completed successfully`)
+      })
+
+      res.json({ ok: true, message: "Social scraper started" })
+    } catch (err) {
+      log.error(`[social-scrape] failed to start: ${err}`)
+      res.status(500).json({ error: "Failed to start scraper" })
+    }
+  })
+
   app.get("/api/auth/check", (req, res) => {
     const deviceId = req.query.deviceId as string | undefined
     const isKnown = deviceId ? validateDeviceToken(deviceId, "") === false && hasPairedDevices() : false
@@ -1158,17 +1225,49 @@ export function createServer(portOverride?: number) {
     res.json({ ok: true })
   })
 
-  app.get("/api/sessions", (_req, res) => {
+  app.get("/api/sessions", (req, res) => {
+    const locale = normalizeSummaryLocale(req.query.locale)
     const activeIds = new Set<string>()
+    const getSummaryEvents = (sessionId: string) => {
+      const liveEvents = sessionRecentEvents.get(sessionId)
+      if (liveEvents && liveEvents.length > 0) return liveEvents
+      const persistedEvents = loadPersistedEvents(sessionId)
+      if (persistedEvents.length > 0) return persistedEvents
+      return eventStore.getSessionEvents(sessionId)
+    }
     const allSessions = sessions.getAll().map((s) => {
       activeIds.add(s.id)
       // Attach worktree branch info if available
       const wtm = worktreeManagers.get(s.projectId)
       const wt = wtm?.get(s.id)
-      return { ...s, status: "active" as const, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
+      const liveEvents = getSummaryEvents(s.id)
+      const digest = buildSessionDigest(s.id, s.agentId, liveEvents, locale)
+      const lastEventTitle = sessionLastTitle.get(s.id) || digest.summary || ""
+      return {
+        ...s,
+        status: "active" as const,
+        worktreeBranch: wt?.branch || null,
+        lastEventTitle,
+        summaryText: digest.summary || lastEventTitle,
+        nextAction: digest.nextAction,
+        summaryStatus: digest.status,
+        summaryUpdatedAt: digest.updatedAt,
+      }
     })
     // Append recoverable sessions that are not currently active and not closed during this daemon lifetime
-    const recoverable = cachedRecoverable.filter(r => !activeIds.has(r.id) && !closedSessionIds.has(r.id))
+    const recoverable = cachedRecoverable
+      .filter(r => !activeIds.has(r.id) && !closedSessionIds.has(r.id))
+      .map((session) => {
+        const storedEvents = getSummaryEvents(session.id)
+        const digest = buildSessionDigest(session.id, session.agentId, storedEvents, locale)
+        return {
+          ...session,
+          summaryText: digest.summary || session.lastEventTitle || "",
+          nextAction: digest.nextAction,
+          summaryStatus: digest.status,
+          summaryUpdatedAt: digest.updatedAt || session.lastActivity,
+        }
+      })
     res.json([...allSessions, ...recoverable])
   })
 
@@ -2501,59 +2600,103 @@ export function createServer(portOverride?: number) {
   // --- Project Summary (aggregate events across sessions) ---
 
   app.post("/api/project-summary", express.json(), async (req, res) => {
-    const { projectId } = req.body || {}
+    const { projectId, locale, sessionIds } = req.body || {}
     if (!projectId) {
       return res.status(400).json({ error: "Missing projectId" })
     }
 
     try {
-      // Collect events from all sessions belonging to this project
-      const projectSessions = eventStore.getSessionsByProject(projectId)
-      if (projectSessions.length === 0) {
-        return res.json({ summary: "No sessions found for this project." })
+      const summaryLocale = normalizeSummaryLocale(locale)
+      const sessionMeta = new Map<string, { agentId: string }>()
+      const requestedSessionIds = Array.isArray(sessionIds)
+        ? sessionIds.filter((sessionId): sessionId is string => typeof sessionId === "string" && sessionId.length > 0)
+        : null
+
+      if (requestedSessionIds && requestedSessionIds.length === 0) {
+        return res.json({
+          summary: summaryLocale === "zh-TW"
+            ? "目前還沒有足夠的進度可摘要，先打開最近的 session 看看。"
+            : "There is not enough progress to summarize yet. Open the most recent session first.",
+          recommendedSessionId: null,
+          recommendedReason: "",
+          sessions: [],
+        })
       }
 
-      // Gather recent events from all sessions (newest first, cap at 200)
-      const allEvents: AgentEvent[] = []
-      for (const session of projectSessions) {
-        const events = eventStore.getSessionEvents(session.id)
-        allEvents.push(...events)
-      }
-      allEvents.sort((a, b) => b.timestamp - a.timestamp)
-      const recentEvents = allEvents.slice(0, 200)
-
-      // Build a concatenated text from event titles/details
-      const eventLines = recentEvents.map(e => {
-        const ts = new Date(e.timestamp).toISOString().slice(0, 16)
-        const detail = e.detail ? ` — ${e.detail.slice(0, 120)}` : ""
-        return `[${ts}] ${e.type}: ${e.title}${detail}`
-      })
-      const concatenated = eventLines.join("\n")
-
-      log.info(`[project-summary] sessions=${projectSessions.length} events=${allEvents.length} textLen=${concatenated.length}`)
-
-      // Try LLM-based summary with dedicated summarization prompt
-      try {
-        const { callLlmForSummary } = await import("./llm-summary.js")
-        const summary = await callLlmForSummary(concatenated)
-        log.info(`[project-summary] LLM result: ${summary ? summary.slice(0, 80) : "(null)"}`)
-        if (summary) {
-          return res.json({ summary })
+      for (const session of sessions.getAll()) {
+        if (session.projectId === projectId && (!requestedSessionIds || requestedSessionIds.includes(session.id))) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
         }
-      } catch (llmErr: any) {
-        log.warn(`Project summary LLM fallback: ${llmErr.message}`)
+      }
+      for (const session of cachedRecoverable) {
+        if (
+          session.projectId === projectId
+          && !closedSessionIds.has(session.id)
+          && (!requestedSessionIds || requestedSessionIds.includes(session.id))
+        ) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
+        }
+      }
+      for (const session of eventStore.getSessionsByProject(projectId)) {
+        if (requestedSessionIds && !requestedSessionIds.includes(session.id)) continue
+        if (!sessionMeta.has(session.id)) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
+        }
+      }
+      if (requestedSessionIds) {
+        for (const sessionId of requestedSessionIds) {
+          if (!sessionMeta.has(sessionId)) {
+            sessionMeta.set(sessionId, { agentId: "session" })
+          }
+        }
+      } else {
+        for (const sessionId of listPersistedProjectSessionIds(projectId)) {
+          if (!sessionMeta.has(sessionId)) {
+            sessionMeta.set(sessionId, { agentId: "session" })
+          }
+        }
       }
 
-      // Fallback: return concatenated event summaries
-      res.json({ summary: concatenated })
+      const summarySessions = Array.from(sessionMeta.entries())
+        .map(([sessionId, meta]) => {
+          const liveEvents = sessionRecentEvents.get(sessionId)
+          const persistedEvents = liveEvents && liveEvents.length > 0 ? liveEvents : loadPersistedEvents(sessionId)
+          const events = persistedEvents.length > 0 ? persistedEvents : eventStore.getSessionEvents(sessionId)
+          return {
+            sessionId,
+            agentId: meta.agentId,
+            events,
+          }
+        })
+        .filter((session) => session.events.length > 0)
+
+      if (summarySessions.length === 0) {
+        return res.json({
+          summary: summaryLocale === "zh-TW"
+            ? "目前還沒有足夠的進度可摘要，先打開最近的 session 看看。"
+            : "There is not enough progress to summarize yet. Open the most recent session first.",
+          recommendedSessionId: null,
+          recommendedReason: "",
+          sessions: [],
+        })
+      }
+
+      const response = buildProjectSummaryResponse(summarySessions, summaryLocale)
+      log.info(`[project-summary] project=${projectId} sessions=${summarySessions.length} recommended=${response.recommendedSessionId || "none"}`)
+      res.json(response)
     } catch (e: any) {
       log.error(`Project summary error: ${e.message}`)
       res.status(500).json({ error: "Failed to generate summary" })
     }
   })
+/*
+        const detail = e.detail ? ` — ${e.detail.slice(0, 120)}` : ""
+        return `[${ts}] ${e.type}: ${e.title}${detail}`
+  // --- Progress Report (MCP Gate Keeper ??APP broadcast) ---
 
   // --- Progress Report (MCP Gate Keeper → APP broadcast) ---
 
+*/
   app.post("/api/progress", express.json(), (req, res) => {
     const report = req.body
     if (!report || !report.title || !report.status) {
@@ -3130,11 +3273,14 @@ export function createServer(portOverride?: number) {
 
   app.post("/api/automations/:projectId/:id/reauth", express.json(), async (req, res) => {
     try {
-      const { action, noExpiry } = req.body
+      const { action, noExpiry, reviewNote } = req.body
       if (!action || !["approve", "deny"].includes(action)) {
         return res.status(400).json({ error: "action must be 'approve' or 'deny'" })
       }
-      const result = await automationManager.resolveReauth(req.params.id, action, { noExpiry: noExpiry === true })
+      const result = await automationManager.resolveReauth(req.params.id, action, {
+        noExpiry: noExpiry === true,
+        reviewNote: typeof reviewNote === "string" ? reviewNote : undefined,
+      })
       if (!result.success) return res.status(404).json({ error: result.message })
       res.json(result)
     } catch (err) {
@@ -3308,6 +3454,10 @@ export function createServer(portOverride?: number) {
     const pendingGates = automationManager.listPendingPhaseGates()
     for (const gate of pendingGates) {
       ws.send(JSON.stringify({ type: "phase_gate_waiting", gate }))
+    }
+    const pendingReauths = automationManager.listPendingReauths()
+    for (const reauth of pendingReauths) {
+      ws.send(JSON.stringify({ type: "reauth_required", ...reauth }))
     }
 
     ws.on("message", (raw) => {
@@ -4058,8 +4208,9 @@ export function createServer(portOverride?: number) {
           const automationId = msg.automationId as string
           const action = (msg.action as "approve" | "deny") || "deny"
           const noExpiry = msg.noExpiry === true
+          const reviewNote = typeof msg.reviewNote === "string" ? msg.reviewNote : undefined
           if (automationId) {
-            automationManager.resolveReauth(automationId, action, { noExpiry }).then(result => {
+            automationManager.resolveReauth(automationId, action, { noExpiry, reviewNote }).then(result => {
               ws.send(JSON.stringify({ type: "reauth_ack", automationId, ...result }))
             }).catch(() => {
               ws.send(JSON.stringify({ type: "reauth_ack", automationId, success: false, message: "Reauth resolution failed" }))
@@ -4078,6 +4229,7 @@ export function createServer(portOverride?: number) {
               automationId,
               action: action as any,
               instructions: (msg.instructions as string) || undefined,
+              reviewNote: typeof msg.reviewNote === "string" ? msg.reviewNote : undefined,
             })
             log.info(`[WS] phase_gate_response: automationId=${automationId} action=${action} resolved=${resolved}`)
             ws.send(JSON.stringify({ type: "phase_gate_ack", automationId, resolved }))
@@ -4955,6 +5107,19 @@ export function createServer(portOverride?: number) {
     }
   })
 
+  // SPA fallback — non-API routes fall through to React app's index.html (Electron mode)
+  if (appDistPath && existsSync(appDistPath)) {
+    const spaIndexPath = join(appDistPath, "index.html")
+    if (existsSync(spaIndexPath)) {
+      const spaHtml = readFileSync(spaIndexPath, "utf-8")
+      app.get("*", (req, res) => {
+        // Don't intercept API, WebSocket upgrade, or asset requests
+        if (req.path.startsWith("/api/") || req.path.startsWith("/ws")) return res.status(404).end()
+        res.type("html").send(spaHtml)
+      })
+    }
+  }
+
   // --- Start listening ---
 
   server.listen(PORT, "127.0.0.1", async () => {
@@ -4964,12 +5129,15 @@ export function createServer(portOverride?: number) {
       log.info(`LAN: http://${localIp}:${PORT}`)
     }
 
-    // Start Cloudflare Tunnel for remote access
+    // Start Cloudflare Tunnel for remote access (skip in Electron desktop mode)
     // Use object so heartbeat closure always reads latest URL
     const tunnelState = { url: undefined as string | undefined }
     // Expose tunnel URL globally for /api/daemon-info endpoint
     const updateGlobalTunnelUrl = (url?: string) => { (globalThis as any).__agentrune_tunnel_url__ = url || null }
-    try {
+    const skipTunnel = process.env.AGENTRUNE_SKIP_TUNNEL === "1"
+    if (skipTunnel) {
+      log.dim("Tunnel skipped (AGENTRUNE_SKIP_TUNNEL=1)")
+    } else try {
       const { startTunnel } = await import("./tunnel.js")
       const tunnel = await startTunnel(PORT)
       tunnelState.url = tunnel.url
