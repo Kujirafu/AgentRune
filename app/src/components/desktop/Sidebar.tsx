@@ -581,14 +581,14 @@ export function Sidebar({
                               // Show feedback immediately
                               const fb = isDeny ? "denied" : "approved"
                               setResolvedFeedback(prev => new Map(prev).set(ev.id, fb))
-                              // Send to PTY (split number + Enter)
-                              const numMatch = opt.input.match(/^(\d+)/)
-                              if (numMatch) {
-                                send?.({ type: "session_input", sessionId: sid, data: numMatch[1] })
-                                setTimeout(() => send?.({ type: "session_input", sessionId: sid, data: "\r" }), 200)
-                              } else {
-                                send?.({ type: "session_input", sessionId: sid, data: opt.input })
-                              }
+                              // Send to PTY — split escape sequences with 150ms delay (MissionControl pattern)
+                              const parts = opt.input.match(/\x1b\[[A-Z]|\x1b|\r|[^\x1b\r]+/g) || [opt.input]
+                              parts.forEach((part, i) => {
+                                setTimeout(() => send?.({ type: "session_input", sessionId: sid, data: part }), i * 150)
+                              })
+                              // Request scrollback reparse after approval (3s + 8s, like MissionControl)
+                              setTimeout(() => send?.({ type: "scrollback_request", reparse: true }), 3000)
+                              setTimeout(() => send?.({ type: "scrollback_request", reparse: true }), 8000)
                               // Remove from Live list after feedback shown
                               setTimeout(() => {
                                 onResolvePermission?.(sid, ev.id)

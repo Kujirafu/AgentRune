@@ -9,9 +9,11 @@ interface SettingsToolProps {
   projectId: string | null
   theme: "light" | "dark"
   t: (key: string) => string
+  /** Called when a setting changes — parent handles session restart/command injection */
+  onSettingsChange?: (prev: ProjectSettings, next: ProjectSettings) => void
 }
 
-export function SettingsTool({ projectId, theme, t }: SettingsToolProps) {
+export function SettingsTool({ projectId, theme, t, onSettingsChange }: SettingsToolProps) {
   const dark = theme === "dark"
   const { locale, setLocale } = useLocale()
   const [selectedAgent, setSelectedAgent] = useState("claude")
@@ -36,10 +38,12 @@ export function SettingsTool({ projectId, theme, t }: SettingsToolProps) {
 
   const update = useCallback(<K extends keyof ProjectSettings>(key: K, value: ProjectSettings[K]) => {
     if (!projectId) return
+    const prev = { ...settings }
     const next = { ...settings, [key]: value }
     setSettings(next)
-    saveSettings(projectId, next) // also pushes to server via storage.ts
-  }, [projectId, settings])
+    saveSettings(projectId, next)
+    onSettingsChange?.(prev, next)
+  }, [projectId, settings, onSettingsChange])
 
   const textPrimary = dark ? "#e2e8f0" : "#1e293b"
   const textSecondary = dark ? "#94a3b8" : "#64748b"

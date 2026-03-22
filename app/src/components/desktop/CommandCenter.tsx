@@ -157,17 +157,82 @@ export function CommandCenter(props: CommandCenterProps) {
       }
       return
     }
-    // Send text and Enter separately — Claude Code TUI needs them as distinct writes
+    // Send text and Enter separately — match MissionControl's delay pattern
+    const isSlash = text.startsWith("/")
     const msg: Record<string, unknown> = { type: "session_input", sessionId: sid, data: text }
     if (images && images.length > 0) msg.images = images
     send(msg)
-    setTimeout(() => send({ type: "session_input", sessionId: sid, data: "\r" }), 300)
+    setTimeout(() => send({ type: "session_input", sessionId: sid, data: "\r" }), isSlash ? 300 : 500)
   }, [targetSessionId, send, activeSessions, digests, selectedProjectId, projects, props.onLaunch])
 
   // Handle raw send (e.g. interrupt \x03) to specific session
   const handleRawSend = useCallback((sessionId: string, data: string) => {
     send({ type: "session_input", sessionId, data })
   }, [send])
+
+  // Settings change handler — match MissionControl's handleSettingsChange pattern
+  const [bypassConfirmPending, setBypassConfirmPending] = useState(false)
+  const pendingBypassRef = React.useRef<{ projectId: string; agentId: string } | null>(null)
+
+  const handleSettingsChange = useCallback((prev: import("../../types").ProjectSettings, next: import("../../types").ProjectSettings) => {
+    // Find the active session to send commands to
+    const targetSid = targetSessionId || activeSessions.find(s => s.status !== "recoverable")?.id
+    if (!targetSid) return
+
+    const session = activeSessions.find(s => s.id === targetSid)
+    if (!session) return
+
+    // Bypass toggle → kill + relaunch (like MissionControl)
+    if (next.bypass !== prev.bypass) {
+      if (next.bypass) {
+        // Enable bypass → show confirmation
+        pendingBypassRef.current = { projectId: session.projectId, agentId: session.agentId }
+        setBypassConfirmPending(true)
+      } else {
+        // Disable bypass → immediate restart
+        onKillSession(targetSid).then(() => {
+          setTimeout(() => props.onLaunch(session.projectId, session.agentId), 500)
+        })
+      }
+      return
+    }
+
+    // Model switch → /model command
+    if (next.model !== prev.model) {
+      send({ type: "session_input", sessionId: targetSid, data: "\x15" }) // Ctrl+U clear
+      setTimeout(() => {
+        send({ type: "session_input", sessionId: targetSid, data: `/model ${next.model}` })
+        setTimeout(() => send({ type: "session_input", sessionId: targetSid, data: "\r" }), 50)
+      }, 100)
+    }
+
+    // Plan mode → Shift+Tab
+    if (next.planMode !== prev.planMode) {
+      send({ type: "session_input", sessionId: targetSid, data: "\x1b[Z" })
+    }
+
+    // Fast mode → /fast
+    if (next.fastMode !== prev.fastMode) {
+      send({ type: "session_input", sessionId: targetSid, data: "\x15" })
+      setTimeout(() => {
+        send({ type: "session_input", sessionId: targetSid, data: "/fast" })
+        setTimeout(() => send({ type: "session_input", sessionId: targetSid, data: "\r" }), 50)
+      }, 100)
+    }
+  }, [targetSessionId, activeSessions, send, onKillSession, props.onLaunch])
+
+  const confirmBypass = useCallback(() => {
+    setBypassConfirmPending(false)
+    const info = pendingBypassRef.current
+    if (!info) return
+    const targetSid = targetSessionId || activeSessions.find(s => s.id && s.projectId === info.projectId)?.id
+    if (targetSid) {
+      onKillSession(targetSid).then(() => {
+        setTimeout(() => props.onLaunch(info.projectId, info.agentId), 500)
+      })
+    }
+    pendingBypassRef.current = null
+  }, [targetSessionId, activeSessions, onKillSession, props.onLaunch])
 
   // Esc to collapse all expanded sessions
   React.useEffect(() => {
@@ -495,7 +560,38 @@ export function CommandCenter(props: CommandCenterProps) {
               projectId={selectedProjectId}
               theme={theme}
               t={t}
+              onSettingsChange={handleSettingsChange}
             />
+          )}
+
+          {/* Bypass confirmation dialog (match MissionControl) */}
+          {bypassConfirmPending && (
+            <div onClick={() => setBypassConfirmPending(false)} style={{
+              position: "fixed", inset: 0, zIndex: 1000,
+              background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <div onClick={e => e.stopPropagation()} style={{
+                background: dark ? "#1e293b" : "#fff", borderRadius: 16, padding: 24, maxWidth: 380,
+                border: `1px solid ${dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.2)"}`,
+              }}>
+                <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, color: dark ? "#e2e8f0" : "#1e293b" }}>
+                  {t("mc.bypassConfirmTitle")}
+                </div>
+                <div style={{ fontSize: 13, color: dark ? "#94a3b8" : "#64748b", marginBottom: 16, lineHeight: 1.5 }}>
+                  {t("mc.bypassConfirmDesc")}
+                </div>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button onClick={() => setBypassConfirmPending(false)} style={{
+                    padding: "8px 16px", borderRadius: 8, border: `1px solid ${dark ? "rgba(148,163,184,0.15)" : "rgba(148,163,184,0.2)"}`,
+                    background: "transparent", color: dark ? "#94a3b8" : "#64748b", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  }}>{t("mc.cancel") || "Cancel"}</button>
+                  <button onClick={confirmBypass} style={{
+                    padding: "8px 16px", borderRadius: 8, border: "none",
+                    background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  }}>{t("mc.bypassConfirmBtn")}</button>
+                </div>
+              </div>
+            </div>
           )}
           </>)}
         </div>
