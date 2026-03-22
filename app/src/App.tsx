@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
-import type { PhaseGateRequest, PhaseGateAction } from "./data/automation-types"
+import type { PhaseGateRequest, PhaseGateAction, PendingReauthRequest } from "./data/automation-types"
 import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnabled, getNotificationsEnabled, getAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, getUpdateDetectedAt, setUpdateDetectedAt, getUpdateNotified, setUpdateNotified, getKilledSessionIds, addKilledSessionId, getFcmToken, setFcmToken } from "./lib/storage"
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { PushNotifications } from "@capacitor/push-notifications"
@@ -13,10 +13,14 @@ const UnifiedPanel = lazy(() => import("./components/UnifiedPanel").then(m => ({
 const DiffPanel = lazy(() => import("./components/DiffPanel").then(m => ({ default: m.DiffPanel })))
 const ChainBuilder = lazy(() => import("./components/ChainBuilder").then(m => ({ default: m.ChainBuilder })))
 const PhaseGateSheet = lazy(() => import("./components/PhaseGateSheet"))
+const ReauthSheet = lazy(() => import("./components/ReauthSheet"))
+const Dashboard = lazy(() => import("./components/Dashboard").then(m => ({ default: m.Dashboard })))
 import { App as CapApp } from "@capacitor/app"
+import { useIsDesktop } from "./hooks/useIsDesktop"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
 import { getSessionActivityNotificationId, getSessionActivityNotificationKey } from "./lib/session-activity"
+import { isSummaryNoise } from "./lib/session-summary"
 // framer-motion deferred to lazy-loaded components only (saves ~133 KB initial load)
 import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch, trackOnboardingSkip, trackOnboardingComplete, trackConnectStep, trackConnectEscape } from "./lib/analytics"
 import { OnboardingCarousel } from "./components/OnboardingCarousel"
@@ -51,6 +55,10 @@ function isCapacitor(): boolean {
   return typeof window !== "undefined" &&
     !!(window as any).Capacitor &&
     (window as any).Capacitor.isNativePlatform?.() === true
+}
+
+function isElectron(): boolean {
+  return !!(window as any).electronAPI
 }
 
 function needsServerSetup(): boolean {
@@ -123,6 +131,13 @@ function useAuth(serverReady: boolean) {
 
   const checkAuth = async () => {
     try {
+      // Electron loads from localhost — daemon auto-bypasses auth for 127.0.0.1
+      if (isElectron()) {
+        setSessionToken("__electron__")
+        setStatus("authenticated")
+        return
+      }
+
       const deviceId = localStorage.getItem("agentrune_device_id") || ""
       const res = await fetch(`${getApiBase()}/api/auth/check?deviceId=${deviceId}`)
       const data = await res.json()
@@ -1370,7 +1385,8 @@ async function checkForUpdate(): Promise<{ version: string; url: string; notes: 
 }
 
 export function App() {
-  const { t } = useLocale()
+  const { t, locale } = useLocale()
+  const isDesktop = useIsDesktop()
   // Onboarding — shown once on first app open (Capacitor only)
   const [showOnboarding, setShowOnboarding] = useState(() =>
     isCapacitor() && !localStorage.getItem("onboarding_seen")
@@ -1421,6 +1437,7 @@ export function App() {
   )
   const { connect, send, on, wsConnected } = useWs()
   const [pendingPhaseGate, setPendingPhaseGate] = useState<PhaseGateRequest | null>(null)
+  const [pendingReauthQueue, setPendingReauthQueue] = useState<PendingReauthRequest[]>([])
   const sessionStartRef = useRef<number>(0)
 
   // ─── Auto Update Check ─────────────────────────────────────────
@@ -1486,6 +1503,54 @@ export function App() {
   // Cloud mode WITH server URL but NO cloudSessionToken = must authenticate locally
   const isAuthed = IS_DEV_PREVIEW || (isCloudMode && !serverUrl) || !!cloudSessionToken || status === "authenticated"
 
+  const loadSessionsSnapshot = useCallback((base: string) => {
+    const query = locale ? `?locale=${encodeURIComponent(locale)}` : ""
+    fetch(`${base}/api/sessions${query}`)
+      .then((r) => r.json())
+      .then((data: SessionSnapshot[] | unknown) => {
+        if (!Array.isArray(data)) return
+        const localKilled = getKilledSessionIds()
+        const sessions = data
+          .filter((s: any) => !localKilled.has(s.id))
+          .map((s: SessionSnapshot) => ({
+            id: s.id,
+            projectId: s.projectId,
+            agentId: s.agentId,
+            worktreeBranch: s.worktreeBranch || null,
+            status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
+            claudeSessionId: s.claudeSessionId,
+          }))
+        // Keep only locally-created sessions less than 30s old (prevents ghost sessions)
+        setActiveSessions(prev => {
+          const serverIds = new Set(sessions.map((s: AppSession) => s.id))
+          const now = Date.now()
+          const localOnly = prev.filter(s => {
+            if (serverIds.has(s.id)) return false
+            if (s.status === "recoverable") return false
+            // Only keep if created recently (timestamp encoded in ID)
+            const tsMatch = s.id.match(/_(\d{13})/)
+            if (tsMatch && now - parseInt(tsMatch[1]) > 30000) return false
+            return true
+          })
+          return [...sessions, ...localOnly]
+        })
+
+        setSessionEventsMap((prev) => {
+          const next = new Map(prev)
+          for (const snapshot of data as SessionSnapshot[]) {
+            const seed = buildSessionSeedEvent(snapshot)
+            if (!seed) continue
+            const existing = next.get(snapshot.id)
+            if (!existing || (existing.length === 1 && (existing[0].id.startsWith("init_") || existing[0].id.startsWith("seed_")))) {
+              next.set(snapshot.id, [seed])
+            }
+          }
+          return next
+        })
+      })
+      .catch(() => { })
+  }, [locale])
+
   // Load projects after auth, server URL change, or WS reconnect
   useEffect(() => {
     if (!isAuthed) return
@@ -1508,46 +1573,8 @@ export function App() {
       })
       .catch(() => { })
 
-    // Load active + recoverable sessions
-    fetch(`${base}/api/sessions`)
-      .then((r) => r.json())
-      .then((data: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string }[] | unknown) => {
-        if (!Array.isArray(data)) return
-        const localKilled = getKilledSessionIds()
-        const sessions = data
-          .filter((s: any) => !localKilled.has(s.id))
-          .map((s: { id: string; projectId: string; agentId: string; worktreeBranch?: string | null; lastEventTitle?: string; status?: string; claudeSessionId?: string }) => ({
-            id: s.id,
-            projectId: s.projectId,
-            agentId: s.agentId,
-            worktreeBranch: s.worktreeBranch || null,
-            status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
-            claudeSessionId: s.claudeSessionId,
-          }))
-        setActiveSessions(sessions)
-        // Seed sessionEventsMap with lastEventTitle from server so summaries show immediately
-        setSessionEventsMap(prev => {
-          const next = new Map(prev)
-          for (const s of data) {
-            if (s.lastEventTitle) {
-              const existing = next.get(s.id)
-              // Update if no existing events, or existing only has the init_ seed placeholder
-              if (!existing || (existing.length === 1 && existing[0].id.startsWith("init_"))) {
-                next.set(s.id, [{
-                  id: `init_${s.id}`,
-                  timestamp: Date.now(),
-                  type: "response",
-                  status: "in_progress",
-                  title: s.lastEventTitle,
-                }])
-              }
-            }
-          }
-          return next
-        })
-      })
-      .catch(() => { })
-  }, [isAuthed, serverUrl, wsConnected])
+    loadSessionsSnapshot(base)
+  }, [isAuthed, serverUrl, wsConnected, loadSessionsSnapshot])
 
   // Also reload projects + sessions whenever WS reconnects (catches tunnel URL changes + kill state sync)
   useEffect(() => {
@@ -1568,23 +1595,43 @@ export function App() {
         })
         .catch(() => { })
       // Reload sessions so killed sessions don't reappear
-      fetch(`${base}/api/sessions`)
-        .then((r) => r.json())
-        .then((data: unknown) => {
-          if (!Array.isArray(data)) return
-          const localKilled = getKilledSessionIds()
-          setActiveSessions((data as any[]).filter((s: any) => !localKilled.has(s.id)).map((s: any) => ({
-            id: s.id,
-            projectId: s.projectId,
-            agentId: s.agentId,
-            worktreeBranch: s.worktreeBranch || null,
-            status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
-            claudeSessionId: s.claudeSessionId,
-          })))
-        })
-        .catch(() => { })
+      loadSessionsSnapshot(base)
     })
-  }, [isAuthed, on])
+  }, [isAuthed, on, loadSessionsSnapshot])
+
+  // Session lifecycle sync — desktop + mobile see the same session list
+  useEffect(() => {
+    const unsubs: (() => void)[] = []
+    // New session created (by any client)
+    unsubs.push(on("session_created", (msg) => {
+      const sid = msg.sessionId as string
+      const pid = msg.projectId as string
+      const aid = msg.agentId as string
+      if (!sid || !pid || !aid) return
+      setActiveSessions(prev => {
+        if (prev.some(s => s.id === sid)) return prev
+        return [...prev, { id: sid, projectId: pid, agentId: aid, worktreeBranch: (msg.worktreeBranch as string) || undefined }]
+      })
+    }))
+    // Session ended (killed/exited by any client)
+    unsubs.push(on("session_ended", (msg) => {
+      const sid = msg.sessionId as string
+      if (!sid) return
+      setActiveSessions(prev => prev.filter(s => s.id !== sid))
+    }))
+    return () => { for (const u of unsubs) u() }
+  }, [on])
+
+  // Settings sync — when another client changes project settings, update localStorage
+  useEffect(() => {
+    return on("settings_changed", (msg) => {
+      const pid = msg.projectId as string
+      const settings = msg.settings as Record<string, unknown>
+      if (pid && settings) {
+        localStorage.setItem(`agentrune_settings_${pid}`, JSON.stringify(settings))
+      }
+    })
+  }, [on])
 
   // Listen for CLI update notification from daemon
   useEffect(() => {
@@ -1671,6 +1718,8 @@ export function App() {
     } else {
       document.documentElement.classList.remove("dark")
     }
+    // Sync Electron titlebar overlay on mount/theme change
+    ;(window as any).electronAPI?.setTheme?.(theme === "dark")
   }, [theme])
 
   // Wake Lock: keep screen on when enabled
@@ -1833,6 +1882,8 @@ export function App() {
     return () => { unsubStarted(); unsub() }
   }, [on])
 
+  const pendingReauth = pendingReauthQueue[0] || null
+
   // Phase Gate notifications + state management
   useEffect(() => {
     const unsub = on("phase_gate_waiting", (msg) => {
@@ -1860,56 +1911,165 @@ export function App() {
     return () => { unsub(); unsubAck() }
   }, [on, t])
 
-  const handlePhaseGateRespond = useCallback((action: PhaseGateAction, instructions?: string) => {
+  const handlePhaseGateRespond = useCallback((action: PhaseGateAction, instructions?: string, reviewNote?: string) => {
     if (!pendingPhaseGate) return
     send({
       type: "phase_gate_response",
       automationId: pendingPhaseGate.automationId,
       action,
       instructions: instructions || undefined,
+      reviewNote: reviewNote || undefined,
     })
     setPendingPhaseGate(null)
   }, [pendingPhaseGate, send])
 
-  // Populate sessionEventsMap from session_activity broadcasts (for ProjectOverview summaries)
   useEffect(() => {
-    const unsub1 = on("session_activity", (msg) => {
+    const unsub = on("reauth_required", (msg) => {
+      const automationId = msg.automationId as string | undefined
+      if (!automationId) return
+      const request: PendingReauthRequest = {
+        automationId,
+        automationName: (msg.automationName as string) || "Automation",
+        sessionId: (msg.sessionId as string) || "",
+        violationType: (msg.violationType as string) || "unknown",
+        violationDescription: (msg.violationDescription as string) || "",
+        permissionKey: (msg.permissionKey as string) || "",
+        killedAt: typeof msg.killedAt === "number" ? msg.killedAt : Date.now(),
+        estimatedReviewMs: typeof msg.estimatedReviewMs === "number" ? msg.estimatedReviewMs : undefined,
+      }
+
+      setPendingReauthQueue((prev) => {
+        const filtered = prev.filter((item) => item.automationId !== request.automationId)
+        return [...filtered, request]
+      })
+
+      if (isCapacitor() && getNotificationsEnabled()) {
+        const notifId = Math.abs(hashCode(`reauth_${request.automationId}_${request.permissionKey}`)) % 2147483647
+        LocalNotifications.schedule({
+          notifications: [{
+            id: notifId,
+            title: t("reauth.notification.title", { name: request.automationName }),
+            body: t("reauth.notification.body"),
+            smallIcon: "ic_launcher",
+          }],
+        }).catch(() => {})
+      }
+    })
+
+    const unsubAck = on("reauth_ack", (msg) => {
+      const automationId = msg.automationId as string | undefined
+      if (!automationId) return
+      setPendingReauthQueue((prev) => prev.filter((item) => item.automationId !== automationId))
+    })
+
+    return () => { unsub(); unsubAck() }
+  }, [on, t])
+
+  const handleReauthRespond = useCallback((action: "approve" | "deny", opts?: { noExpiry?: boolean; reviewNote?: string }) => {
+    if (!pendingReauth) return
+    send({
+      type: "reauth_resolve",
+      automationId: pendingReauth.automationId,
+      action,
+      noExpiry: opts?.noExpiry === true,
+      reviewNote: opts?.reviewNote || undefined,
+    })
+    setPendingReauthQueue((prev) => prev.filter((item) => item.automationId !== pendingReauth.automationId))
+  }, [pendingReauth, send])
+
+  // Populate sessionEventsMap from session_activity broadcasts (for ProjectOverview summaries)
+  // + handle rich "event" and "events_replay" messages (for desktop session panel)
+  useEffect(() => {
+    const unsubs: (() => void)[] = []
+    unsubs.push(on("session_activity", (msg) => {
       const sid = msg.sessionId as string
       const title = msg.eventTitle as string
       const agentStatus = msg.agentStatus as string
+      const eventType = normalizeSessionActivityType(msg.eventType)
       if (!sid) return
-      // Skip noise titles that shouldn't be used as session summaries
-      if (!title || /^\d[\d,]*\s*tokens?\s*(used|remaining|total)?$/i.test(title)
-        || /^(Thinking|Processing)\.{0,3}$/i.test(title)
-        || /^Permission requested/i.test(title)
-        || /^Agent is requesting/i.test(title)
-        || title === "Token usage"
-        || /^(初始化|工作階段已)/i.test(title)
-        || /^Session (started|ended|resumed)/i.test(title)
-      ) return
+      if (!title || isSummaryNoise(title)) return
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
         const event: AgentEvent = {
           id: `activity_${Date.now()}`,
           timestamp: Date.now(),
-          type: "response",
-          status: agentStatus === "waiting" ? "waiting" : "in_progress",
+          type: eventType,
+          status: agentStatus === "waiting"
+            ? "waiting"
+            : agentStatus === "idle"
+              ? "completed"
+              : "in_progress",
           title: title || "",
         }
-        // Keep last 20 events per session to avoid memory bloat
-        const updated = [...events, event].slice(-20)
+        const updated = [...events, event].slice(-200)
         next.set(sid, updated)
         return next
       })
-    })
-    return () => { unsub1() }
+    }))
+
+    // Rich event messages — same events MissionControl uses, now also in global map
+    unsubs.push(on("event", (msg) => {
+      const event = msg.event as AgentEvent
+      if (!event || !event.id) return
+      // Determine sessionId: either from the message or from the event itself
+      const sid = (msg.sessionId as string) || ""
+      if (!sid) return
+      if (event.type === "token_usage") return // skip noise
+      setSessionEventsMap(prev => {
+        const next = new Map(prev)
+        const events = next.get(sid) || []
+        // Dedup by id
+        if (events.some(e => e.id === event.id)) {
+          // Update status if changed
+          const idx = events.findIndex(e => e.id === event.id)
+          if (idx !== -1 && event.status && event.status !== events[idx].status) {
+            const updated = [...events]
+            updated[idx] = { ...events[idx], status: event.status }
+            next.set(sid, updated)
+            return next
+          }
+          return prev
+        }
+        const merged = [...events, event].slice(-200)
+        merged.sort((a, b) => a.timestamp - b.timestamp)
+        next.set(sid, merged)
+        return next
+      })
+    }))
+
+    // Replay stored events on attach/request_events
+    unsubs.push(on("events_replay", (msg) => {
+      const replayed = (msg.events as AgentEvent[]) || []
+      const sid = (msg.sessionId as string) || ""
+      if (!sid || replayed.length === 0) return
+      const filtered = replayed.filter(e => {
+        if (e.type === "token_usage") return false
+        if (e.type === "decision_request" && e.status !== "waiting") return false
+        return true
+      })
+      if (filtered.length === 0) return
+      setSessionEventsMap(prev => {
+        const next = new Map(prev)
+        const existing = next.get(sid) || []
+        const existingIds = new Set(existing.map(e => e.id))
+        const newEvents = filtered.filter(e => !existingIds.has(e.id))
+        if (newEvents.length === 0) return prev
+        const merged = [...existing, ...newEvents].sort((a, b) => a.timestamp - b.timestamp).slice(-200)
+        next.set(sid, merged)
+        return next
+      })
+    }))
+
+    return () => { for (const u of unsubs) u() }
   }, [on])
 
   const toggleTheme = () => {
     const newTheme = theme === "light" ? "dark" : "light"
     setTheme(newTheme)
     localStorage.setItem("agentrune_theme", newTheme)
+    // Notify Electron to update titlebar overlay colors
+    ;(window as any).electronAPI?.setTheme?.(newTheme === "dark")
   }
 
   // Snapshot event handler — dispatched by ProjectOverview context menu
@@ -2115,8 +2275,7 @@ export function App() {
     setShouldResumeCurrentSession(false)
     saveLastProject(projectId)
     setActiveSessions((prev) => [...prev, { id: sessionId, projectId, agentId }])
-    setScreen("session")
-    setViewMode("board")
+    if (!isDesktop) { setScreen("session"); setViewMode("board") }
   }
 
   // Resume handler — resumes a specific AgentRune PTY session (not Claude Code session)
@@ -2136,7 +2295,7 @@ export function App() {
         setResumeSessionId(undefined)
       }
       saveLastProject(session.projectId)
-      setScreen("session")
+      if (!isDesktop) setScreen("session")
     } else {
       console.warn("[handleResume] session not found:", sessionId, "available:", activeSessions.map(s => s.id))
     }
@@ -2151,8 +2310,7 @@ export function App() {
       setCurrentSessionId(sessionId)
       setShouldResumeCurrentSession(true)
       saveLastProject(session.projectId)
-      setScreen("session")
-      setViewMode("terminal")
+      if (!isDesktop) { setScreen("session"); setViewMode("terminal") }
     }
   }
 
@@ -2219,7 +2377,7 @@ export function App() {
           <div key="builder" style={PAGE_STYLE}>
             <Suspense fallback={null}><ChainBuilder onBack={() => setScreen("overview")} t={t} /></Suspense>
           </div>
-        ) : isSessionReady ? (
+        ) : isSessionReady && !isDesktop ? (
           <div key="session" style={PAGE_STYLE}>
             {/* Always keep TerminalView mounted to preserve xterm content.
                 When in board mode, push it behind MissionControl with lower z-index
@@ -2294,57 +2452,85 @@ export function App() {
           </div>
         ) : (screen === "overview" || screen === "session") ? (
           <div key="overview" style={PAGE_STYLE}>
-            <Suspense fallback={null}><UnifiedPanel
-              activeSessions={activeSessions}
-              sessionEvents={sessionEventsMap}
-              projects={projects}
-              selectedProject={selectedProject}
-              onSelectSession={handleResume}
-              onNewSession={() => {}}
-              onLaunch={handleLaunch}
-              onNewProject={handleNewProject}
-              onDeleteProject={handleDeleteProject}
-              onKillSession={handleKill}
-              onSessionInput={(sessionId, data) => {
-                send({ type: "session_input", sessionId, data })
-              }}
-              onNextStep={(sessionId, step) => {
-                handleResume(sessionId)
-                setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
-              }}
-              send={send}
-              theme={theme}
-              toggleTheme={toggleTheme}
-              wsConnected={wsConnected}
-              onOpenBuilder={() => setScreen("builder")}
-              onCloudConnect={async (url, token) => {
-                localStorage.setItem("agentrune_server", url)
-                setServerUrl(url)
-                setServerReady(true)
-                let csToken = token
-                if (!csToken) {
-                  const phoneToken = localStorage.getItem("agentrune_phone_token")
-                  if (phoneToken) {
-                    try {
-                      const authRes = await fetch(`${url}/api/auth/cloud`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ phoneToken }),
-                      })
-                      if (authRes.ok) {
-                        const authData = await authRes.json()
-                        csToken = authData.sessionToken
-                      }
-                    } catch {}
+            {isDesktop ? (
+              <Suspense fallback={null}><Dashboard
+                projects={projects}
+                activeSessions={activeSessions}
+                sessionEvents={sessionEventsMap}
+                send={send}
+                on={on}
+                sessionToken={wsToken}
+                wsConnected={wsConnected}
+                apiBase={getApiBase()}
+                theme={theme}
+                toggleTheme={toggleTheme}
+                onSelectSession={handleResume}
+                onNewSession={() => {}}
+                onLaunch={handleLaunch}
+                onOpenBuilder={() => setScreen("builder")}
+                pendingPhaseGate={pendingPhaseGate}
+                pendingReauthQueue={pendingReauthQueue}
+                onPhaseGateRespond={handlePhaseGateRespond}
+                onReauth={(automationId) => {
+                  send({ type: "reauth_resolve", automationId, action: "approve" })
+                }}
+                onKillSession={handleKill}
+                onNewProject={handleNewProject}
+                onDeleteProject={handleDeleteProject}
+              /></Suspense>
+            ) : (
+              <Suspense fallback={null}><UnifiedPanel
+                activeSessions={activeSessions}
+                sessionEvents={sessionEventsMap}
+                projects={projects}
+                selectedProject={selectedProject}
+                onSelectSession={handleResume}
+                onNewSession={() => {}}
+                onLaunch={handleLaunch}
+                onNewProject={handleNewProject}
+                onDeleteProject={handleDeleteProject}
+                onKillSession={handleKill}
+                onSessionInput={(sessionId, data) => {
+                  send({ type: "session_input", sessionId, data })
+                }}
+                onNextStep={(sessionId, step) => {
+                  handleResume(sessionId)
+                  setTimeout(() => send({ type: "input", data: step + "\n" }), 500)
+                }}
+                send={send}
+                theme={theme}
+                toggleTheme={toggleTheme}
+                wsConnected={wsConnected}
+                onOpenBuilder={() => setScreen("builder")}
+                onCloudConnect={async (url, token) => {
+                  localStorage.setItem("agentrune_server", url)
+                  setServerUrl(url)
+                  setServerReady(true)
+                  let csToken = token
+                  if (!csToken) {
+                    const phoneToken = localStorage.getItem("agentrune_phone_token")
+                    if (phoneToken) {
+                      try {
+                        const authRes = await fetch(`${url}/api/auth/cloud`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ phoneToken }),
+                        })
+                        if (authRes.ok) {
+                          const authData = await authRes.json()
+                          csToken = authData.sessionToken
+                        }
+                      } catch {}
+                    }
                   }
-                }
-                if (csToken) {
-                  localStorage.setItem("agentrune_cloud_token", csToken)
-                  setCloudSessionToken(csToken)
-                }
-                recheckAuth()
-              }}
-            /></Suspense>
+                  if (csToken) {
+                    localStorage.setItem("agentrune_cloud_token", csToken)
+                    setCloudSessionToken(csToken)
+                  }
+                  recheckAuth()
+                }}
+              /></Suspense>
+            )}
           </div>
         ) : (
           <div key="launchpad" style={PAGE_STYLE}>
@@ -2437,6 +2623,85 @@ export function App() {
           />
         </Suspense>
       )}
+      {pendingReauth && (
+        <Suspense fallback={null}>
+          <ReauthSheet
+            request={pendingReauth}
+            onRespond={handleReauthRespond}
+            t={t}
+          />
+        </Suspense>
+      )}
     </ErrorBoundary>
   )
+}
+
+type SessionSnapshot = {
+  id: string
+  projectId: string
+  agentId: string
+  worktreeBranch?: string | null
+  lastEventTitle?: string
+  summaryText?: string
+  nextAction?: string
+  summaryStatus?: "blocked" | "done" | "working" | "idle"
+  summaryUpdatedAt?: number
+  status?: string
+  claudeSessionId?: string
+}
+
+const SESSION_ACTIVITY_TYPES: AgentEvent["type"][] = [
+  "file_edit",
+  "file_create",
+  "file_delete",
+  "command_run",
+  "test_result",
+  "install_package",
+  "decision_request",
+  "error",
+  "info",
+  "token_usage",
+  "response",
+  "user_message",
+  "session_summary",
+  "progress_report",
+]
+
+function normalizeSessionActivityType(value: unknown): AgentEvent["type"] {
+  return typeof value === "string" && SESSION_ACTIVITY_TYPES.includes(value as AgentEvent["type"])
+    ? value as AgentEvent["type"]
+    : "response"
+}
+
+function buildSessionSeedEvent(snapshot: SessionSnapshot): AgentEvent | null {
+  const summary = (snapshot.summaryText || snapshot.lastEventTitle || "").trim()
+  const nextAction = (snapshot.nextAction || "").trim()
+  if (!summary && !nextAction) return null
+
+  const progressStatus = snapshot.summaryStatus === "blocked"
+    ? "blocked"
+    : snapshot.summaryStatus === "done"
+      ? "done"
+      : "in_progress"
+  const timestamp = snapshot.summaryUpdatedAt || Date.now()
+
+  return {
+    id: `seed_${snapshot.id}_${timestamp}`,
+    timestamp,
+    type: nextAction ? "progress_report" : "response",
+    status: snapshot.summaryStatus === "blocked"
+      ? "failed"
+      : snapshot.summaryStatus === "done"
+        ? "completed"
+        : "in_progress",
+    title: summary,
+    detail: nextAction || undefined,
+    progress: {
+      title: summary,
+      status: progressStatus,
+      summary,
+      nextSteps: nextAction ? [nextAction] : [],
+      details: snapshot.lastEventTitle && snapshot.lastEventTitle !== summary ? snapshot.lastEventTitle : undefined,
+    },
+  }
 }

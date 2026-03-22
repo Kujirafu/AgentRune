@@ -45,6 +45,17 @@
       --sheet-glow-2: rgba(139,92,246,0.08);
     }
 
+    /* Scrollbar — light mode */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.4); }
+    ::-webkit-scrollbar-corner { background: transparent; }
+
+    /* Scrollbar — dark mode */
+    html.dark ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.15); }
+    html.dark ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.3); }
+
     html, body, #root {
       height: 100dvh;
       height: 100%;

@@ -1,8 +1,12 @@
 // server/pty-manager.ts
 // Ported from AirTerm/server/sessions.ts
-import * as pty from "node-pty"
 import { EventEmitter } from "node:events"
+import type * as pty from "node-pty"
 import type { Project } from "../shared/types.js"
+import {
+  createLocalAgentExecutor,
+  type AgentExecutor,
+} from "./agent-executor.js"
 
 export interface ManagedSession {
   id: string
@@ -18,6 +22,12 @@ const MAX_SCROLLBACK = 20000
 
 export class PtyManager extends EventEmitter {
   private sessions = new Map<string, ManagedSession>()
+  private executor: AgentExecutor
+
+  constructor(executor: AgentExecutor = createLocalAgentExecutor()) {
+    super()
+    this.executor = executor
+  }
 
   getAll(): { id: string; projectId: string; projectName: string; agentId: string; cwd: string; lastActivity: number }[] {
     return [...this.sessions.values()].map((s) => ({
@@ -45,22 +55,15 @@ export class PtyManager extends EventEmitter {
       if (existing) return existing
     }
 
-    const id = sessionId || `${project.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+    const id = sessionId || this.executor.createSessionId(project.id)
     const shell = project.shell || (process.platform === "win32" ? "powershell.exe" : "bash")
-    const term = pty.spawn(shell, [], {
-      name: "xterm-256color",
+    const term = this.executor.spawnTerminal({
+      shell,
+      cwd: project.cwd,
       cols: 120,
       rows: 30,
-      cwd: project.cwd,
-      env: (() => {
-        const e = { ...process.env, ...extraEnv }
-        // Remove Claude Code session markers to prevent "nested session" detection
-        // when daemon is launched from within a Claude Code session.
-        // Keep ANTHROPIC_API_KEY (needed for claude --print to authenticate)
-        delete (e as any).CLAUDECODE
-        delete (e as any).CLAUDE_CODE_ENTRYPOINT
-        return e
-      })() as Record<string, string>,
+      name: "xterm-256color",
+      extraEnv,
     })
 
     const session: ManagedSession = {

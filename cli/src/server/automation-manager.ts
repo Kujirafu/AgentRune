@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, create
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 import { readEncryptedFile, writeEncryptedFile, isEncrypted } from "./crypto.js"
-import { spawn, execSync, execFileSync, type ChildProcess } from "node:child_process"
+import { execSync, execFileSync, spawn, type ChildProcess } from "node:child_process"
 import { getConfigDir } from "../shared/config.js"
 import { log } from "../shared/logger.js"
 import { VaultSync } from "./vault-sync.js"
@@ -34,9 +34,25 @@ import {
   rememberSocialPublishCooldown,
 } from "./social-dedup.js"
 import { recordPublishedSocialPost } from "./social-history.js"
-import { publishSocialPost } from "./social-publisher.js"
+import { publishSocialPost, postMoltbookComment, pickCtaVariant, postXSelfReply, pickXCtaVariant } from "./social-publisher.js"
 import { extractAutomationSummary } from "./automation-summary.js"
 import { callLlmForSummary, shouldUseLlmSummary } from "./llm-summary.js"
+import {
+  estimatePhaseGateReviewMs,
+  estimateReauthReviewMs,
+  summarizeReviewDecision,
+} from "./automation-review.js"
+import {
+  computeAutomationBehaviorStateHash,
+  computeAutomationLaunchStateHash,
+  computeAutomationPromptStateHash,
+  validateAutomationLaunchState,
+} from "./automation-state.js"
+import {
+  buildAgentEnvironment,
+  createLocalAgentExecutor,
+  type AgentExecutor,
+} from "./agent-executor.js"
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
@@ -200,12 +216,14 @@ export interface PhaseGateRequest {
   totalTokensUsed: number
   tokenBudget: number
   timestamp: number
+  estimatedReviewMs?: number
 }
 
 export interface PhaseGateResponse {
   automationId: string
   action: PhaseGateAction
   instructions?: string
+  reviewNote?: string
 }
 
 export interface CrewRoleResult {
@@ -246,6 +264,7 @@ export interface AutomationConfig {
   locale?: string
   model?: string            // e.g. "sonnet", "opus", "haiku" (agent-specific)
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode, requires per-run human confirmation)
+  behaviorStateHash?: string
   // Trust Layer — trustProfile controls sandboxLevel, requireMergeApproval, requirePlanReview, dailyRunLimit
   trustProfile?: TrustProfile        // default: "supervised"
   requireMergeApproval?: boolean
@@ -273,6 +292,10 @@ export interface AutomationResult {
   summary?: string
   status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken" | "interrupted" | "pending_reauth"
   riskReport?: SkillRiskReport
+  behaviorStateHash?: string
+  promptStateHash?: string
+  launchStateHash?: string
+  behaviorStateIssues?: string[]
   pendingMerge?: { worktreePath: string; branch: string; sessionId: string }  // set when requireMergeApproval=true and execution succeeded
   crewReport?: CrewExecutionReport  // set for crew automation runs
 }
@@ -411,6 +434,7 @@ export interface PendingReauth {
   permissionKey: string
   authorityMap: AuthorityMap
   killedAt: number
+  estimatedReviewMs?: number
 }
 
 export type AutomationEventCallback = (event:
@@ -420,7 +444,7 @@ export type AutomationEventCallback = (event:
   | { type: "bypass_confirmation_required"; automationId: string; automationName: string }
   | { type: "daily_limit_reached"; automationId: string; automationName: string; limit: number; todayCount: number }
   | { type: "plan_review_required"; automationId: string; automationName: string; timeoutMinutes: number }
-  | { type: "reauth_required"; automationId: string; automationName: string; permissionKey: string; violationType: string; violationDescription: string }
+  | { type: "reauth_required"; automationId: string; automationName: string; permissionKey: string; violationType: string; violationDescription: string; killedAt: number; estimatedReviewMs?: number }
   | { type: "phase_gate_waiting"; gate: PhaseGateRequest }
 ) => void
 
@@ -450,6 +474,7 @@ export class AutomationManager {
   private onEvent?: AutomationEventCallback
   private vaultPath?: string
   private limits: AutomationLimits
+  private executor: AgentExecutor
   private whitelist: SkillWhitelist
   /** Pending confirmations: automationId → { resolve, timer } */
   private pendingConfirmations = new Map<string, { resolve: (action: "approve" | "approve_and_trust" | "deny") => void; timer: NodeJS.Timeout }>()
@@ -469,12 +494,13 @@ export class AutomationManager {
 
   private schedulingEnabled: boolean
 
-  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits; schedulingEnabled?: boolean }) {
+  constructor(ptyManager: PtyManager, projects: Project[], onEvent?: AutomationEventCallback, opts?: { vaultPath?: string; limits?: AutomationLimits; schedulingEnabled?: boolean; executor?: AgentExecutor }) {
     this.ptyManager = ptyManager
     this.projects = projects
     this.onEvent = onEvent
     this.vaultPath = opts?.vaultPath
     this.limits = opts?.limits || FREE_LIMITS
+    this.executor = opts?.executor || createLocalAgentExecutor()
     this.schedulingEnabled = opts?.schedulingEnabled !== false // default true
     this.whitelist = new SkillWhitelist()
     this.storageDir = join(getConfigDir(), "automations")
@@ -501,6 +527,16 @@ export class AutomationManager {
     const pending = this.pendingPhaseGates.get(automationId)
     if (!pending) return false
     this.pendingPhaseGates.delete(automationId)
+    const review = summarizeReviewDecision({
+      requestedAt: pending.request.timestamp,
+      estimatedReviewMs: pending.request.estimatedReviewMs,
+      reviewNote: response.reviewNote,
+    })
+    auditLog("phase_gate_response", {
+      action: response.action,
+      hasInstructions: !!response.instructions,
+      ...review,
+    }, { automationId, automationName: pending.request.automationName })
     pending.resolve(response)
     return true
   }
@@ -525,11 +561,20 @@ export class AutomationManager {
    * Approve → grant permission + re-trigger automation.
    * Deny → mark automation as blocked, no re-trigger.
    */
-  async resolveReauth(automationId: string, action: "approve" | "deny", opts?: { noExpiry?: boolean }): Promise<{ success: boolean; message: string }> {
+  async resolveReauth(
+    automationId: string,
+    action: "approve" | "deny",
+    opts?: { noExpiry?: boolean; reviewNote?: string },
+  ): Promise<{ success: boolean; message: string }> {
     const pending = this.pendingReauths.get(automationId)
     if (!pending) return { success: false, message: "No pending reauth found" }
 
     this.pendingReauths.delete(automationId)
+    const review = summarizeReviewDecision({
+      requestedAt: pending.killedAt,
+      estimatedReviewMs: pending.estimatedReviewMs,
+      reviewNote: opts?.reviewNote,
+    })
 
     if (action === "deny") {
       // Mark automation status as blocked
@@ -542,7 +587,10 @@ export class AutomationManager {
       this.authorityMaps.delete(automationId)
       this.running.delete(automationId)
 
-      auditLog("reauth_denied", { permissionKey: pending.permissionKey }, { automationId, automationName: pending.automationName })
+      auditLog("reauth_denied", {
+        permissionKey: pending.permissionKey,
+        ...review,
+      }, { automationId, automationName: pending.automationName })
       log.info(`[Automation] Reauth denied for "${pending.automationName}": ${pending.permissionKey}`)
       return { success: true, message: "Reauth denied — automation blocked" }
     }
@@ -562,6 +610,7 @@ export class AutomationManager {
       permissionKey: pending.permissionKey,
       noExpiry: opts?.noExpiry || false,
       severity,
+      ...review,
     }, { automationId, automationName: pending.automationName })
     log.info(`[Automation] Reauth approved for "${pending.automationName}": ${pending.permissionKey} (noExpiry=${opts?.noExpiry || false})`)
 
@@ -658,6 +707,7 @@ export class AutomationManager {
       automation.dailyRunLimit = automation.dailyRunLimit ?? expanded.dailyRunLimit
       automation.planReviewTimeoutMinutes = automation.planReviewTimeoutMinutes ?? expanded.planReviewTimeoutMinutes
     }
+    automation.behaviorStateHash = computeAutomationBehaviorStateHash(automation)
     this.automations.set(id, automation)
     this.results.set(id, [])
     this.persistFullState()
@@ -767,6 +817,7 @@ export class AutomationManager {
       if (auto.enabled) this.startSchedule(auto)
     }
 
+    auto.behaviorStateHash = computeAutomationBehaviorStateHash(auto)
     this.persistFullState()
     return { ...auto, nextRunAt: this.nextRunAtMap.get(id) }
   }
@@ -869,7 +920,7 @@ export class AutomationManager {
       this.timers.set(auto.id, timer)
       return
     }
-
+    // behavior state validation happens during execution, not during schedule calculation
     log.warn(`[Automation] No valid next day found for "${auto.name}" — no weekdays selected?`)
   }
 
@@ -923,7 +974,7 @@ export class AutomationManager {
   /** Build the agent command args + prompt file for an automation.
    *  Prompt is written to a temp file and piped via stdin (child_process.spawn).
    */
-  private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string } | null {
+  private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string; fullPrompt: string } | null {
     const rawPrompt = auto.prompt || ""
     let promptText = wrapPromptWithLocale(rawPrompt, getAutomationLocale(auto))
     const socialMode = detectAutomationSocialMode(auto)
@@ -995,16 +1046,16 @@ export class AutomationManager {
         // Use -p with short instruction to read prompt file — avoids stdin pipe issues with long prompts
         const args = ["-p", `Read and follow all instructions in this file: ${promptFilePath}`, "--dangerously-skip-permissions"]
         if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
-        return { bin: "claude", args, promptFilePath }
+        return { bin: "claude", args, promptFilePath, fullPrompt }
       }
       case "codex": {
         const args = ["--full-auto", "-q", `Read and follow all instructions in ${promptFilePath}`]
         if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
-        return { bin: "codex", args, promptFilePath }
+        return { bin: "codex", args, promptFilePath, fullPrompt }
       }
       default: {
         const agentBin = auto.agentId && /^[a-zA-Z0-9_-]+$/.test(auto.agentId) ? auto.agentId : "claude"
-        return { bin: agentBin, args: ["--print"], promptFilePath }
+        return { bin: agentBin, args: ["--print"], promptFilePath, fullPrompt }
       }
     }
   }
@@ -1278,6 +1329,28 @@ export class AutomationManager {
       log.warn(`[Automation] Could not build command for "${auto.name}" (agent=${auto.agentId})`)
       return
     }
+    auto.behaviorStateHash = auto.behaviorStateHash || computeAutomationBehaviorStateHash(auto)
+    const promptStateHash = computeAutomationPromptStateHash(built.fullPrompt)
+    const launchStateHash = computeAutomationLaunchStateHash({
+      bin: built.bin,
+      args: built.args,
+      fullPrompt: built.fullPrompt,
+    })
+    const behaviorStateIssues = validateAutomationLaunchState(auto, {
+      bin: built.bin,
+      args: built.args,
+      fullPrompt: built.fullPrompt,
+    })
+    if (behaviorStateIssues.length > 0) {
+      auditLog("runtime_violation", {
+        type: "behavior_state",
+        description: "Configured automation state did not fully reach the runtime launch snapshot",
+        matchedText: behaviorStateIssues.join(" | "),
+        permissionKey: "behavior.state",
+        permitted: false,
+        halted: false,
+      }, { automationId: id, automationName: auto.name })
+    }
 
     // Worktree setup — create isolated worktree if runMode === "worktree"
     let worktree: { path: string; branch: string } | null = null
@@ -1334,6 +1407,7 @@ export class AutomationManager {
           // Kill process + save context for reauth
           const proc = this.runningProcesses.get(id)
           if (proc && !proc.killed) killProcessTree(proc)
+          const estimatedReviewMs = estimateReauthReviewMs(permissionKey, violation.description)
 
           const reauth: PendingReauth = {
             automationId: id,
@@ -1344,11 +1418,13 @@ export class AutomationManager {
             permissionKey,
             authorityMap: runtimeAuthority,
             killedAt: Date.now(),
+            estimatedReviewMs,
           }
           this.pendingReauths.set(id, reauth)
           auditLog("reauth_required", {
             permissionKey, violationType: violation.type,
             violationDescription: violation.description,
+            estimatedReviewMs,
           }, { automationId: id, automationName: auto.name })
           log.warn(`[Automation] Reauth required for "${auto.name}": ${permissionKey} — waiting for user`)
 
@@ -1364,6 +1440,8 @@ export class AutomationManager {
               permissionKey,
               violationType: violation.type,
               violationDescription: violation.description,
+              killedAt: reauth.killedAt,
+              estimatedReviewMs,
             })
           }
         },
@@ -1402,10 +1480,7 @@ export class AutomationManager {
 
       // Spawn agent process directly — no PTY, clean stdin/stdout pipe
       const TIMEOUT_MS = (auto.timeoutMinutes || 30) * 60 * 1000
-      const env = { ...process.env }
-      // Remove Claude Code session markers to prevent "nested session" detection
-      delete (env as any).CLAUDECODE
-      delete (env as any).CLAUDE_CODE_ENTRYPOINT
+      const env = buildAgentEnvironment()
 
       const result = await new Promise<{ exitCode: number | null; timedOut: boolean; output: string }>((resolve) => {
         let resolved = false
@@ -1413,41 +1488,48 @@ export class AutomationManager {
         let outputBytes = 0
         const MAX_OUTPUT_CAPTURE = 100_000
 
-        const proc = spawn(built.bin, built.args, {
+        const proc = this.executor.spawnProcess({
+          command: built.bin,
+          args: built.args,
           cwd: worktree?.path || execProject.cwd,
-          env,
+          baseEnv: env,
           stdio: ["pipe", "pipe", "pipe"],
-          // Detach on POSIX for process group isolation; skip on Windows (creates visible console)
-          ...(process.platform !== "win32" ? { detached: true } : {}),
+          detached: process.platform !== "win32",
           windowsHide: true,
         })
 
         this.runningProcesses.set(id, proc)
 
         // Close stdin — prompt is passed via -p flag or agent reads from file
-        try { proc.stdin.end() } catch {}
-        proc.stdin.on("error", () => {})
+        if (proc.stdin) {
+          try { proc.stdin.end() } catch {}
+          proc.stdin.on("error", () => {})
+        }
 
         // Collect stdout (with error handler to prevent daemon crash on broken pipe)
-        proc.stdout.on("data", (data: Buffer) => {
-          const text = data.toString()
-          if (outputBytes < MAX_OUTPUT_CAPTURE) {
-            outputChunks.push(text)
-            outputBytes += text.length
-          }
-          monitor.processOutput(text)
-        })
-        proc.stdout.on("error", () => {})
+        if (proc.stdout) {
+          proc.stdout.on("data", (data: Buffer) => {
+            const text = data.toString()
+            if (outputBytes < MAX_OUTPUT_CAPTURE) {
+              outputChunks.push(text)
+              outputBytes += text.length
+            }
+            monitor.processOutput(text)
+          })
+          proc.stdout.on("error", () => {})
+        }
 
         // Collect stderr (merge into output, with error handler)
-        proc.stderr.on("data", (data: Buffer) => {
-          const text = data.toString()
-          if (outputBytes < MAX_OUTPUT_CAPTURE) {
-            outputChunks.push(text)
-            outputBytes += text.length
-          }
-        })
-        proc.stderr.on("error", () => {})
+        if (proc.stderr) {
+          proc.stderr.on("data", (data: Buffer) => {
+            const text = data.toString()
+            if (outputBytes < MAX_OUTPUT_CAPTURE) {
+              outputChunks.push(text)
+              outputBytes += text.length
+            }
+          })
+          proc.stderr.on("error", () => {})
+        }
 
         proc.on("close", (code) => {
           if (!resolved) {
@@ -1492,6 +1574,9 @@ export class AutomationManager {
       if (monitor.getViolations().length > 0) {
         const violations = monitor.getViolations()
         output += `\n\n--- Monitor Report ---\nViolations: ${violations.length}\n${violations.map(v => `[${v.severity}] ${v.type}: ${v.description} — "${v.matchedText}"`).join("\n")}`
+      }
+      if (behaviorStateIssues.length > 0) {
+        output += `\n\n--- Behavior State ---\nConfig Hash: ${auto.behaviorStateHash}\nPrompt Hash: ${promptStateHash}\nLaunch Hash: ${launchStateHash}\nIssues:\n${behaviorStateIssues.map((issue) => `- ${issue}`).join("\n")}`
       }
       if (socialMode && status === "success") {
         const directive = extractAutomationSocialDirective(output, socialMode.platform)
@@ -1540,6 +1625,63 @@ export class AutomationManager {
                 output += `\nDuplicate Guard: ${dedupeResult.stored ? "recorded" : "already recorded"}`
               } else {
                 output += `\nDuplicate Guard: failed\nDuplicate Guard Error: ${dedupeResult.error || "Unknown duplicate history error"}`
+              }
+
+              // Auto-reply CTA on Moltbook posts
+              if (directive.platform === "moltbook" && publishResult.postId) {
+                try {
+                  await new Promise((resolve) => setTimeout(resolve, 5000))
+                  const cta = pickCtaVariant()
+                  const ctaResult = await postMoltbookComment(publishResult.postId, cta)
+                  if (ctaResult.success) {
+                    log.info(`[Automation] CTA self-reply posted on ${publishResult.postId}`)
+                  } else {
+                    log.warn(`[Automation] CTA self-reply failed: ${ctaResult.error}`)
+                  }
+                } catch (ctaErr) {
+                  log.warn(`[Automation] CTA self-reply error: ${ctaErr instanceof Error ? ctaErr.message : String(ctaErr)}`)
+                }
+              }
+
+              // Auto-reply CTA on X posts
+              if (directive.platform === "x" && publishResult.postId) {
+                try {
+                  await new Promise((resolve) => setTimeout(resolve, 10000))
+                  const cta = pickXCtaVariant()
+                  const ctaResult = await postXSelfReply(publishResult.postId, cta)
+                  if (ctaResult.success) {
+                    log.info(`[Automation] X CTA self-reply posted on ${publishResult.postId}`)
+                  } else {
+                    log.warn(`[Automation] X CTA self-reply failed: ${ctaResult.error}`)
+                  }
+                } catch (ctaErr) {
+                  log.warn(`[Automation] X CTA self-reply error: ${ctaErr instanceof Error ? ctaErr.message : String(ctaErr)}`)
+                }
+              }
+
+              // Auto-trigger Playwright reply bot after X post
+              // Spawns as detached background process with jittered delay, engages with related growing posts
+              if (directive.platform === "x") {
+                try {
+                  const replyScript = join(project.cwd, "scripts", "x-auto-reply.ts")
+                  if (existsSync(replyScript)) {
+                    const topicText = (directive.text.split("\n---\n")[0] || "").slice(0, 200)
+                    // Jittered delay: 15-30 min (anti-detection: not always the same gap)
+                    const delayMin = 15 + Math.floor(Math.random() * 16)
+                    const child = spawn("npx", ["tsx", replyScript, "--delay-min", String(delayMin)], {
+                      shell: true,
+                      detached: true,
+                      stdio: "ignore",
+                      cwd: project.cwd,
+                      env: { ...process.env, X_REPLY_TOPIC: topicText },
+                    })
+                    child.unref()
+                    log.info(`[Automation] X reply bot spawned (PID ${child.pid}), will start in ~${delayMin} min`)
+                    output += `\nReply Bot: spawned (PID ${child.pid}), starts in ~${delayMin} min`
+                  }
+                } catch (replyErr) {
+                  log.warn(`[Automation] X reply bot spawn failed: ${replyErr instanceof Error ? replyErr.message : String(replyErr)}`)
+                }
               }
 
               const historyResult = recordPublishedSocialPost({
@@ -1613,9 +1755,11 @@ export class AutomationManager {
       output,
       summary,
       status,
+      behaviorStateHash: auto.behaviorStateHash,
+      promptStateHash,
+      launchStateHash,
+      behaviorStateIssues: behaviorStateIssues.length > 0 ? [...behaviorStateIssues] : undefined,
     }
-
-    this.storeResult(id, resultEntry)
 
     // Update automation with last run info
     auto.lastRunAt = resultEntry.finishedAt
@@ -1669,6 +1813,8 @@ export class AutomationManager {
         }
       }
     }
+
+    this.storeResult(id, resultEntry)
 
     // Broadcast completion event
     auditLog("automation_completed", { status: resultEntry.status, exitCode: resultEntry.exitCode, durationMs: resultEntry.finishedAt - resultEntry.startedAt }, { automationId: id, automationName: auto.name })
@@ -1816,6 +1962,7 @@ export class AutomationManager {
           totalTokensUsed: report.totalTokensUsed,
           tokenBudget: crew.tokenBudget,
           timestamp: Date.now(),
+          estimatedReviewMs: estimatePhaseGateReviewMs(roleResults),
         }
 
         log.info(`[Crew] Phase gate: waiting for human decision after phase ${phaseNum}`)
@@ -1831,7 +1978,6 @@ export class AutomationManager {
         })
 
         log.info(`[Crew] Phase gate response: ${gateResponse.action}${gateResponse.instructions ? ` (with instructions)` : ""}`)
-        auditLog("phase_gate_response", { action: gateResponse.action, hasInstructions: !!gateResponse.instructions }, { automationId: id, automationName: auto.name })
 
         if (gateResponse.action === "abort") {
           // Mark remaining phases as aborted
@@ -2000,9 +2146,7 @@ export class AutomationManager {
 
     // Spawn process
     const ROLE_TIMEOUT_MS = (auto.timeoutMinutes || 30) * 60 * 1000
-    const env = { ...process.env }
-    delete (env as any).CLAUDECODE
-    delete (env as any).CLAUDE_CODE_ENTRYPOINT
+    const env = buildAgentEnvironment()
 
     try {
       const result = await new Promise<{ exitCode: number | null; timedOut: boolean; output: string }>((resolve) => {
@@ -2011,34 +2155,42 @@ export class AutomationManager {
         let outputBytes = 0
         const MAX_OUTPUT = 100_000
 
-        const proc = spawn(bin, args, {
+        const proc = this.executor.spawnProcess({
+          command: bin,
+          args,
           cwd,
-          env,
+          baseEnv: env,
           stdio: ["pipe", "pipe", "pipe"],
-          ...(process.platform !== "win32" ? { detached: true } : {}),
+          detached: process.platform !== "win32",
           windowsHide: true,
         })
 
-        try { proc.stdin.end() } catch {}
-        proc.stdin.on("error", () => {})
+        if (proc.stdin) {
+          try { proc.stdin.end() } catch {}
+          proc.stdin.on("error", () => {})
+        }
 
-        proc.stdout.on("data", (data: Buffer) => {
-          const text = data.toString()
-          if (outputBytes < MAX_OUTPUT) {
-            outputChunks.push(text)
-            outputBytes += text.length
-          }
-        })
-        proc.stdout.on("error", () => {})
+        if (proc.stdout) {
+          proc.stdout.on("data", (data: Buffer) => {
+            const text = data.toString()
+            if (outputBytes < MAX_OUTPUT) {
+              outputChunks.push(text)
+              outputBytes += text.length
+            }
+          })
+          proc.stdout.on("error", () => {})
+        }
 
-        proc.stderr.on("data", (data: Buffer) => {
-          const text = data.toString()
-          if (outputBytes < MAX_OUTPUT) {
-            outputChunks.push(text)
-            outputBytes += text.length
-          }
-        })
-        proc.stderr.on("error", () => {})
+        if (proc.stderr) {
+          proc.stderr.on("data", (data: Buffer) => {
+            const text = data.toString()
+            if (outputBytes < MAX_OUTPUT) {
+              outputChunks.push(text)
+              outputBytes += text.length
+            }
+          })
+          proc.stderr.on("error", () => {})
+        }
 
         proc.on("close", (code) => {
           if (!resolved) { resolved = true; resolve({ exitCode: code, timedOut: false, output: outputChunks.join("") }) }
@@ -2237,6 +2389,11 @@ export class AutomationManager {
         if (auto.lastRunStatus === "running") {
           log.warn(`[Automation] "${auto.name}" was running when daemon last exited — marking interrupted`)
           auto.lastRunStatus = "interrupted"
+          needsSave = true
+        }
+        const behaviorStateHash = computeAutomationBehaviorStateHash(auto)
+        if (auto.behaviorStateHash !== behaviorStateHash) {
+          auto.behaviorStateHash = behaviorStateHash
           needsSave = true
         }
 

@@ -1,7 +1,7 @@
 // server/worktree-manager.ts
 // Manages git worktrees for session isolation
 import { execFileSync } from "node:child_process"
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync, lstatSync, copyFileSync } from "node:fs"
 import { join } from "node:path"
 import { log } from "../shared/logger.js"
 
@@ -91,7 +91,8 @@ export class WorktreeManager {
     if (existing) return existing
 
     const date = new Date().toISOString().slice(0, 10)
-    const slug = sanitizeSlug(taskSlug || sessionId.slice(0, 8))
+    const rand = Math.random().toString(36).slice(2, 6)
+    const slug = sanitizeSlug(taskSlug || sessionId.slice(0, 8)) + `-${rand}`
     const branch = `agentrune/${date}-${slug}`
     const worktreeDir = join(this.projectCwd, ".worktrees", `${date}-${slug}`)
 
@@ -110,6 +111,25 @@ export class WorktreeManager {
         encoding: "utf-8",
         stdio: "pipe",
       })
+    }
+
+    // Symlink key .agentrune/ files from main project to worktree
+    const agentruneDir = join(this.projectCwd, ".agentrune")
+    const worktreeAgentruneDir = join(worktreeDir, ".agentrune")
+    if (existsSync(agentruneDir)) {
+      mkdirSync(worktreeAgentruneDir, { recursive: true })
+      for (const file of ["agentlore.md", "rules.md"]) {
+        const src = join(agentruneDir, file)
+        const dst = join(worktreeAgentruneDir, file)
+        if (existsSync(src) && !existsSync(dst)) {
+          try {
+            copyFileSync(src, dst)
+            log.dim(`[Worktree] Copied ${file} → ${worktreeDir}`)
+          } catch (e) {
+            log.warn(`[Worktree] Failed to copy ${file}: ${e instanceof Error ? e.message : "unknown"}`)
+          }
+        }
+      }
     }
 
     const wt: Worktree = {

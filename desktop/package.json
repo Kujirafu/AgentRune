@@ -1,0 +1,23 @@
+{
+  "name": "agentrune-desktop",
+  "version": "0.2.30",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsup && electron .",
+    "build": "tsup",
+    "rebuild-pty": "electron-rebuild -m ../cli -o node-pty",
+    "package": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "@electron/rebuild": "^3.7.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0"
+  }
+}

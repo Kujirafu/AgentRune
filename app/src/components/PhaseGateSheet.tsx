@@ -1,11 +1,11 @@
 // PhaseGateSheet — Human intervention gate between crew phases
 // Shows phase results summary + 4 action buttons (proceed / instructions / retry / abort)
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import type { PhaseGateRequest, PhaseGateAction } from "../data/automation-types"
 
 interface PhaseGateSheetProps {
   gate: PhaseGateRequest
-  onRespond: (action: PhaseGateAction, instructions?: string) => void
+  onRespond: (action: PhaseGateAction, instructions?: string, reviewNote?: string) => void
   t: (key: string) => string
 }
 
@@ -36,16 +36,35 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 export default function PhaseGateSheet({ gate, onRespond, t }: PhaseGateSheetProps) {
+  const desktop = typeof window !== "undefined" && (window.innerWidth >= 900 || !!(window as any).electronAPI)
   const [mode, setMode] = useState<"main" | "instructions" | "retry">("main")
   const [instructions, setInstructions] = useState("")
+  const [reviewNote, setReviewNote] = useState("")
   const [sending, setSending] = useState(false)
 
   const tokenPct = gate.tokenBudget > 0 ? Math.min(100, Math.round((gate.totalTokensUsed / gate.tokenBudget) * 100)) : 0
 
+  useEffect(() => {
+    const blockBack = (event: Event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    document.addEventListener("app:back", blockBack, true)
+    return () => document.removeEventListener("app:back", blockBack, true)
+  }, [])
+
+  const formatReviewEta = (ms?: number) => {
+    if (!ms || ms <= 0) return null
+    if (ms < 60_000) return t("phaseGate.reviewEtaSeconds").replace("{n}", String(Math.max(1, Math.round(ms / 1000))))
+    return t("phaseGate.reviewEtaMinutes").replace("{n}", String(Math.max(1, Math.ceil(ms / 60_000))))
+  }
+
   const handleAction = (action: PhaseGateAction) => {
     setSending(true)
     const instr = instructions.trim() || undefined
-    onRespond(action, instr)
+    const note = reviewNote.trim() || undefined
+    onRespond(action, instr, note)
   }
 
   return (
@@ -58,19 +77,32 @@ export default function PhaseGateSheet({ gate, onRespond, t }: PhaseGateSheetPro
       {/* Sheet — no swipe dismiss */}
       <div
         style={{
-          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
-          maxHeight: "80dvh", borderRadius: "20px 20px 0 0",
+          position: "fixed", zIndex: 100,
           background: "var(--glass-bg, rgba(255,255,255,0.95))",
           backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-          boxShadow: "0 -4px 30px rgba(0,0,0,0.15)",
           display: "flex", flexDirection: "column",
           overflow: "hidden",
+          ...(desktop ? {
+            top: "50%", left: "50%", right: "auto", bottom: "auto",
+            transform: "translate(-50%, -50%)",
+            width: "min(560px, 90vw)",
+            maxHeight: "80vh",
+            borderRadius: 16,
+            boxShadow: "0 8px 40px rgba(0,0,0,0.25)",
+          } : {
+            bottom: 0, left: 0, right: 0,
+            maxHeight: "80dvh",
+            borderRadius: "20px 20px 0 0",
+            boxShadow: "0 -4px 30px rgba(0,0,0,0.15)",
+          }),
         }}
       >
-        {/* Handle */}
+        {/* Handle — hidden on desktop */}
+        {!desktop && (
         <div style={{ display: "flex", justifyContent: "center", padding: "8px 0 4px" }}>
           <div style={{ width: 36, height: 4, borderRadius: 2, background: "rgba(0,0,0,0.15)" }} />
         </div>
+        )}
 
         {/* Header */}
         <div style={{ padding: "8px 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -135,6 +167,23 @@ export default function PhaseGateSheet({ gate, onRespond, t }: PhaseGateSheetPro
             </div>
           </div>
 
+          {gate.estimatedReviewMs ? (
+            <div style={{
+              marginBottom: 14,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(55,172,192,0.2)",
+              background: "rgba(55,172,192,0.08)",
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0" }}>
+                {t("phaseGate.reviewHint")}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.5, color: "var(--text-secondary)" }}>
+                {t("phaseGate.reviewEta").replace("{time}", formatReviewEta(gate.estimatedReviewMs) || "")}
+              </div>
+            </div>
+          ) : null}
+
           {/* Phase results */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
             {gate.phaseResults.map((r) => (
@@ -176,6 +225,26 @@ export default function PhaseGateSheet({ gate, onRespond, t }: PhaseGateSheetPro
                 </div>
               </div>
             ))}
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
+              {t("phaseGate.reviewNoteLabel")}
+            </div>
+            <textarea
+              value={reviewNote}
+              onChange={(e) => setReviewNote(e.target.value)}
+              placeholder={t("phaseGate.reviewNotePlaceholder")}
+              rows={2}
+              style={{
+                width: "100%", padding: "10px 14px", borderRadius: 12,
+                border: "1px solid var(--glass-border)",
+                background: "var(--glass-bg)",
+                color: "var(--text-primary)", fontSize: 13,
+                outline: "none", boxSizing: "border-box",
+                fontFamily: "inherit", lineHeight: 1.5, resize: "vertical",
+              }}
+            />
           </div>
 
           {/* Instructions input (shown for proceed_with_instructions or retry_with_instructions) */}

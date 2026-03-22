@@ -3,7 +3,7 @@
 // Replaces the 2-panel ProjectOverview with a single vertical-scrolling page.
 import React, { useState, useEffect, useRef, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import type { Project, AppSession, AgentEvent, ProgressReport } from "../types"
+import type { Project, AppSession, AgentEvent } from "../types"
 import { AGENTS } from "../types"
 import { NewSessionSheet } from "./NewSessionSheet"
 import { AutomationSheet } from "./AutomationSheet"
@@ -22,6 +22,14 @@ import {
   buildAutomationReport,
   getAutomationResultStatusLabel,
 } from "../lib/automation-report"
+import {
+  buildProjectDecisionSummary,
+  buildProjectSummarySignature,
+  buildSessionDigest,
+  isSummaryNoise,
+  selectRecommendedSession,
+  type SessionDecisionDigest,
+} from "../lib/session-summary"
 
 // --- Crew role icons (Lucide SVG, white on colored circle) ---
 const _s = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const }
@@ -118,6 +126,15 @@ interface UnifiedPanelProps {
   onOpenBuilder?: () => void
 }
 
+type ProjectSummaryCacheEntry = {
+  text: string
+  signature: string
+  fetchedAt: number
+  recommendedSessionId: string | null
+  recommendedReason: string
+  sessions: SessionDecisionDigest[]
+}
+
 // --- Helpers (migrated from ProjectOverview) ---
 
 const STATUS_DOT: Record<string, { color: string; shadow: string; glow: string }> = {
@@ -127,77 +144,12 @@ const STATUS_DOT: Record<string, { color: string; shadow: string; glow: string }
   done: { color: "#22c55e", shadow: "0 0 8px rgba(34,197,94,0.6)", glow: "rgba(34,197,94,0.3)" },
 }
 
-function getLatestProgress(events: AgentEvent[]): ProgressReport | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].progress) return events[i].progress!
-  }
-  return null
-}
-
 function isLabelNoise(title: string): boolean {
-  if (/^\d[\d,]*\s*tokens?\s*(used|remaining|total)?$/i.test(title)) return true
-  if (title === "Token usage") return true
-  if (/^Thinking\.{0,3}$/i.test(title)) return true
-  if (/^Processing\.{0,3}$/i.test(title)) return true
-  if (/^思考中\.{0,3}$/i.test(title)) return true
-  if (/^(已更新|最新進度|結果)$/i.test(title)) return true
-  if (/^Session (started|ended|resumed)/i.test(title)) return true
-  if (/^Permission requested/i.test(title)) return true
-  if (/^Agent is requesting/i.test(title)) return true
-  if (/^Compacting context/i.test(title)) return true
-  if (/^HANDOFF/i.test(title)) return true
-  if (/^Claude Code is compress/i.test(title)) return true
-  if (/^\.{2,}$/.test(title)) return true
-  if (/^Waiting/i.test(title)) return true
-  return false
-}
-
-function getEventSummary(events: AgentEvent[]): string {
-  const prog = getLatestProgress(events)
-  if (prog?.summary && !isLabelNoise(prog.summary)) return prog.summary
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i]
-    if (e.id.startsWith("usr_")) continue
-    if (e.type === "token_usage") continue
-    if (e.title && isLabelNoise(e.title)) continue
-    if (e.type === "response" && e.title) return e.title
-    if (e.type === "file_edit" || e.type === "file_create") {
-      const path = e.diff?.filePath || e.title?.replace(/^(Editing|Creating|Edited|Created)\s+/i, "") || ""
-      return path ? `Editing ${path.split(/[/\\]/).pop()}` : e.title || ""
-    }
-    if (e.type === "command_run" && e.title) return e.title
-    if (e.type === "error" && e.title) return e.title
-  }
-  return ""
-}
-
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/^#+\s*/gm, "")
-    .replace(/^\s*[-*]\s+/gm, "")
-    .trim()
-}
-
-function getSessionLabel(events: AgentEvent[]): string {
-  const summary = getEventSummary(events)
-  if (summary) return stripMarkdown(summary)
-  const firstUser = events.find(e => e.id.startsWith("usr_"))
-  if (firstUser?.title && !isLabelNoise(firstUser.title)) return stripMarkdown(firstUser.title)
-  return ""
+  return isSummaryNoise(title)
 }
 
 function getSessionStatus(events: AgentEvent[]): string {
-  const prog = getLatestProgress(events)
-  if (prog?.status === "blocked") return "blocked"
-  if (prog?.status === "done") return "done"
-  if (events.length > 0) {
-    const last = events[events.length - 1]
-    if (last.status === "in_progress") return "working"
-  }
-  return "idle"
+  return buildSessionDigest(events).status
 }
 
 function getAutomationResultMeta(status: AutomationResult["status"], locale: "en" | "zh-TW"): { label: string; color: string } {
@@ -293,7 +245,7 @@ export function UnifiedPanel({
       const ct = t(ck)
       if (ct !== ck) {
         const tokens = tmpl.crew?.tokenBudget
-        return tokens ? `${ct} 繚 ${tokens.toLocaleString()} tokens` : ct
+        return tokens ? `${ct} · ${tokens.toLocaleString()} tokens` : ct
       }
       return tmpl.description
     }
@@ -316,8 +268,10 @@ export function UnifiedPanel({
     trackTabSwitch(tab, "unified_panel")
   }, [])
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
-  const [summaryCache, setSummaryCache] = useState<Map<string, { text: string; timestamp: number }>>(new Map())
+  const [summaryCache, setSummaryCache] = useState<Map<string, ProjectSummaryCacheEntry>>(new Map())
   const [summaryLoading, setSummaryLoading] = useState<Set<string>>(new Set())
+  const summaryCacheRef = useRef(summaryCache)
+  const summaryLoadingRef = useRef(summaryLoading)
 
   // --- Migrated state ---
   const [showNewSheet, setShowNewSheet] = useState(false)
@@ -383,6 +337,14 @@ export function UnifiedPanel({
 
   // Persist session scroll positions per project
   const sessionScrollPositions = useRef<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    summaryCacheRef.current = summaryCache
+  }, [summaryCache])
+
+  useEffect(() => {
+    summaryLoadingRef.current = summaryLoading
+  }, [summaryLoading])
 
   // --- Load speech plugin ---
   useEffect(() => {
@@ -451,6 +413,25 @@ export function UnifiedPanel({
   // --- Auto-label sessions ---
   const labels = getSessionLabels()
   const autoLabels = getAutoLabels()
+  const getSessionDisplayLabel = useCallback((session: AppSession) => {
+    const rawAutoLabel = autoLabels[session.id]
+    const agentDef = AGENTS.find(a => a.id === session.agentId)
+    return labels[session.id]
+      || (rawAutoLabel && !isLabelNoise(rawAutoLabel) ? rawAutoLabel : null)
+      || agentDef?.name
+      || session.agentId
+  }, [autoLabels, labels])
+
+  const getSessionDigest = useCallback((session: AppSession) => {
+    const events = sessionEvents.get(session.id) || []
+    return buildSessionDigest(events, {
+      locale: reportLocale,
+      sessionId: session.id,
+      agentId: session.agentId,
+      displayLabel: getSessionDisplayLabel(session),
+    })
+  }, [getSessionDisplayLabel, reportLocale, sessionEvents])
+
   const prevAutoLabelStatusRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
     const prevStatuses = prevAutoLabelStatusRef.current
@@ -465,13 +446,13 @@ export function UnifiedPanel({
       const existing = autoLabels[s.id]
       // Update if: no label yet, or session just finished (refresh with latest)
       if (existing && !isLabelNoise(existing) && !sessionJustFinished) continue
-      const summary = getSessionLabel(events)
+      const summary = getSessionDigest(s).summary
       if (summary && summary.length > 3) {
         const autoLabel = summary.length > 40 ? summary.slice(0, 40) + "..." : summary
         setAutoLabelStorage(s.id, autoLabel)
       }
     }
-  }, [activeSessions, sessionEvents])
+  }, [activeSessions, autoLabels, getSessionDigest, labels, sessionEvents])
 
   // --- Group sessions by project ---
   const sessionsByProject = new Map<string, AppSession[]>()
@@ -481,12 +462,19 @@ export function UnifiedPanel({
     sessionsByProject.set(s.projectId, list)
   }
 
+  const projectLocalDigests = new Map<string, SessionDecisionDigest[]>()
+  const projectSummarySignatures = new Map<string, string>()
+  for (const [projectId, sessions] of sessionsByProject.entries()) {
+    const digests = sessions.map((session) => getSessionDigest(session))
+    projectLocalDigests.set(projectId, digests)
+    projectSummarySignatures.set(projectId, `${reportLocale}::${buildProjectSummarySignature(digests)}`)
+  }
+
   // --- Project helpers ---
-  const getProjectStatus = (sessions: AppSession[]) => {
+  const getProjectStatus = (digests: SessionDecisionDigest[]) => {
     let best = "idle"
-    for (const s of sessions) {
-      const events = sessionEvents.get(s.id) || []
-      const st = getSessionStatus(events)
+    for (const digest of digests) {
+      const st = digest.status
       if (st === "working") return "working"
       if (st === "blocked") best = "blocked"
       else if (st === "idle" && best !== "blocked") best = "idle"
@@ -494,113 +482,133 @@ export function UnifiedPanel({
     return best
   }
 
-  const getProjectSummary = (sessions: AppSession[]): string => {
-    let latestText = ""
-    let latestTs = 0
-    for (const s of sessions) {
-      const events = sessionEvents.get(s.id) || []
-      const summary = getEventSummary(events)
-      const ts = events.length > 0 ? events[events.length - 1].timestamp : 0
-      if (summary && ts > latestTs) { latestText = summary; latestTs = ts }
-    }
-    return stripMarkdown(latestText)
-  }
+  const getProjectSummary = (digests: SessionDecisionDigest[]): string => buildProjectDecisionSummary(digests, reportLocale)
 
   // --- Summary auto-fetch ---
-  const fetchSummary = useCallback(async (projectId: string) => {
-    const cached = summaryCache.get(projectId)
-    const MIN_INTERVAL = 5 * 60 * 1000
-    if (cached && Date.now() - cached.timestamp < MIN_INTERVAL) return
-    if (summaryLoading.has(projectId)) return
+  const fetchSummary = useCallback(async (projectId: string, signature: string, force = false) => {
+    const cached = summaryCacheRef.current.get(projectId)
+    if (!force && cached?.signature === signature && cached.text) return
+    if (!force && cached?.signature === signature && (Date.now() - cached.fetchedAt) < 60_000) return
+    if (summaryLoadingRef.current.has(projectId)) return
 
-    const sessions = sessionsByProject.get(projectId) || []
-    if (sessions.length === 0) return
-
-    // Check if there are new events since last fetch
-    let latestEventTs = 0
-    for (const s of sessions) {
-      const events = sessionEvents.get(s.id) || []
-      if (events.length > 0) {
-        const ts = events[events.length - 1].timestamp
-        if (ts > latestEventTs) latestEventTs = ts
-      }
-    }
-    if (cached && latestEventTs <= cached.timestamp) return
-
+    const localDigests = projectLocalDigests.get(projectId) || []
+    const sessionIds = (sessionsByProject.get(projectId) || []).map((session) => session.id)
+    if (localDigests.length === 0) return
     const serverUrl = localStorage.getItem("agentrune_server") || ""
-    if (!canUseApi(serverUrl)) return
+    if (!canUseApi(serverUrl)) {
+      const recommended = selectRecommendedSession(localDigests)
+      setSummaryCache((prev) => {
+        const next = new Map(prev)
+        next.set(projectId, {
+          text: "",
+          signature,
+          fetchedAt: Date.now(),
+          recommendedSessionId: recommended?.sessionId || null,
+          recommendedReason: recommended?.nextAction || recommended?.summary || "",
+          sessions: localDigests,
+        })
+        return next
+      })
+      return
+    }
 
     setSummaryLoading(prev => new Set(prev).add(projectId))
     try {
       const res = await fetch(buildApiUrl("/api/project-summary", serverUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, locale: reportLocale, sessionIds }),
         signal: AbortSignal.timeout(15000),
       })
       if (res.ok) {
-        const data = await res.json()
+        const data = await res.json() as {
+          summary?: string
+          text?: string
+          recommendedSessionId?: string | null
+          recommendedReason?: string
+          sessions?: SessionDecisionDigest[]
+        }
+        const localById = new Map(localDigests.map((digest) => [digest.sessionId, digest]))
+        const sessions = Array.isArray(data.sessions)
+          ? data.sessions.map((digest) => ({
+            ...localById.get(digest.sessionId),
+            ...digest,
+            displayLabel: localById.get(digest.sessionId)?.displayLabel,
+          }))
+          : localDigests
         setSummaryCache(prev => {
           const next = new Map(prev)
-          next.set(projectId, { text: data.summary || "", timestamp: Date.now() })
+          next.set(projectId, {
+            text: data.text || data.summary || "",
+            signature,
+            fetchedAt: Date.now(),
+            recommendedSessionId: data.recommendedSessionId || null,
+            recommendedReason: data.recommendedReason || "",
+            sessions,
+          })
+          return next
+        })
+      } else {
+        setSummaryCache(prev => {
+          const next = new Map(prev)
+          next.set(projectId, {
+            text: "",
+            signature,
+            fetchedAt: Date.now(),
+            recommendedSessionId: null,
+            recommendedReason: "",
+            sessions: localDigests,
+          })
           return next
         })
       }
-    } catch { /* ignore */ }
+    } catch {
+      setSummaryCache(prev => {
+        const next = new Map(prev)
+        next.set(projectId, {
+          text: "",
+          signature,
+          fetchedAt: Date.now(),
+          recommendedSessionId: null,
+          recommendedReason: "",
+          sessions: localDigests,
+        })
+        return next
+      })
+    }
     setSummaryLoading(prev => {
       const next = new Set(prev)
       next.delete(projectId)
       return next
     })
-  }, [summaryCache, summaryLoading, sessionsByProject, sessionEvents])
+  }, [projectLocalDigests, reportLocale, sessionsByProject])
 
   // Use ref to always call latest fetchSummary without causing effect re-runs
   const fetchSummaryRef = useRef(fetchSummary)
   fetchSummaryRef.current = fetchSummary
 
-  // Fetch summaries once when projects tab first loads, then only on-demand (refresh button)
-  const sessionCount = activeSessions.length
-  const summaryFetchedRef = useRef(false)
+  // Fetch summaries whenever a project's meaningful digest changes.
   useEffect(() => {
     if (activeTab !== "projects") return
-    if (projects.length === 0) return
-    if (summaryFetchedRef.current) return
-    summaryFetchedRef.current = true
     for (const p of projects) {
-      fetchSummaryRef.current(p.id)
+      const signature = projectSummarySignatures.get(p.id)
+      if (!signature) continue
+      fetchSummaryRef.current(p.id, signature)
     }
-  }, [activeTab, projects.length])
-
-  // Track sessions that finished while user wasn't looking, fetch summary when app resumes
-  const prevSessionStatusRef = useRef<Map<string, string>>(new Map())
-  const pendingSummaryProjects = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    const prev = prevSessionStatusRef.current
-    for (const s of activeSessions) {
-      const events = sessionEvents.get(s.id) || []
-      const status = getSessionStatus(events)
-      const prevStatus = prev.get(s.id)
-      if (prevStatus === "working" && (status === "idle" || status === "done")) {
-        pendingSummaryProjects.current.add(s.projectId)
-      }
-      prev.set(s.id, status)
-    }
-  }, [activeSessions, sessionEvents])
+  }, [activeTab, projects, projectSummarySignatures])
 
   useEffect(() => {
     const onVisible = () => {
-      if (document.hidden) return
-      const pending = pendingSummaryProjects.current
-      if (pending.size === 0) return
-      for (const pid of pending) {
-        setSummaryCache(c => { const n = new Map(c); n.delete(pid); return n })
-        fetchSummaryRef.current(pid)
+      if (document.hidden || activeTab !== "projects") return
+      for (const project of projects) {
+        const signature = projectSummarySignatures.get(project.id)
+        if (!signature) continue
+        fetchSummaryRef.current(project.id, signature)
       }
-      pending.clear()
     }
     document.addEventListener("visibilitychange", onVisible)
     return () => document.removeEventListener("visibilitychange", onVisible)
-  }, [])
+  }, [activeTab, projects, projectSummarySignatures])
 
   // --- Voice system ---
   const voiceCleanup = () => {
@@ -962,7 +970,7 @@ export function UnifiedPanel({
             fontSize: 12, color: "var(--text-secondary)",
             fontWeight: 500, marginTop: 4,
           }}>
-            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} 繚 {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
+            {t(projects.length !== 1 ? "count.projects" : "count.project", { count: String(projects.length) })} · {t(activeSessions.length !== 1 ? "count.sessions" : "count.session", { count: String(activeSessions.length) })}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1126,10 +1134,23 @@ export function UnifiedPanel({
             {projects.map((project) => {
               const sessions = sessionsByProject.get(project.id) || []
               const sessionCount = sessions.length
-              const status = sessionCount > 0 ? getProjectStatus(sessions) : "idle"
-              const dotStyle = STATUS_DOT[status] || STATUS_DOT.idle
+              const localDigests = projectLocalDigests.get(project.id) || []
               const cached = summaryCache.get(project.id)
+              const cachedSessions = cached?.sessions || []
+              const localDigestById = new Map(localDigests.map((digest) => [digest.sessionId, digest]))
+              const displayDigests = cachedSessions.length > 0
+                ? cachedSessions.map((digest) => ({
+                  ...localDigestById.get(digest.sessionId),
+                  ...digest,
+                  displayLabel: localDigestById.get(digest.sessionId)?.displayLabel,
+                }))
+                : localDigests
+              const displayDigestById = new Map(displayDigests.map((digest) => [digest.sessionId, digest]))
+              const status = sessionCount > 0 ? getProjectStatus(displayDigests) : "idle"
+              const dotStyle = STATUS_DOT[status] || STATUS_DOT.idle
               const isLoadingSummary = summaryLoading.has(project.id)
+              const projectSignature = projectSummarySignatures.get(project.id) || ""
+              const recommendedDigest = displayDigests.find((digest) => digest.sessionId === cached?.recommendedSessionId)
 
               return (
                 <div key={project.id} style={{
@@ -1173,7 +1194,7 @@ export function UnifiedPanel({
                             next.delete(project.id)
                             return next
                           })
-                          fetchSummary(project.id)
+                          fetchSummary(project.id, projectSignature, true)
                         }}
                         style={{
                           width: 30, height: 30, borderRadius: 8,
@@ -1259,25 +1280,44 @@ export function UnifiedPanel({
                         ) : (
                           <span style={{ opacity: 0.5 }}>
                             {sessionCount > 0 ? (() => {
-                              const s = getProjectSummary(sessions)
+                              const s = getProjectSummary(localDigests)
                               return s ? (s.length > 200 ? s.slice(0, 200) + "..." : s) : t("mc.sessionStarted")
                             })() : t("overview.tapToStart")}
                           </span>
                         )}
                       </div>
 
+                      {recommendedDigest?.displayLabel && (
+                        <div style={{
+                          marginTop: 8,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "6px 10px",
+                          borderRadius: 999,
+                          background: theme === "dark" ? "rgba(55,172,192,0.14)" : "rgba(55,172,192,0.1)",
+                          border: "1px solid rgba(55,172,192,0.22)",
+                          color: "var(--text-primary)",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          maxWidth: "100%",
+                        }}>
+                          <span style={{ color: "#37ACC0", flexShrink: 0 }}>
+                            {reportLocale === "zh-TW" ? "建議先看" : "Recommended"}
+                          </span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {recommendedDigest.displayLabel}
+                          </span>
+                        </div>
+                      )}
+
                       {/* Next Steps from all sessions */}
                       {sessions.length > 0 && (() => {
                         const steps: { agentName: string; step: string }[] = []
                         for (const s of sessions) {
-                          const events = sessionEvents.get(s.id) || []
-                          const prog = getLatestProgress(events)
-                          const agentDef = AGENTS.find(a => a.id === s.agentId)
-                          const name = labels[s.id] || autoLabels[s.id] || agentDef?.name || s.agentId
-                          if (prog?.nextSteps) {
-                            for (const step of prog.nextSteps.slice(0, 2)) {
-                              steps.push({ agentName: name, step })
-                            }
+                          const digest = displayDigestById.get(s.id) || getSessionDigest(s)
+                          if (digest.nextAction) {
+                            steps.push({ agentName: digest.displayLabel || getSessionDisplayLabel(s), step: digest.nextAction })
                           }
                         }
                         if (steps.length === 0) return null
@@ -1341,14 +1381,13 @@ export function UnifiedPanel({
                     >
                       {sessions.map((session) => {
                         const events = sessionEvents.get(session.id) || []
-                        const sessionStatus = getSessionStatus(events)
+                        const digest = displayDigestById.get(session.id) || getSessionDigest(session)
+                        const sessionStatus = digest.status
                         const sDot = STATUS_DOT[sessionStatus] || STATUS_DOT.idle
-                        const agentDef = AGENTS.find(a => a.id === session.agentId)
-                        const rawAutoLabel = autoLabels[session.id]
-                        const label = labels[session.id] || (rawAutoLabel && !isLabelNoise(rawAutoLabel) ? rawAutoLabel : null) || agentDef?.name || session.agentId
-                        const summaryText = getSessionLabel(events)
+                        const label = digest.displayLabel || getSessionDisplayLabel(session)
+                        const summaryText = digest.summary
+                        const nextActionText = digest.nextAction
                         const isExpanded = expandedSessions.has(session.id)
-                        const prog = getLatestProgress(events)
 
                         return (
                           <div
@@ -1418,12 +1457,28 @@ export function UnifiedPanel({
                               <div style={{
                                 fontSize: 11, color: "var(--text-secondary)",
                                 lineHeight: 1.4,
-                                display: "-webkit-box", WebkitLineClamp: 2,
+                                display: "-webkit-box", WebkitLineClamp: nextActionText ? 2 : 3,
                                 WebkitBoxOrient: "vertical" as never, overflow: "hidden",
-                                marginBottom: 8, minHeight: 30,
+                                marginBottom: nextActionText ? 6 : 8, minHeight: nextActionText ? 30 : 32,
                               }}>
                                 {summaryText || t("mc.sessionStarted")}
                               </div>
+
+                              {nextActionText && (
+                                <div style={{
+                                  fontSize: 10,
+                                  color: "var(--text-secondary)",
+                                  lineHeight: 1.35,
+                                  marginBottom: 8,
+                                  display: "-webkit-box",
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: "vertical" as never,
+                                  overflow: "hidden",
+                                  opacity: 0.82,
+                                }}>
+                                  {reportLocale === "zh-TW" ? `下一步：${nextActionText}` : `Next: ${nextActionText}`}
+                                </div>
+                              )}
 
                               {/* Expanded metadata */}
                               {isExpanded && (
@@ -2057,7 +2112,7 @@ export function UnifiedPanel({
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {getStepCount(chain)} {t("crew.chainSteps")} 繚 {estimateTokens(chain, depth).toLocaleString()} tokens
+                            {getStepCount(chain)} {t("crew.chainSteps")} · {estimateTokens(chain, depth).toLocaleString()} tokens
                           </div>
                         </div>
                         {/* Inline action buttons */}
@@ -2165,7 +2220,7 @@ export function UnifiedPanel({
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 1, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {isMultiCrew
-                              ? `${roles.length} ${t("fireCrew.roles")} 繚 ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
+                              ? `${roles.length} ${t("fireCrew.roles")} · ${(tmpl.crew?.tokenBudget || 0).toLocaleString()} tokens`
                               : tplDesc(tmpl)
                             }
                           </div>
@@ -2206,8 +2261,8 @@ export function UnifiedPanel({
                                       {t(r.nameKey) !== r.nameKey ? t(r.nameKey) : r.nameKey}
                                     </div>
                                     <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                      {t("crew.phase").replace("{n}", String(r.phase))} 繚 {(r.estimatedTokens || 0).toLocaleString()} tokens
-                                      {r.skillChainSlug && ` 繚 ${r.skillChainSlug}`}
+                                      {t("crew.phase").replace("{n}", String(r.phase))} · {(r.estimatedTokens || 0).toLocaleString()} tokens
+                                      {r.skillChainSlug && ` · ${r.skillChainSlug}`}
                                     </div>
                                   </div>
                                 </div>

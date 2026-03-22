@@ -18,9 +18,9 @@ const claimedJsonlFiles = new Set<string>()
 function cwdToClaudeDir(cwd: string): string {
   // Claude Code encodes path: C:\Users\agres\Documents\Test\AgentWiki
   // → C--Users-agres-Documents-Test-AgentWiki
-  // Steps: normalize to forward slash, replace "X:" with "X-", then "/" with "-"
+  // Claude also converts dots to dashes: .worktrees → -worktrees
   const normalized = cwd.replace(/\\/g, "/")
-  return normalized.replace(/^([A-Za-z]):/, "$1-").replace(/\//g, "-")
+  return normalized.replace(/^([A-Za-z]):/, "$1-").replace(/[/.]/g, "-")
 }
 
 /** Find the most recently modified .jsonl in a Claude project dir.
@@ -386,6 +386,9 @@ export class JsonlWatcher {
       }, 2000)
     }
   }
+
+  /** Whether the watcher has found and is actively reading a JSONL file */
+  isActive(): boolean { return !!this.jsonlPath }
 
   stop(): void {
     if (this.jsonlPath) { claimedJsonlFiles.delete(this.jsonlPath) }

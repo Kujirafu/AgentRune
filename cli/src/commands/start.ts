@@ -66,7 +66,7 @@ async function ensurePortFree(port: number): Promise<void> {
 }
 
 export async function startCommand(opts: { port?: string; foreground?: boolean }) {
-  const port = parseInt(opts.port || "3456")
+  const port = parseInt(opts.port || "3457")
 
   if (opts.foreground) {
     const { createServer } = await import("../server/ws-server.js")

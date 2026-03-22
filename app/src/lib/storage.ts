@@ -1,4 +1,4 @@
-import { ProjectSettings, DEFAULT_SETTINGS } from "../types"
+import { ProjectSettings, DEFAULT_SETTINGS, RoutingRule } from "../types"
 
 function isNativeCapacitor(): boolean {
   return typeof window !== "undefined" &&
@@ -17,6 +17,45 @@ export function getSettings(projectId: string): ProjectSettings {
 
 export function saveSettings(projectId: string, settings: ProjectSettings) {
   localStorage.setItem(`agentrune_settings_${projectId}`, JSON.stringify(settings))
+  // Sync to server so other clients (mobile/desktop) see the same settings
+  const base = getApiBase() || ""
+  fetch(`${base}/api/settings/${encodeURIComponent(projectId)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  }).catch(() => {})
+}
+
+/** Load settings from server and cache to localStorage */
+export async function syncSettingsFromServer(projectId: string): Promise<ProjectSettings> {
+  const base = getApiBase() || ""
+  try {
+    const res = await fetch(`${base}/api/settings/${encodeURIComponent(projectId)}`)
+    if (res.ok) {
+      const serverSettings = await res.json()
+      const merged = { ...DEFAULT_SETTINGS, ...serverSettings }
+      localStorage.setItem(`agentrune_settings_${projectId}`, JSON.stringify(merged))
+      return merged
+    }
+  } catch { /* fallback to local */ }
+  return getSettings(projectId)
+}
+
+// ── Routing Rules (cached from server) ──
+
+export function getCachedGlobalRoutingRules(): RoutingRule[] {
+  try {
+    const raw = localStorage.getItem("agentrune_global_routing_rules")
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+export function cacheGlobalRoutingRules(rules: RoutingRule[]) {
+  localStorage.setItem("agentrune_global_routing_rules", JSON.stringify(rules))
+}
+
+export function getProjectRoutingRules(projectId: string): RoutingRule[] {
+  const settings = getSettings(projectId)
+  return settings.routingRules || []
 }
 
 export function getRecentCommands(projectId: string): string[] {

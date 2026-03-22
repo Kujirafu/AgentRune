@@ -16,6 +16,8 @@ interface FireCrewSheetProps {
   projectId: string
   sessionId: string | null
   sessionSummary?: string
+  /** Render inline (desktop) instead of as overlay */
+  inline?: boolean
 }
 
 // --- Lucide-style SVG icons for crew role avatars ---
@@ -54,7 +56,8 @@ const PlayIcon = () => (
   </svg>
 )
 
-export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, sessionId, sessionSummary }: FireCrewSheetProps) {
+export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, sessionId, sessionSummary, inline }: FireCrewSheetProps) {
+  const desktop = inline || (typeof window !== "undefined" && (window.innerWidth >= 900 || !!(window as any).electronAPI))
   const [firing, setFiring] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [phaseGate, setPhaseGate] = useState(false)
@@ -123,6 +126,121 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
 
   if (!open) return null
 
+  // ── Inline mode (desktop) — no overlay, renders directly in content area ──
+  if (inline) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        {/* Header */}
+        <div style={{ padding: "0 0 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>{t("fireCrew.title")}</div>
+        </div>
+        {/* Session context badge */}
+        {sessionId && (
+          <div style={{ marginBottom: 10 }}>
+            <div style={{
+              fontSize: 11, color: "var(--text-secondary, #94a3b8)", padding: "6px 10px",
+              borderRadius: 8, background: "rgba(55,172,192,0.08)",
+              border: "1px solid rgba(55,172,192,0.15)",
+            }}>
+              {t("fireCrew.contextAttached")}
+            </div>
+          </div>
+        )}
+        {/* Phase Gate toggle */}
+        <button
+          onClick={() => setPhaseGate(!phaseGate)}
+          style={{
+            display: "flex", alignItems: "center", gap: 8, width: "100%",
+            padding: "10px 12px", marginBottom: 10, borderRadius: 10,
+            border: `1px solid ${phaseGate ? "rgba(55,172,192,0.3)" : "rgba(148,163,184,0.1)"}`,
+            background: phaseGate ? "rgba(55,172,192,0.06)" : "transparent",
+            cursor: "pointer", textAlign: "left",
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={phaseGate ? "#37ACC0" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.6 }}>
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: phaseGate ? "#37ACC0" : "inherit" }}>{t("crew.phaseGate")}</div>
+            <div style={{ fontSize: 10, opacity: 0.6, marginTop: 1 }}>{t("crew.phaseGateDesc")}</div>
+          </div>
+          <div style={{
+            width: 34, height: 20, borderRadius: 10, padding: 2,
+            background: phaseGate ? "#37ACC0" : "rgba(148,163,184,0.25)",
+            transition: "background 0.2s", display: "flex", alignItems: "center",
+          }}>
+            <div style={{
+              width: 16, height: 16, borderRadius: "50%", background: "#fff",
+              transform: phaseGate ? "translateX(14px)" : "translateX(0)",
+              transition: "transform 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+            }} />
+          </div>
+        </button>
+        {/* Crew templates — desktop grid */}
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {BUILTIN_CREWS.map((tmpl) => {
+              const presetKey = tmpl.name
+              const nameKey = `crew.preset.${presetKey}`
+              const descKey = `crew.preset.${presetKey}.desc`
+              const name = t(nameKey) !== nameKey ? t(nameKey) : presetKey
+              const desc = t(descKey) !== descKey ? t(descKey) : ""
+              if (!tmpl.crew) return null
+              return (
+                <button
+                  key={tmpl.id}
+                  disabled={firing}
+                  onClick={() => handleFire(tmpl.crew!, name)}
+                  style={{
+                    textAlign: "left", padding: "14px 16px", borderRadius: 12,
+                    border: "1px solid rgba(148,163,184,0.1)",
+                    background: "rgba(148,163,184,0.04)",
+                    cursor: firing ? "default" : "pointer",
+                    opacity: firing ? 0.5 : 1,
+                    display: "flex", flexDirection: "column", gap: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ display: "flex" }}>
+                      {tmpl.crew.roles.slice(0, 3).map((role, i) => (
+                        <div key={role.id} style={{
+                          width: 26, height: 26, borderRadius: "50%",
+                          background: role.color, display: "flex",
+                          alignItems: "center", justifyContent: "center",
+                          marginLeft: i > 0 ? -6 : 0, zIndex: 3 - i,
+                        }}>
+                          {getCrewRoleIcon(role.icon)}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 13 }}>{name}</div>
+                    <PlayIcon />
+                  </div>
+                  {desc && <div style={{ fontSize: 11, opacity: 0.6 }}>{desc}</div>}
+                  <div style={{ fontSize: 10, opacity: 0.5 }}>
+                    {tmpl.crew.roles.length} {t("fireCrew.roles")} · ~{tmpl.crew.tokenBudget.toLocaleString()} tok
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+        {/* Result toast */}
+        {result && (
+          <div style={{
+            marginTop: 12, padding: "10px 14px", borderRadius: 10,
+            background: result.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+            color: result.ok ? "#22c55e" : "#ef4444",
+            fontSize: 13, fontWeight: 600, textAlign: "center",
+          }}>
+            {result.msg}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Overlay mode (mobile / fallback) ──
   return (
     <>
       {/* Backdrop */}
@@ -137,21 +255,34 @@ export default function FireCrewSheet({ open, onClose, t, serverUrl, projectId, 
       {/* Sheet */}
       <div
         ref={sheetRef}
-        {...handlers}
+        {...(desktop ? {} : handlers)}
         style={{
-          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
-          maxHeight: "75dvh", borderRadius: "20px 20px 0 0",
+          position: "fixed", zIndex: 100,
           background: "var(--glass-bg, rgba(255,255,255,0.95))",
           backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-          boxShadow: "0 -4px 30px rgba(0,0,0,0.15)",
           display: "flex", flexDirection: "column",
           overflow: "hidden",
+          ...(desktop ? {
+            top: "50%", left: "50%", right: "auto", bottom: "auto",
+            transform: "translate(-50%, -50%)",
+            width: "min(560px, 90vw)",
+            maxHeight: "80vh",
+            borderRadius: 16,
+            boxShadow: "0 8px 40px rgba(0,0,0,0.25)",
+          } : {
+            bottom: 0, left: 0, right: 0,
+            maxHeight: "75dvh",
+            borderRadius: "20px 20px 0 0",
+            boxShadow: "0 -4px 30px rgba(0,0,0,0.15)",
+          }),
         }}
       >
-        {/* Handle */}
+        {/* Handle — hidden on desktop */}
+        {!desktop && (
         <div style={{ display: "flex", justifyContent: "center", padding: "8px 0 4px" }}>
           <div style={{ width: 36, height: 4, borderRadius: 2, background: "rgba(0,0,0,0.15)" }} />
         </div>
+        )}
 
         {/* Header */}
         <div style={{ padding: "8px 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>

@@ -33,7 +33,7 @@ const program = new Command()
 program
   .command("start")
   .description("Start WebSocket daemon")
-  .option("-p, --port <port>", "Port number", "3456")
+  .option("-p, --port <port>", "Port number", "3457")
   .option("-f, --foreground", "Run in foreground (not as daemon)")
   .action(async (opts) => {
     checkForUpdate()  // non-blocking, don't await
@@ -95,7 +95,7 @@ program
 program
   .command("watch")
   .description("Watch agent sessions in terminal (mirrors phone APP)")
-  .option("-p, --port <port>", "Daemon port", "3456")
+  .option("-p, --port <port>", "Daemon port", "3457")
   .option("-s, --session <id>", "Attach to specific session")
   .option("--raw", "Show raw terminal output")
   .action(async (opts) => {
@@ -106,7 +106,7 @@ program
 // Default action (no args) = start --foreground
 program.action(async () => {
   const { startCommand } = await import("./commands/start.js")
-  await startCommand({ port: "3456", foreground: true })
+  await startCommand({ port: "3457", foreground: true })
 })
 
 program.parse()

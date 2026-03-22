@@ -30,7 +30,7 @@ const LOCALE_DISPLAY: Record<string, string> = {
 
 /** Current rules version — bump this when rules content changes.
  *  ensureRulesFile() will auto-regenerate rules.md when version is lower. */
-const RULES_VERSION = 3
+const RULES_VERSION = 4
 
 /** Extract version number from rules.md content, returns 0 if not found */
 export function parseRulesVersion(content: string): number {

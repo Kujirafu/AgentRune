@@ -62,6 +62,15 @@ const NO_PUBLISHABLE_CONTENT_HINTS = [
   "沒有內容可發",
 ]
 
+const X_HINTS = [
+  "twitter",
+  "x.com",
+  "/2/tweets",
+  "x_post",
+  "x post",
+  "tweet",
+]
+
 const THREADS_HINTS = [
   "threads",
   "graph.threads.net",
@@ -89,6 +98,10 @@ export function detectAutomationSocialMode(auto: {
 
   if (MOLTBOOK_HINTS.some((hint) => haystack.includes(hint)) || /\bmoltbook\b/i.test(auto.name || "")) {
     return { platform: "moltbook" }
+  }
+
+  if (X_HINTS.some((hint) => haystack.includes(hint)) || /\btwitter\b|\bx[_\s]?post\b/i.test(auto.name || "")) {
+    return { platform: "x" }
   }
 
   if (THREADS_HINTS.some((hint) => haystack.includes(hint)) || /\bthreads\b/i.test(auto.name || "")) {
@@ -123,6 +136,40 @@ export function buildAutomationSocialInstructions(mode: SocialAutomationMode): s
       "A plain explanation without the skip marker will be treated as an automation failure.",
       "Never wrap these marker lines in a code block.",
       "Only emit one marker line total.",
+    ].join("\n")
+  }
+
+  if (mode.platform === "x") {
+    return [
+      "[AGENTRUNE SOCIAL PUBLISH: X/Twitter]",
+      "This automation publishes a REAL X/Twitter thread via AgentRune.",
+      "AgentRune daemon handles the actual API publish after you emit a marker.",
+      "Do NOT call X APIs directly.",
+      "Do NOT print secrets or credentials.",
+      "",
+      "FORMAT RULES:",
+      "- Write a thread of 3-5 tweets, separated by \\n---\\n",
+      "- Each tweet MUST be under 280 characters",
+      "- First tweet = hook that grabs attention",
+      "- Last tweet = open question to drive replies",
+      "- NO external links in any tweet (links go in CTA self-reply, handled by daemon)",
+      "- Max 1-2 hashtags, only in the last tweet",
+      "- English only",
+      "- Sound like a real person, not AI. Short punchy sentences mixed with longer ones.",
+      "",
+      "CONTENT RULES:",
+      "- Read the X素材庫 for approved content and style",
+      "- Accessible to anyone who uses AI, not just developers",
+      "- Scenario-driven stories, not architecture deep-dives",
+      "- Have an opinion. Be specific. No hedging.",
+      "",
+      "If a post should be published now, end your final output with exactly one line:",
+      `${SOCIAL_POST_MARKER} {"platform":"x","text":"<tweet1>\\n---\\n<tweet2>\\n---\\n<tweet3>","source":"<materials>","reason":"<why>"}`,
+      "",
+      "If no post should be published, end with:",
+      `${SOCIAL_SKIP_MARKER} {"platform":"x","reason":"<why>","source":"<materials>"}`,
+      "",
+      "Never wrap marker lines in code blocks. Only emit one marker line total.",
     ].join("\n")
   }
 

@@ -78,6 +78,23 @@ describe("buildAutomationReport", () => {
     expect(report.sections.find((section) => section.key === "issues")?.items).toContain("Cloudflare cooldown active for 12m")
     expect(report.sections.find((section) => section.key === "decisions")?.items).toContain("Retry after cooldown expires")
   })
+
+  it("surfaces behavioral drift evidence in the report", () => {
+    const report = buildAutomationReport({
+      summary: "",
+      output: "Run completed with warnings",
+      behaviorStateHash: "cfg123",
+      promptStateHash: "prompt123",
+      launchStateHash: "launch123",
+      behaviorStateIssues: ['Configured model "gpt-5.4" did not reach launch args'],
+    }, "en")
+
+    const issues = report.sections.find((section) => section.key === "issues")
+    expect(issues?.items).toContain('Configured model "gpt-5.4" did not reach launch args')
+    expect(issues?.items).toContain("Config Hash: cfg123")
+    expect(issues?.items).toContain("Prompt Hash: prompt123")
+    expect(issues?.items).toContain("Launch Hash: launch123")
+  })
 })
 
 describe("automation report labels", () => {

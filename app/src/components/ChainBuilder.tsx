@@ -17,6 +17,8 @@ interface ChainBuilderProps {
   onChainSelect?: (slug: string) => void
   /** Called when user wants to schedule this chain */
   onSchedule?: (slug: string) => void
+  /** Desktop inline mode — no 100dvh, adapted layout */
+  inline?: boolean
 }
 
 type SandboxLevel = "strict" | "moderate" | "permissive" | "none"
@@ -303,7 +305,7 @@ function SwipeableChainCard({ chain, t, onEdit, onDelete }: {
 
 // ─── Component ──────────────────────────────────────────────────
 
-export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onSchedule }: ChainBuilderProps) {
+export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onSchedule, inline }: ChainBuilderProps) {
   const { t: tLocale } = useLocale()
   const t = tProp || tLocale
 
@@ -923,8 +925,8 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
         style={{
           background: "var(--card-bg)",
           border: "1px solid var(--glass-border)",
-          borderRadius: 10,
-          padding: "10px 12px",
+          borderRadius: inline ? 8 : 10,
+          padding: inline ? "6px 10px" : "10px 12px",
           position: "relative",
           opacity: isDragging && dragIndex === index ? 0.5 : 1,
           transition: "opacity 0.15s ease",
@@ -1079,12 +1081,12 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
   const renderInsertButton = (index: number) => (
     <div key={`insert-${index}`} style={{
       display: "flex", alignItems: "center", justifyContent: "center",
-      padding: "4px 0",
+      padding: inline ? "2px 0" : "4px 0",
     }}>
       <button
         onClick={() => openPalette(index)}
         style={{
-          width: 24, height: 24, borderRadius: "50%",
+          width: inline ? 18 : 24, height: inline ? 18 : 24, borderRadius: "50%",
           border: "1px dashed var(--glass-border)",
           background: "transparent",
           color: "var(--accent-primary)",
@@ -1104,10 +1106,10 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
   const renderConnectionLine = (index: number) => (
     <div key={`conn-${index}`} style={{
       display: "flex", flexDirection: "column", alignItems: "center",
-      padding: "2px 0",
+      padding: inline ? "1px 0" : "2px 0",
     }}>
       <div style={{
-        width: 2, height: 20,
+        width: 2, height: inline ? 10 : 20,
         background: "var(--glass-border)",
         borderRadius: 1,
       }} />
@@ -1293,13 +1295,13 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
 
     return (
       <div style={{
-        height: "100dvh", display: "flex", flexDirection: "column",
-        background: "var(--bg-primary)", color: "var(--text-primary)",
+        height: inline ? "100%" : "100dvh", display: "flex", flexDirection: "column",
+        background: inline ? "transparent" : "var(--bg-primary)", color: "var(--text-primary)",
       }}>
         {/* Top bar */}
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
-          padding: "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
+          padding: inline ? "8px 16px 8px" : "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
           borderBottom: "1px solid var(--glass-border)",
           background: "var(--glass-bg)",
           backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
@@ -1504,11 +1506,12 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
   if (view === "list") {
     return (
       <div style={{
-        height: "100dvh", display: "flex", flexDirection: "column",
-        background: "var(--bg-primary)",
+        height: inline ? "100%" : "100dvh", display: "flex", flexDirection: "column",
+        background: inline ? "transparent" : "var(--bg-primary)",
         color: "var(--text-primary)",
       }}>
         {/* Top bar */}
+        {!inline && (
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
           padding: "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
@@ -1527,6 +1530,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
             {t("builder.title")}
           </span>
         </div>
+        )}
 
         {/* Scrollable content */}
         <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
@@ -1569,7 +1573,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
               {t("builder.noChains")}
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+            <div style={{ display: inline ? "grid" : "flex", gridTemplateColumns: inline ? "1fr 1fr" : undefined, flexDirection: inline ? undefined : "column", gap: 8, marginBottom: 20 }}>
               {myChains.map(chain => (
                 <SwipeableChainCard
                   key={chain.slug}
@@ -1593,7 +1597,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
             {t("builder.templates")}
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: inline ? "grid" : "flex", gridTemplateColumns: inline ? "1fr 1fr 1fr" : undefined, flexDirection: inline ? undefined : "column", gap: 8 }}>
             {BUILTIN_CHAINS.map(chain => {
               const name = resolveChainText(chain.nameKey, t)
               const stepCount = getStepCount(chain)
@@ -1651,15 +1655,15 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
     <div
       onTouchMove={handleTouchMove}
       style={{
-        height: "100dvh", display: "flex", flexDirection: "column",
-        background: "var(--bg-primary)",
+        height: inline ? "100%" : "100dvh", display: "flex", flexDirection: "column",
+        background: inline ? "transparent" : "var(--bg-primary)",
         color: "var(--text-primary)",
       }}
     >
       {/* ═══ Top bar ═══ */}
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
-        padding: "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
+        padding: inline ? "8px 16px 8px" : "calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px",
         borderBottom: "1px solid var(--glass-border)",
         background: "var(--glass-bg)",
         backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
@@ -1806,11 +1810,20 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
         )}
       </div>
 
-      {/* ═══ Sandbox controls — bottom right ═══ */}
+      {/* ═══ Sandbox controls ═══ */}
       <div style={{
-        position: "absolute", bottom: 16, right: 16,
-        display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6,
+        position: inline ? "relative" : "absolute",
+        bottom: inline ? undefined : 16,
+        right: inline ? undefined : 16,
+        display: "flex",
+        flexDirection: inline ? "row" : "column",
+        alignItems: inline ? "center" : "flex-end",
+        justifyContent: inline ? "flex-end" : undefined,
+        gap: 6,
         zIndex: 50,
+        padding: inline ? "6px 16px" : undefined,
+        borderTop: inline ? "1px solid var(--glass-border)" : undefined,
+        flexShrink: 0,
       }}>
         {/* Sandbox level chips */}
         <div style={{
@@ -1863,7 +1876,7 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
           <div
             onClick={closePalette}
             style={{
-              position: "fixed", inset: 0,
+              position: inline ? "absolute" : "fixed", inset: 0,
               background: "rgba(0,0,0,0.4)",
               zIndex: 100,
             }}
@@ -1871,10 +1884,10 @@ export function ChainBuilder({ onBack, t: tProp, initialSlug, onChainSelect, onS
           {/* Sheet */}
           <div
             ref={paletteRef}
-            {...paletteSwipeHandlers}
+            {...(inline ? {} : paletteSwipeHandlers)}
             style={{
-            position: "fixed", bottom: 0, left: 0, right: 0,
-            maxHeight: "70dvh",
+            position: inline ? "absolute" : "fixed", bottom: 0, left: 0, right: 0,
+            maxHeight: inline ? "60%" : "70dvh",
             background: "var(--glass-bg)",
             backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
             border: "1px solid var(--glass-border)",

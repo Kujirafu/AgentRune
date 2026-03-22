@@ -984,9 +984,18 @@ export function MissionControl({
     }
   }, [project.id, sendInput, t, setEvents])
 
+  // Queue for commands sent during initialization — forwarded after init completes
+  const pendingCommandRef = useRef<{ text: string; flags?: SendFlags; images?: string[] } | null>(null)
+
   const handleSendCommand = useCallback((text: string, flags?: SendFlags, images?: string[]) => {
     if (text === "\x03") { sendInput(text); return }
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
+
+    // If still initializing, queue the command and send after init completes
+    if (initializing && text.trim()) {
+      pendingCommandRef.current = { text, flags, images }
+      return
+    }
 
     // Interrupt mode: Ctrl+C to stop, then send structured instruction
     // Agent should: 1) stop current work  2) save unfinished work as task  3) handle new message
@@ -1130,7 +1139,7 @@ export function MissionControl({
     promptReadyRef.current = false  // Reset so idle timer doesn't fire until next prompt
 
     addRecentCommand(project.id, text)
-  }, [sendInput, project.id])
+  }, [sendInput, project.id, initializing])
 
   const handleDecision = useCallback((eventId: string, input: string) => {
     // Special actions: open URL in phone browser or copy URL
@@ -1233,11 +1242,16 @@ export function MissionControl({
     return p
   })())
   useEffect(() => {
-    if (!initializing && sessionPrefillRef.current) {
-      const prompt = sessionPrefillRef.current
+    if (initializing) return
+    // Forward queued command (user typed during init) or prefill (from "Run Now")
+    const pending = pendingCommandRef.current
+    const prefill = sessionPrefillRef.current
+    if (pending) {
+      pendingCommandRef.current = null
+      setTimeout(() => handleSendCommand(pending.text, pending.flags, pending.images), 500)
+    } else if (prefill) {
       sessionPrefillRef.current = null
-      // Delay to ensure WS is ready after init
-      setTimeout(() => handleSendCommand(prompt), 500)
+      setTimeout(() => handleSendCommand(prefill), 500)
     }
   }, [initializing, handleSendCommand])
 
@@ -1683,11 +1697,28 @@ export function MissionControl({
     return true
   }), [events])
 
+  // Pending permission request — desktop only: show above InputBar instead of in timeline
+  const pendingPermission = useMemo(() => {
+    if (isMobile) return null  // mobile: keep in event timeline
+    for (let i = mainEvents.length - 1; i >= 0; i--) {
+      const e = mainEvents[i]
+      if (e.type === "decision_request" && e.status === "waiting") return e
+    }
+    return null
+  }, [mainEvents])
+
+  // Filtered main events: desktop hides waiting decision_requests (shown in banner instead)
+  // Mobile: show all events including waiting decision_requests in timeline
+  const timelineEvents = useMemo(() => {
+    if (isMobile) return mainEvents
+    return mainEvents.filter(e => !(e.type === "decision_request" && e.status === "waiting"))
+  }, [mainEvents])
+
     // L1 events: important actions only (memoized, used in render + empty check)
     const L1_TYPES = new Set(["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"])
-    const l1Events = useMemo(() => mainEvents.filter(
+    const l1Events = useMemo(() => timelineEvents.filter(
       e => L1_TYPES.has(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_")
-    ), [mainEvents])
+    ), [timelineEvents])
 return (
     <>
       {/* Status indicator overlay ??only when working/waiting */}
@@ -1987,6 +2018,97 @@ return (
                 </div>
               )}
             </div>
+
+            {/* Permission Banner — shown above input when agent needs approval */}
+            {pendingPermission && pendingPermission.decision && (
+              <div style={{
+                margin: "0 8px 6px",
+                padding: "12px 14px",
+                borderRadius: 16,
+                background: "var(--glass-bg)",
+                backdropFilter: "blur(24px)",
+                WebkitBackdropFilter: "blur(24px)",
+                border: "1px solid rgba(55,172,192,0.3)",
+                boxShadow: "0 -2px 12px rgba(0,0,0,0.08)",
+                animation: "fadeSlideUp 0.3s ease-out",
+              }}>
+                {/* Header */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(55,172,192,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                    {t("perm.title")}
+                  </span>
+                </div>
+                {/* Detail — tool call signature */}
+                {pendingPermission.detail && (
+                  <div style={{
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    marginBottom: 8,
+                    lineHeight: 1.4,
+                    wordBreak: "break-word",
+                    fontFamily: "monospace",
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                    background: "rgba(0,0,0,0.06)",
+                  }}>
+                    {pendingPermission.detail}
+                  </div>
+                )}
+                {/* Purpose & Scope */}
+                {(pendingPermission.decision.purpose || pendingPermission.decision.scope) && (
+                  <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 8, color: "var(--text-secondary)" }}>
+                    {pendingPermission.decision.purpose && (
+                      <div style={{ marginBottom: 2 }}>
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{t("perm.purpose")}:</span>{" "}
+                        {pendingPermission.decision.purpose}
+                      </div>
+                    )}
+                    {pendingPermission.decision.scope && (
+                      <div>
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{t("perm.scope")}:</span>{" "}
+                        {pendingPermission.decision.scope}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Action buttons */}
+                <div style={{ display: "flex", gap: 8 }}>
+                  {pendingPermission.decision.options.map((opt) => {
+                    const isDeny = /deny|拒絕/i.test(opt.label)
+                    const isAlways = /always|永久/i.test(opt.label)
+                    return (
+                      <button
+                        key={opt.label}
+                        onClick={() => handleDecision(pendingPermission.id, opt.input)}
+                        style={{
+                          flex: 1,
+                          padding: "8px 0",
+                          borderRadius: 10,
+                          border: isDeny
+                            ? "1px solid rgba(248,113,113,0.3)"
+                            : "1px solid rgba(55,172,192,0.3)",
+                          background: isDeny
+                            ? "rgba(248,113,113,0.1)"
+                            : isAlways
+                            ? "rgba(55,172,192,0.15)"
+                            : "rgba(55,172,192,0.1)",
+                          color: isDeny ? "rgb(248,113,113)" : "rgb(55,172,192)",
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          transition: "all 0.15s ease",
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Input area ??padded above keyboard */}
             {/* QuickActions removed — toolbar integrated into InputBar */}

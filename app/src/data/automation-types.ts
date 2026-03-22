@@ -68,12 +68,25 @@ export interface PhaseGateRequest {
   totalTokensUsed: number
   tokenBudget: number
   timestamp: number
+  estimatedReviewMs?: number
 }
 
 export interface PhaseGateResponse {
   automationId: string
   action: PhaseGateAction
+  reviewNote?: string
   instructions?: string       // 補充指示（proceed_with_instructions / retry_with_instructions）
+}
+
+export interface PendingReauthRequest {
+  automationId: string
+  automationName: string
+  sessionId: string
+  violationType: string
+  violationDescription: string
+  permissionKey: string
+  killedAt: number
+  estimatedReviewMs?: number
 }
 
 export interface CrewRoleResult {
@@ -121,6 +134,7 @@ export interface AutomationConfig {
   agentId: string
   locale?: string
   bypass?: boolean           // --dangerously-skip-permissions (unattended mode)
+  behaviorStateHash?: string
 
   // Trust Layer
   trustProfile?: TrustProfile          // default: "supervised"
@@ -149,6 +163,10 @@ export interface AutomationResult {
   output: string
   summary?: string  // human-readable summary of what the agent actually did
   status: "success" | "failed" | "timeout" | "blocked_by_risk" | "skipped_no_confirmation" | "skipped_daily_limit" | "skipped_no_action" | "circuit_broken" | "interrupted" | "pending_reauth"
+  behaviorStateHash?: string
+  promptStateHash?: string
+  launchStateHash?: string
+  behaviorStateIssues?: string[]
 }
 
 export interface AutomationTemplate {

@@ -321,4 +321,48 @@ export class CodexWatcher {
     this.seenResponseKeys.clear()
     this.findAndWatch()
   }
+
+  /** Replay recent events from the JSONL file (used when persisted events are empty) */
+  forceReplay(): void {
+    if (!this.jsonlPath) {
+      console.log(`[CodexWatcher] forceReplay: no jsonlPath yet, skipping`)
+      return
+    }
+    try {
+      const size = statSync(this.jsonlPath).size
+      const readStart = Math.max(0, size - 500_000)
+      const bytesToRead = size - readStart
+      const buf = Buffer.alloc(bytesToRead)
+      const fd = openSync(this.jsonlPath, "r")
+      readSync(fd, buf, 0, bytesToRead, readStart)
+      closeSync(fd)
+      this.offset = size
+
+      const text = buf.toString("utf-8")
+      const lines = text.split("\n").filter(Boolean)
+      const allEvents: AgentEvent[] = []
+
+      for (const raw of lines) {
+        let parsed: CodexLine
+        try { parsed = JSON.parse(raw) } catch { continue }
+        const events = codexLineToEvents(parsed)
+        allEvents.push(...events)
+      }
+
+      // Mark all replay events as completed (historical)
+      for (const ev of allEvents) {
+        if (ev.status === "in_progress" || ev.status === "waiting") {
+          ev.status = "completed"
+        }
+      }
+
+      const recent = allEvents.slice(-200)
+      console.log(`[CodexWatcher] forceReplay: ${lines.length} lines → ${allEvents.length} events → emitting ${recent.length}`)
+      if (recent.length > 0) {
+        this.callback(recent)
+      }
+    } catch (err) {
+      console.log(`[CodexWatcher] forceReplay ERROR: ${err instanceof Error ? err.message : err}`)
+    }
+  }
 }

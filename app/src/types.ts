@@ -66,6 +66,8 @@ export interface ProjectSettings {
   cursorMode: CursorMode
   cursorModel: string
   cursorSandbox: CursorSandbox
+  // Routing
+  routingRules?: RoutingRule[]
   // Injected at launch time (not persisted)
   locale?: string
 }
@@ -119,6 +121,8 @@ export interface AgentEvent {
   }
   decision?: {
     options: DecisionOption[]
+    purpose?: string    // 目的 — why the agent needs this permission
+    scope?: string      // 影響範圍 — what files/systems will be affected
   }
   progress?: ProgressReport
   _images?: string[]  // base64 image thumbnails for user messages
@@ -218,6 +222,29 @@ export interface ProgressReport {
   summary: string
   nextSteps: string[]
   details?: string
+}
+
+// ── Routing Rules ──
+
+export interface RoutingRule {
+  id: string
+  keywords: string[]
+  agentId: string
+  enabled: boolean
+}
+
+export const DEFAULT_ROUTING_RULES: RoutingRule[] = [
+  { id: "default-1", keywords: ["test", "spec", "coverage", "unit"], agentId: "codex", enabled: true },
+  { id: "default-2", keywords: ["fix", "bug", "error", "debug", "crash"], agentId: "claude", enabled: true },
+  { id: "default-3", keywords: ["refactor", "clean", "rename", "move"], agentId: "gemini", enabled: true },
+]
+
+export interface DetectedAgent {
+  id: string
+  name: string
+  installed: boolean
+  version?: string
+  path?: string
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {
@@ -456,3 +483,6 @@ export const AGENTS: AgentDef[] = [
     command: () => null,
   },
 ]
+
+export const KNOWN_AGENT_IDS = AGENTS.map(a => a.id)
+export const MODEL_NAMES = ["opus", "sonnet", "haiku", "flash", "gpt-4o", "o3-mini", "deepseek"] as const

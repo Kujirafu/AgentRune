@@ -116,7 +116,7 @@ function getTemplateColor(tmpl: AutomationTemplate): string {
   return (tmpl.subgroup && SUBGROUP_COLORS[tmpl.subgroup]) || "#37ACC0"
 }
 
-interface AutomationSheetProps {
+export interface AutomationSheetProps {
   open: boolean
   projectId: string
   serverUrl: string
@@ -125,6 +125,8 @@ interface AutomationSheetProps {
   initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null
   /** Launch a new session with a template prompt (prefilled into InputBar) */
   onLaunchSession?: (prompt: string) => void
+  /** Desktop inline mode: render without overlay/backdrop, as plain content */
+  inline?: boolean
 }
 
 // --- Weekday labels ---
@@ -358,7 +360,8 @@ function useTemplateI18n() {
 
 // --- Main Component ---
 
-export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit, onLaunchSession }: AutomationSheetProps) {
+export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEdit, onLaunchSession, inline }: AutomationSheetProps) {
+  const desktop = typeof window !== "undefined" && (window.innerWidth >= 900 || !!(window as any).electronAPI)
   const { t, locale } = useLocale()
   const reportLocale = locale === "zh-TW" ? "zh-TW" : "en"
   const reportCopy = reportLocale === "zh-TW"
@@ -765,6 +768,25 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     return `${(ms / 60_000).toFixed(1)}m`
   }
 
+  // ── Inline mode: render content directly without overlay ──
+  if (inline && open) {
+    return (
+      <div style={{ color: "var(--text-primary)" }}>
+        {renderContent()}
+
+        {/* Fullscreen prompt editor (keep as overlay even in inline mode) */}
+        {promptExpanded && renderPromptEditor()}
+
+        {/* Toast */}
+        {toast && renderToast()}
+
+        {/* Sub-overlays */}
+        <CrewReportSheet open={!!reportTarget} automationId={reportTarget?.id || ""} automationName={reportTarget?.name || ""} serverUrl={serverUrl} onClose={() => setReportTarget(null)} />
+        <AutomationReportSheet open={!!resultReportTarget} automationName={resultReportTarget?.automationName || ""} results={results} selectedResultId={resultReportTarget?.resultId || null} onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)} onClose={() => setResultReportTarget(null)} />
+      </div>
+    )
+  }
+
   return (
     <AnimatePresence>
       {open && (
@@ -786,23 +808,149 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
       {/* Sheet */}
       <motion.div
         key="auto-sheet"
-        initial={{ y: "100%" }}
-        animate={{ y: 0 }}
-        exit={{ y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
-        transition={{ type: "spring", stiffness: 200, damping: 20 }}
-        ref={sheetRef} {...swipeHandlers}
-        style={{
+        initial={desktop ? { opacity: 0 } : { y: "100%" }}
+        animate={desktop ? { opacity: 1 } : { y: 0 }}
+        exit={desktop
+          ? { opacity: 0, transition: { duration: 0.15 } }
+          : { y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
+        transition={desktop
+          ? { duration: 0.2, ease: "easeOut" }
+          : { type: "spring", stiffness: 200, damping: 20 }}
+        {...(desktop ? {} : { ref: sheetRef, ...swipeHandlers })}
+        style={desktop ? {
+          position: "fixed",
+          inset: 0,
+          margin: "auto",
+          width: "min(680px, 90vw)",
+          height: "fit-content",
+          maxHeight: "85vh",
+          borderRadius: 16,
+          overflowY: "auto" as const,
+          zIndex: 201,
+          background: "var(--card-bg)",
+          border: "1px solid var(--glass-border)",
+          padding: "20px",
+          color: "var(--text-primary)",
+          boxShadow: "0 8px 40px rgba(0,0,0,0.25)",
+        } : {
           position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 201,
           background: "var(--card-bg)",
           borderTop: "1px solid var(--glass-border)", borderRadius: "24px 24px 0 0",
           padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
-          maxHeight: "85dvh", overflowY: "auto",
+          maxHeight: "85dvh", overflowY: "auto" as const,
           color: "var(--text-primary)",
         }}
       >
         {/* Handle */}
-        <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--text-secondary)", opacity: 0.3, margin: "0 auto 20px" }} />
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--text-secondary)", opacity: 0.3, margin: "0 auto 20px", display: desktop ? "none" : "block" }} />
 
+        {renderContent()}
+      </motion.div>
+
+      {/* Fullscreen prompt editor */}
+      {promptExpanded && renderPromptEditor()}
+
+      {/* Toast */}
+      {toast && renderToast()}
+
+      {/* Crew Execution Report overlay */}
+      <CrewReportSheet
+        open={!!reportTarget}
+        automationId={reportTarget?.id || ""}
+        automationName={reportTarget?.name || ""}
+        serverUrl={serverUrl}
+        onClose={() => setReportTarget(null)}
+      />
+      <AutomationReportSheet
+        open={!!resultReportTarget}
+        automationName={resultReportTarget?.automationName || ""}
+        results={results}
+        selectedResultId={resultReportTarget?.resultId || null}
+        onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)}
+        onClose={() => setResultReportTarget(null)}
+      />
+
+    </>
+      )}
+    </AnimatePresence>
+  )
+
+  function renderToast() {
+    return (
+      <div style={{
+        position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 16px)",
+        left: "50%", transform: "translateX(-50%)", zIndex: 300,
+        padding: "10px 20px", borderRadius: 12,
+        background: "rgba(34,197,94,0.9)", color: "#fff",
+        fontSize: 13, fontWeight: 600,
+        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        animation: "fadeIn 0.2s ease-out",
+      }}>
+        {toast}
+      </div>
+    )
+  }
+
+  function renderPromptEditor() {
+    return (
+      <div
+        style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          background: "rgba(0,0,0,0.7)",
+          backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+          zIndex: 250,
+          display: "flex", flexDirection: "column",
+          padding: desktop ? "28px 20px 20px" : "calc(env(safe-area-inset-top, 16px) + 12px) 16px calc(env(safe-area-inset-bottom, 16px) + 12px)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+          <button onClick={() => setPromptExpanded(false)} style={{
+            width: 36, height: 36, borderRadius: 10,
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: "rgba(255,255,255,0.05)",
+            color: "rgba(255,255,255,0.7)",
+            fontSize: 16, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexShrink: 0,
+          }}>
+            {"X"}
+          </button>
+          <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
+            {t("automation.editPrompt") || "Edit Prompt"}
+          </div>
+        </div>
+        <textarea
+          autoFocus
+          value={formPrompt}
+          onChange={(e) => setFormPrompt(e.target.value)}
+          placeholder={t("automation.promptPlaceholder") || "Describe what the agent should do..."}
+          style={{
+            flex: 1, padding: 16, borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: "rgba(255,255,255,0.05)",
+            color: "#fff", fontSize: 15,
+            fontFamily: "'JetBrains Mono', 'SF Mono', monospace",
+            outline: "none", resize: "none", lineHeight: 1.5,
+          }}
+        />
+        <button
+          onClick={() => setPromptExpanded(false)}
+          style={{
+            marginTop: 12, padding: "14px 0", borderRadius: 14,
+            border: "none",
+            background: formPrompt.trim() ? "#37ACC0" : "rgba(255,255,255,0.1)",
+            color: formPrompt.trim() ? "#fff" : "rgba(255,255,255,0.4)",
+            fontSize: 16, fontWeight: 600, cursor: "pointer",
+          }}
+        >
+          {t("automation.done") || "Done"}
+        </button>
+      </div>
+    )
+  }
+
+  function renderContent() {
+    return (<>
         {page === "pick" ? (
           /* ======================== TEMPLATE PICKER (entry page) ======================== */
           <>
@@ -1257,7 +1405,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 background: "var(--icon-bg)", color: "var(--text-secondary)", fontWeight: 600,
                               }}>
                                 {AGENTS.find((a) => a.id === auto.agentId)?.name || auto.agentId}
-                                {(auto as any).model ? ` 蝜?${(auto as any).model}` : ""}
+                                {(auto as any).model ? ` ·${(auto as any).model}` : ""}
                               </span>
                             )}
                             <span style={{
@@ -1378,7 +1526,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         </span>
                                       </div>
                                       <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} 蝜?{formatDuration(r.finishedAt - r.startedAt)}
+                                        {new Date(r.startedAt).toLocaleDateString([], { month: "short", day: "numeric" })} {formatTime(r.startedAt)} ·{formatDuration(r.finishedAt - r.startedAt)}
                                       </div>
                                     </div>
                                     <div style={{
@@ -1639,8 +1787,98 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
 
             {/* 2. Prompt input ??crew mode shows role cards, template shows collapsed, manual shows textarea */}
             {formCrew ? (
-              /* ---- CREW MODE: Prompt + Role card list ---- */
+              /* ---- CREW MODE: Prompt + Role card list / Chain view ---- */
               <div style={{ width: "100%", marginBottom: 0 }}>
+                {/* Detect single-role chain template */}
+                {(() => {
+                  const isSingleChain = formCrew.roles.length === 1 && !!formCrew.roles[0].skillChainSlug
+                  const chainRole = isSingleChain ? formCrew.roles[0] : null
+                  const chainDef = chainRole ? BUILTIN_CHAINS.find(c => c.slug === chainRole.skillChainSlug) : null
+
+                  if (isSingleChain && chainDef) {
+                    /* ---- CHAIN MODE: show chain steps instead of role cards ---- */
+                    const chainName = resolveChainText(chainDef.nameKey, t)
+                    const chainDesc = resolveChainText(chainDef.descKey || "", t)
+                    return (
+                      <>
+                        {/* Chain header */}
+                        <div style={{
+                          padding: "12px 14px", borderRadius: 12, marginBottom: 12,
+                          background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.15)",
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: chainDesc ? 6 : 0 }}>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/>
+                            </svg>
+                            <span style={{ fontSize: 14, fontWeight: 600, color: "#37ACC0" }}>{chainName}</span>
+                            <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: "auto" }}>
+                              ~{(chainRole!.estimatedTokens || formCrew.tokenBudget).toLocaleString()} tok
+                            </span>
+                          </div>
+                          {chainDesc && <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>{chainDesc}</div>}
+                        </div>
+                        {/* Chain steps */}
+                        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>
+                          {t("crew.chainSteps") || "Steps"}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+                          {chainDef.steps.map((node, i) => {
+                            if (isParallelGroup(node)) {
+                              const branchTexts = node.branches.map(b => resolveChainText(b.labelKey, t))
+                              return (
+                                <div key={i} style={{
+                                  padding: "8px 12px", borderRadius: 8,
+                                  background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+                                  fontSize: 12, color: "var(--text-primary)",
+                                  display: "flex", alignItems: "center", gap: 6,
+                                }}>
+                                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", flexShrink: 0, width: 20 }}>{i + 1}.</span>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                                    <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>
+                                  </svg>
+                                  <span>{branchTexts.join(" + ")}</span>
+                                </div>
+                              )
+                            }
+                            return (
+                              <div key={i} style={{
+                                padding: "8px 12px", borderRadius: 8,
+                                background: "var(--glass-bg)", border: "1px solid var(--glass-border)",
+                                fontSize: 12, color: "var(--text-primary)",
+                                display: "flex", alignItems: "center", gap: 6,
+                              }}>
+                                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", flexShrink: 0, width: 20 }}>{i + 1}.</span>
+                                <span>{resolveChainText(node.labelKey, t)}</span>
+                                {!node.required && <span style={{ fontSize: 10, color: "var(--text-secondary)", marginLeft: "auto" }}>{t("chain.optional") || "optional"}</span>}
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {/* Token budget */}
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>{t("crew.tokenBudget")}</div>
+                            <input
+                              type="number" value={formCrew.tokenBudget}
+                              onChange={(e) => setFormCrew({ ...formCrew, tokenBudget: parseInt(e.target.value) || 0 })}
+                              style={{
+                                width: "100%", padding: "8px 12px", borderRadius: 10,
+                                border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                                color: "var(--text-primary)", fontSize: 13, outline: "none",
+                                boxSizing: "border-box",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </>
+                    )
+                  }
+
+                  /* ---- CREW MODE (multi-role): Prompt + Role card list ---- */
+                  return null
+                })()}
+                {/* Multi-role crew UI — only show when NOT a single chain template */}
+                {!(formCrew.roles.length === 1 && formCrew.roles[0].skillChainSlug) && (<>
                 {/* User prompt ??what should this crew work on */}
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
                   {t("automation.prompt") || "Prompt"}
@@ -1735,8 +1973,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{roleName}</div>
                             <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
                               {t("crew.phase").replace("{n}", String(role.phase))}
-                              {isParallel && ` 蝜?${t("crew.parallel")}`}
-                              {role.estimatedTokens ? ` 蝜?~${role.estimatedTokens.toLocaleString()} tok` : ""}
+                              {isParallel && ` ·${t("crew.parallel")}`}
+                              {role.estimatedTokens ? ` ·~${role.estimatedTokens.toLocaleString()} tok` : ""}
                             </div>
                           </div>
                           <IconChevron expanded={isExpanded} />
@@ -1935,6 +2173,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     }} />
                   </div>
                 </button>
+                </>)}
               </div>
             ) : formTemplateId ? (
               <div
@@ -2475,101 +2714,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             </div>
           </>
         )}
-      </motion.div>
-
-      {/* Fullscreen prompt editor */}
-      {promptExpanded && (
-        <div
-          style={{
-            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-            background: "rgba(0,0,0,0.7)",
-            backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
-            zIndex: 250,
-            display: "flex", flexDirection: "column",
-            padding: "calc(env(safe-area-inset-top, 16px) + 12px) 16px calc(env(safe-area-inset-bottom, 16px) + 12px)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-            <button onClick={() => setPromptExpanded(false)} style={{
-              width: 36, height: 36, borderRadius: 10,
-              border: "1px solid rgba(255,255,255,0.15)",
-              background: "rgba(255,255,255,0.05)",
-              color: "rgba(255,255,255,0.7)",
-              fontSize: 16, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              flexShrink: 0,
-            }}>
-              {"X"}
-            </button>
-            <div style={{ flex: 1, fontSize: 16, fontWeight: 600, color: "#fff" }}>
-              {t("automation.editPrompt") || "Edit Prompt"}
-            </div>
-          </div>
-          <textarea
-            autoFocus
-            value={formPrompt}
-            onChange={(e) => setFormPrompt(e.target.value)}
-            placeholder={t("automation.promptPlaceholder") || "Describe what the agent should do..."}
-            style={{
-              flex: 1, padding: 16, borderRadius: 14,
-              border: "1px solid rgba(255,255,255,0.15)",
-              background: "rgba(255,255,255,0.05)",
-              color: "#fff", fontSize: 15,
-              fontFamily: "'JetBrains Mono', 'SF Mono', monospace",
-              outline: "none", resize: "none", lineHeight: 1.5,
-            }}
-          />
-          <button
-            onClick={() => setPromptExpanded(false)}
-            style={{
-              marginTop: 12, padding: "14px 0", borderRadius: 14,
-              border: "none",
-              background: formPrompt.trim() ? "#37ACC0" : "rgba(255,255,255,0.1)",
-              color: formPrompt.trim() ? "#fff" : "rgba(255,255,255,0.4)",
-              fontSize: 16, fontWeight: 600, cursor: "pointer",
-            }}
-          >
-            {t("automation.done") || "Done"}
-          </button>
-        </div>
-      )}
-
-      {/* Toast */}
-      {toast && (
-        <div style={{
-          position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 16px)",
-          left: "50%", transform: "translateX(-50%)", zIndex: 300,
-          padding: "10px 20px", borderRadius: 12,
-          background: "rgba(34,197,94,0.9)", color: "#fff",
-          fontSize: 13, fontWeight: 600,
-          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-          animation: "fadeIn 0.2s ease-out",
-        }}>
-          {toast}
-        </div>
-      )}
-
-      {/* Crew Execution Report overlay */}
-      <CrewReportSheet
-        open={!!reportTarget}
-        automationId={reportTarget?.id || ""}
-        automationName={reportTarget?.name || ""}
-        serverUrl={serverUrl}
-        onClose={() => setReportTarget(null)}
-      />
-      <AutomationReportSheet
-        open={!!resultReportTarget}
-        automationName={resultReportTarget?.automationName || ""}
-        results={results}
-        selectedResultId={resultReportTarget?.resultId || null}
-        onSelectResult={(resultId) => setResultReportTarget((prev) => prev ? { ...prev, resultId } : prev)}
-        onClose={() => setResultReportTarget(null)}
-      />
-
-    </>
-      )}
-    </AnimatePresence>
-  )
+    </>)
+  }
 }
 
 /** Reusable template card for the templates page */
@@ -2758,7 +2904,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{name}</div>
           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{desc}</div>
           <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 3 }}>
-            {t("crew.rolesCount").replace("{n}", String(roles.length))} 蝜?{tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
+            {t("crew.rolesCount").replace("{n}", String(roles.length))} ·{tmpl.crew?.tokenBudget?.toLocaleString() || "?"} tokens
           </div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
