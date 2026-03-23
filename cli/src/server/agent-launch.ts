@@ -78,6 +78,10 @@ export interface NormalizedAgentSettings {
   cursorModel: string
   cursorSandbox: CursorSandbox
   locale: string
+  // Global sandbox
+  sandboxLevel: string
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
 }
 
 export const DEFAULT_AGENT_SETTINGS: NormalizedAgentSettings = {
@@ -100,6 +104,9 @@ export const DEFAULT_AGENT_SETTINGS: NormalizedAgentSettings = {
   cursorModel: "",
   cursorSandbox: "default",
   locale: "",
+  sandboxLevel: "none",
+  requirePlanReview: false,
+  requireMergeApproval: false,
 }
 
 export interface AgentLaunchOptions {
@@ -188,6 +195,9 @@ export function normalizeAgentSettings(rawSettings?: AgentSettingsInput): Normal
     cursorMode: readEnum(settings, "cursorMode", CURSOR_MODES, DEFAULT_AGENT_SETTINGS.cursorMode),
     cursorModel: readSafeToken(settings, "cursorModel"),
     cursorSandbox: readEnum(settings, "cursorSandbox", CURSOR_SANDBOXES, DEFAULT_AGENT_SETTINGS.cursorSandbox),
+    sandboxLevel: typeof settings.sandboxLevel === "string" ? settings.sandboxLevel : DEFAULT_AGENT_SETTINGS.sandboxLevel,
+    requirePlanReview: readBoolean(settings, "requirePlanReview", DEFAULT_AGENT_SETTINGS.requirePlanReview),
+    requireMergeApproval: readBoolean(settings, "requireMergeApproval", DEFAULT_AGENT_SETTINGS.requireMergeApproval),
     locale: sanitizeLocale(settings.locale),
   }
 }

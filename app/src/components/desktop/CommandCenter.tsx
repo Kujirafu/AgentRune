@@ -187,6 +187,7 @@ export function CommandCenter(props: CommandCenterProps) {
   // Settings change handler — match MissionControl's handleSettingsChange pattern
   const [bypassConfirmPending, setBypassConfirmPending] = useState(false)
   const pendingBypassRef = React.useRef<{ projectId: string; agentId: string } | null>(null)
+  const [pendingRestart, setPendingRestart] = useState(false)
 
   const handleSettingsChange = useCallback((prev: import("../../types").ProjectSettings, next: import("../../types").ProjectSettings) => {
     // Find the active session to send commands to
@@ -196,30 +197,20 @@ export function CommandCenter(props: CommandCenterProps) {
     const session = activeSessions.find(s => s.id === targetSid)
     if (!session) return
 
-    // Bypass toggle → kill + relaunch (like MissionControl)
+    // Bypass toggle → confirmation before restart
     if (next.bypass !== prev.bypass) {
       if (next.bypass) {
-        // Enable bypass → show confirmation
         pendingBypassRef.current = { projectId: session.projectId, agentId: session.agentId }
         setBypassConfirmPending(true)
       } else {
-        // Disable bypass → immediate restart
-        onKillSession(targetSid).then(() => {
-          setTimeout(() => props.onLaunch(session.projectId, session.agentId), 500)
-        })
+        setPendingRestart(true)
       }
       return
     }
 
-    // Sandbox level change → restart all sessions with new settings
+    // Sandbox/bypass/planMode changes → mark as pending (user confirms via "Apply" button)
     if (next.sandboxLevel !== prev.sandboxLevel || next.requirePlanReview !== prev.requirePlanReview || next.requireMergeApproval !== prev.requireMergeApproval) {
-      // Restart all non-recoverable sessions with new sandbox
-      const toRestart = activeSessions.filter(s => s.status !== "recoverable")
-      for (const s of toRestart) {
-        onKillSession(s.id).then(() => {
-          setTimeout(() => props.onLaunch(s.projectId, s.agentId), 500)
-        })
-      }
+      setPendingRestart(true)
       return
     }
 
@@ -581,14 +572,46 @@ export function CommandCenter(props: CommandCenterProps) {
             />
           )}
 
-          {activeView === "settings" && (
+          {activeView === "settings" && (<>
             <SettingsTool
               projectId={selectedProjectId}
               theme={theme}
               t={t}
               onSettingsChange={handleSettingsChange}
             />
-          )}
+            {/* "Apply Changes" banner when sandbox/bypass changes need restart */}
+            {pendingRestart && (
+              <div style={{
+                position: "sticky", bottom: 0, padding: "10px 16px",
+                background: dark ? "rgba(55,172,192,0.1)" : "rgba(55,172,192,0.06)",
+                borderTop: "2px solid rgba(55,172,192,0.3)",
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <span style={{ fontSize: 13, color: dark ? "#e2e8f0" : "#1e293b", fontWeight: 500 }}>
+                  {locale.startsWith("zh") ? "沙盒設定已變更，需要重啟 session 才能套用" : "Sandbox settings changed. Restart sessions to apply."}
+                </span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setPendingRestart(false)} style={{
+                    padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    border: `1px solid ${dark ? "rgba(148,163,184,0.15)" : "rgba(148,163,184,0.2)"}`,
+                    background: "transparent", color: dark ? "#94a3b8" : "#64748b",
+                  }}>{locale.startsWith("zh") ? "稍後" : "Later"}</button>
+                  <button onClick={() => {
+                    setPendingRestart(false)
+                    const toRestart = activeSessions.filter(s => s.status !== "recoverable")
+                    for (const s of toRestart) {
+                      onKillSession(s.id).then(() => {
+                        setTimeout(() => props.onLaunch(s.projectId, s.agentId), 500)
+                      })
+                    }
+                  }} style={{
+                    padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    border: "none", background: "#37ACC0", color: "#fff",
+                  }}>{locale.startsWith("zh") ? "立即重啟" : "Restart Now"}</button>
+                </div>
+              </div>
+            )}
+          </>)}
 
           {/* Bypass confirmation dialog (match MissionControl) */}
           {bypassConfirmPending && (

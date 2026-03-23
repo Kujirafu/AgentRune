@@ -26,7 +26,9 @@ import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
 import { buildPlanningConstraints } from "./planning-constraints.js"
-import { createFromTrustProfile } from "./authority-map.js"
+import { createFromTrustProfile, grantPermission } from "./authority-map.js"
+import { SkillMonitor } from "./skill-monitor.js"
+import { createManifestForLevel, type SandboxLevel } from "./skill-manifest.js"
 import { readAuditLog, listAuditDates, getRecentAuditEntries, getAutomationAudit } from "./audit-log.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
@@ -3573,6 +3575,8 @@ export function createServer(portOverride?: number) {
   const sessionEngines = new Map<string, ParseEngine>()
   const sessionRecentEvents = new Map<string, AgentEvent[]>()
   const sessionJsonlWatchers = new Map<string, { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null; [key: string]: any }>()
+  // Global sandbox monitors for regular sessions (not automations — those have their own)
+  const sessionSandboxMonitors = new Map<string, SkillMonitor>()
 
   // Common callback factory for JSONL watchers: store events, send to clients, broadcast activity.
   // Defined at module scope so both "attach" and "request_events" handlers can use it.
@@ -4114,6 +4118,45 @@ export function createServer(portOverride?: number) {
                 sessions.write(session.id, `${launch.command}\r`)
                 log.info(`[attach] Agent auto-start: ${launch.command}`)
               }, 1500)
+            }
+
+            // --- Global sandbox: attach SkillMonitor if sandboxLevel is not "none" ---
+            {
+              const globalSandbox = (normalizedSettings as any).sandboxLevel as SandboxLevel | undefined
+              if (globalSandbox && globalSandbox !== "none") {
+                const manifest = createManifestForLevel(`session_${session.id}`, globalSandbox)
+                const authorityMap = createFromTrustProfile({
+                  sessionId: session.id,
+                  sandboxLevel: globalSandbox,
+                  requirePlanReview: (normalizedSettings as any).requirePlanReview === true,
+                  requireMergeApproval: (normalizedSettings as any).requireMergeApproval === true,
+                })
+                const monitor = new SkillMonitor({
+                  manifest,
+                  projectCwd: sessionProject.cwd,
+                  autoHalt: false, // Don't auto-halt regular sessions — notify instead
+                  authorityMap,
+                  onViolation: (violation) => {
+                    log.warn(`[sandbox] Session ${session.id}: ${violation.type} violation — ${violation.description}`)
+                  },
+                  onReauthRequired: (violation, permissionKey) => {
+                    log.warn(`[sandbox] Session ${session.id}: reauth required for ${permissionKey}`)
+                    // Notify all connected clients
+                    for (const [client, csid] of clientSessions) {
+                      if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                          type: "sandbox_violation",
+                          sessionId: session.id,
+                          violation: { type: violation.type, description: violation.description },
+                          permissionKey,
+                        }))
+                      }
+                    }
+                  },
+                })
+                sessionSandboxMonitors.set(session.id, monitor)
+                log.info(`[sandbox] Monitor attached to session ${session.id} (level: ${globalSandbox})`)
+              }
             }
 
             // --- Ensure rules.md exists (+ PRD API section if needed), then inject ---
@@ -5096,6 +5139,10 @@ export function createServer(portOverride?: number) {
 
   // PTY data -> parse engine -> events -> clients
   sessions.on("data", (sessionId: string, data: string) => {
+    // Feed sandbox monitor (if attached)
+    const sandboxMonitor = sessionSandboxMonitors.get(sessionId)
+    if (sandboxMonitor) sandboxMonitor.processOutput(data)
+
     const engine = sessionEngines.get(sessionId)
     if (engine) {
       const scrollback = sessions.getRecentScrollback(sessionId, 40_000)

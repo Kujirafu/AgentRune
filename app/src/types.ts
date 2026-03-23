@@ -275,7 +275,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   cursorMode: "default",
   cursorModel: "",
   cursorSandbox: "default",
-  sandboxLevel: "moderate",
+  sandboxLevel: "none",
   requirePlanReview: false,
   requireMergeApproval: false,
 }
