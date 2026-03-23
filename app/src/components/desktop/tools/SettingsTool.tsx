@@ -38,6 +38,15 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
     fetch("/api/routing-rules").then(r => r.json()).then(setGlobalRules).catch(() => {})
   }, [projectId])
 
+  const updateMulti = useCallback((changes: Partial<ProjectSettings>) => {
+    if (!projectId) return
+    const prev = { ...settings }
+    const next = { ...settings, ...changes }
+    setSettings(next)
+    saveSettings(projectId, next)
+    onSettingsChange?.(prev, next)
+  }, [projectId, settings, onSettingsChange])
+
   const update = useCallback(<K extends keyof ProjectSettings>(key: K, value: ProjectSettings[K]) => {
     if (!projectId) return
     const prev = { ...settings }
@@ -577,9 +586,11 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
               : { autonomous: "Full autonomy", supervised: "Sandboxed", guarded: "Strict + review" }
             return (
               <button key={profile} onClick={() => {
-                update("sandboxLevel", preset.sandboxLevel)
-                update("requirePlanReview", preset.requirePlanReview)
-                update("requireMergeApproval", preset.requireMergeApproval)
+                updateMulti({
+                  sandboxLevel: preset.sandboxLevel,
+                  requirePlanReview: preset.requirePlanReview,
+                  requireMergeApproval: preset.requireMergeApproval,
+                })
               }} style={{
                 flex: 1, padding: "10px 8px", borderRadius: 10, cursor: "pointer",
                 border: isActive ? `2px solid ${colors[profile]}` : `1px solid ${inputBorder}`,
