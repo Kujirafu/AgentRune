@@ -506,12 +506,10 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
             onChange={(v) => { setWorktreeState(v); setWorktreeEnabled(v) }}
           />
         </Row>
-        <Row label={t("settings.bypass")} description={t("settings.bypassDesc")}>
-          <Toggle checked={settings.bypass} onChange={(v) => {
-            update("bypass", v)
-            if (v) update("sandboxLevel", "none")
-            else if (settings.sandboxLevel === "none") update("sandboxLevel", "moderate")
-          }} />
+        <Row label={t("settings.bypass")} description={locale.startsWith("zh")
+          ? "Agent 自主工作不問你，搭配沙盒等級可限制權限範圍"
+          : "Agent works autonomously. Use sandbox level to restrict what it can do"}>
+          <Toggle checked={settings.bypass} onChange={(v) => update("bypass", v)} />
         </Row>
         <Row label={t("settings.planMode")} description={t("settings.planModeDesc")}>
           <Toggle checked={settings.planMode} onChange={(v) => update("planMode", v)} />
@@ -550,11 +548,7 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
               { value: "permissive" as const, label: locale.startsWith("zh") ? "寬鬆" : "Permissive" },
               { value: "none" as const, label: locale.startsWith("zh") ? "無限制" : "None" },
             ]}
-            onChange={(v) => {
-              update("sandboxLevel", v)
-              if (v === "none" && !settings.bypass) update("bypass", true)
-              if (v !== "none" && settings.bypass) update("bypass", false)
-            }}
+            onChange={(v) => update("sandboxLevel", v)}
           />
         </Row>
         <Row label={locale.startsWith("zh") ? "要求計畫審查" : "Require Plan Review"}

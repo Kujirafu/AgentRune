@@ -509,18 +509,26 @@ export function DesktopInputBar({
 
         {/* Input area with highlight overlay */}
         <div style={{ flex: 1, position: "relative", minHeight: 28 }}>
-          <input
-            ref={inputRef}
+          <textarea
+            ref={inputRef as any}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => {
+              setInput(e.target.value)
+              // Auto-resize height
+              const el = e.target
+              el.style.height = "28px"
+              el.style.height = Math.min(el.scrollHeight, 120) + "px"
+            }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
+            rows={1}
             style={{
               width: "100%", background: "transparent", border: "none", outline: "none",
               fontSize: 14, color: input ? "transparent" : (activeMode === "interrupt" ? "#ef4444" : activeMode === "task" ? "#3b82f6" : textPrimary),
               caretColor: activeMode === "interrupt" ? "#ef4444" : activeMode === "task" ? "#3b82f6" : textPrimary,
               fontFamily: "inherit", lineHeight: "28px",
+              resize: "none", overflow: "hidden",
             }}
             autoFocus
           />
@@ -528,7 +536,7 @@ export function DesktopInputBar({
             <div style={{
               position: "absolute", top: 0, left: 0, right: 0,
               pointerEvents: "none", fontSize: 14, fontFamily: "inherit",
-              whiteSpace: "pre", overflow: "hidden", lineHeight: "28px",
+              whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden", lineHeight: "28px",
             }}>
               {highlightInput(input, dark)}
             </div>

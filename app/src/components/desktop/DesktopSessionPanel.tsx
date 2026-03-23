@@ -58,6 +58,12 @@ const typeIcons: Record<string, React.ReactNode> = {
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   ),
+  user_message: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  ),
   info: (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
@@ -515,8 +521,9 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
         display: "flex", flexDirection: "column",
         padding: "6px 10px",
         borderRadius: 7,
+        borderLeft: isUser ? "3px solid rgba(55,172,192,0.5)" : undefined,
         background: isUser
-          ? (dark ? "rgba(59,130,246,0.06)" : "rgba(59,130,246,0.04)")
+          ? (dark ? "rgba(55,172,192,0.08)" : "rgba(55,172,192,0.06)")
           : isError
             ? (dark ? "rgba(239,68,68,0.06)" : "rgba(239,68,68,0.04)")
             : (dark ? "rgba(30,41,59,0.3)" : "rgba(241,245,249,0.5)"),

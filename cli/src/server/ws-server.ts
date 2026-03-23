@@ -4528,6 +4528,31 @@ export function createServer(portOverride?: number) {
           break
         }
 
+        // Sandbox violation resolve for regular sessions (not automations)
+        case "sandbox_resolve": {
+          const sessionId = msg.sessionId as string
+          const action = (msg.action as "approve" | "deny") || "deny"
+          const permKey = msg.permissionKey as string
+          if (!sessionId) break
+          const monitor = sessionSandboxMonitors.get(sessionId)
+          if (action === "approve") {
+            // Grant permission in authority map so future operations pass
+            if (monitor && (monitor as any).config?.authorityMap && permKey) {
+              grantPermission((monitor as any).config.authorityMap, permKey, {
+                noExpiry: msg.noExpiry === true,
+                reason: "User approved via sandbox widget",
+              })
+            }
+            log.info(`[sandbox] Approved ${permKey} for session ${sessionId}`)
+          } else {
+            // Deny → kill session
+            sessions.kill(sessionId)
+            log.info(`[sandbox] Denied ${permKey} for session ${sessionId} — session killed`)
+          }
+          ws.send(JSON.stringify({ type: "sandbox_resolve_ack", sessionId, action, permissionKey: permKey }))
+          break
+        }
+
         case "reauth_resolve": {
           const automationId = msg.automationId as string
           const action = (msg.action as "approve" | "deny") || "deny"
