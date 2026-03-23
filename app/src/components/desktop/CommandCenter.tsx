@@ -238,18 +238,22 @@ export function CommandCenter(props: CommandCenterProps) {
     }
   }, [targetSessionId, activeSessions, send, onKillSession, props.onLaunch])
 
+  // Kill + resume helper: restart session with same Claude conversation
+  const restartWithResume = useCallback((sessionToRestart: AppSession) => {
+    const claudeId = sessionToRestart.claudeSessionId
+    onKillSession(sessionToRestart.id).then(() => {
+      setTimeout(() => props.onLaunch(sessionToRestart.projectId, sessionToRestart.agentId, claudeId), 500)
+    })
+  }, [onKillSession, props.onLaunch])
+
   const confirmBypass = useCallback(() => {
     setBypassConfirmPending(false)
     const info = pendingBypassRef.current
     if (!info) return
-    const targetSid = targetSessionId || activeSessions.find(s => s.id && s.projectId === info.projectId)?.id
-    if (targetSid) {
-      onKillSession(targetSid).then(() => {
-        setTimeout(() => props.onLaunch(info.projectId, info.agentId), 500)
-      })
-    }
+    const session = activeSessions.find(s => s.id === targetSessionId) || activeSessions.find(s => s.projectId === info.projectId && s.status !== "recoverable")
+    if (session) restartWithResume(session)
     pendingBypassRef.current = null
-  }, [targetSessionId, activeSessions, onKillSession, props.onLaunch])
+  }, [targetSessionId, activeSessions, restartWithResume])
 
   // Esc to collapse all expanded sessions
   React.useEffect(() => {
@@ -599,11 +603,7 @@ export function CommandCenter(props: CommandCenterProps) {
                   <button onClick={() => {
                     setPendingRestart(false)
                     const toRestart = activeSessions.filter(s => s.status !== "recoverable")
-                    for (const s of toRestart) {
-                      onKillSession(s.id).then(() => {
-                        setTimeout(() => props.onLaunch(s.projectId, s.agentId), 500)
-                      })
-                    }
+                    for (const s of toRestart) restartWithResume(s)
                   }} style={{
                     padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
                     border: "none", background: "#37ACC0", color: "#fff",
