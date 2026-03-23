@@ -1962,18 +1962,50 @@ export function App() {
       setPendingReauthQueue((prev) => prev.filter((item) => item.automationId !== automationId))
     })
 
-    return () => { unsub(); unsubAck() }
+    // Sandbox violations from regular sessions → show as reauth in permission widget
+    const unsubSandbox = on("sandbox_violation", (msg) => {
+      const sessionId = msg.sessionId as string
+      if (!sessionId) return
+      const violation = msg.violation as { type: string; description: string }
+      const permKey = msg.permissionKey as string
+      const request: PendingReauthRequest = {
+        automationId: `sandbox_${sessionId}`,
+        automationName: `Session`,
+        sessionId,
+        violationType: violation?.type || "sandbox",
+        violationDescription: violation?.description || "Sandbox violation",
+        permissionKey: permKey || "",
+        killedAt: Date.now(),
+      }
+      setPendingReauthQueue((prev) => {
+        const filtered = prev.filter((item) => item.automationId !== request.automationId)
+        return [...filtered, request]
+      })
+    })
+
+    return () => { unsub(); unsubAck(); unsubSandbox() }
   }, [on, t])
 
   const handleReauthRespond = useCallback((action: "approve" | "deny", opts?: { noExpiry?: boolean; reviewNote?: string }) => {
     if (!pendingReauth) return
-    send({
-      type: "reauth_resolve",
-      automationId: pendingReauth.automationId,
-      action,
-      noExpiry: opts?.noExpiry === true,
-      reviewNote: opts?.reviewNote || undefined,
-    })
+    // Sandbox violations use sandbox_resolve, automations use reauth_resolve
+    if (pendingReauth.automationId.startsWith("sandbox_")) {
+      send({
+        type: "sandbox_resolve",
+        sessionId: pendingReauth.sessionId,
+        action,
+        permissionKey: pendingReauth.permissionKey,
+        noExpiry: opts?.noExpiry === true,
+      })
+    } else {
+      send({
+        type: "reauth_resolve",
+        automationId: pendingReauth.automationId,
+        action,
+        noExpiry: opts?.noExpiry === true,
+        reviewNote: opts?.reviewNote || undefined,
+      })
+    }
     setPendingReauthQueue((prev) => prev.filter((item) => item.automationId !== pendingReauth.automationId))
   }, [pendingReauth, send])
 
