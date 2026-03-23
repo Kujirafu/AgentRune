@@ -639,7 +639,7 @@ export function CommandCenter(props: CommandCenterProps) {
                   }}>{t("mc.cancel") || "Cancel"}</button>
                   <button onClick={confirmBypass} style={{
                     padding: "8px 16px", borderRadius: 8, border: "none",
-                    background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    background: "#FB8184", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
                   }}>{t("mc.bypassConfirmBtn")}</button>
                 </div>
               </div>

@@ -106,19 +106,19 @@ const defaultIcon = (
 )
 
 const typeColors: Record<string, string> = {
-  file_edit: "#3b82f6",
-  file_create: "#22c55e",
-  file_delete: "#ef4444",
-  command_run: "#a78bfa",
-  test_result: "#22c55e",
-  error: "#ef4444",
-  decision_request: "#f59e0b",
+  file_edit: "#37ACC0",
+  file_create: "#BDD1C6",
+  file_delete: "#FB8184",
+  command_run: "#347792",
+  test_result: "#BDD1C6",
+  error: "#FB8184",
+  decision_request: "#D09899",
   info: "#94a3b8",
   response: "#37ACC0",
-  user_message: "#3b82f6",
+  user_message: "#37ACC0",
   session_summary: "#37ACC0",
-  progress_report: "#f59e0b",
-  install_package: "#a78bfa",
+  progress_report: "#D09899",
+  install_package: "#347792",
   token_usage: "#94a3b8",
 }
 
@@ -164,7 +164,7 @@ export interface DesktopSessionPanelProps {
 }
 
 const statusColor: Record<string, string> = {
-  blocked: "#ef4444", working: "#3b82f6", idle: "#94a3b8", done: "#22c55e",
+  blocked: "#FB8184", working: "#37ACC0", idle: "#94a3b8", done: "#BDD1C6",
 }
 const statusLabel: Record<string, string> = {
   blocked: "Blocked", working: "Working", idle: "Idle", done: "Done",
@@ -324,7 +324,7 @@ export function DesktopSessionPanel({
               background: "transparent", cursor: "pointer", color: textSecondary,
               display: "flex", alignItems: "center", justifyContent: "center",
             }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#ef4444" }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#FB8184" }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = textSecondary }}
           >
             {/* Lucide Trash2 */}
@@ -603,7 +603,7 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
             onClick={(e) => { e.stopPropagation(); onApprove() }}
             style={{
               padding: "4px 16px", borderRadius: 6, border: "none",
-              background: "#22c55e", color: "#fff",
+              background: "#BDD1C6", color: "#fff",
               fontSize: 12, fontWeight: 600, cursor: "pointer",
               fontFamily: "inherit",
             }}
@@ -615,7 +615,7 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
             style={{
               padding: "4px 16px", borderRadius: 6,
               border: `1px solid ${dark ? "rgba(239,68,68,0.3)" : "rgba(239,68,68,0.2)"}`,
-              background: "transparent", color: "#ef4444",
+              background: "transparent", color: "#FB8184",
               fontSize: 12, fontWeight: 600, cursor: "pointer",
               fontFamily: "inherit",
             }}

@@ -46,9 +46,9 @@ function highlightInput(text: string, dark: boolean): React.ReactNode[] {
     plain: { color: tp },
     url: { color: "#37ACC0", textDecoration: "underline", textDecorationColor: "rgba(55,172,192,0.3)" },
     agent: { color: "#6ee7b7", fontWeight: 700, background: "rgba(110,231,183,0.08)", borderRadius: 3, padding: "0 2px" },
-    file: { color: "#f59e0b", background: "rgba(245,158,11,0.08)", borderRadius: 3, padding: "0 2px" },
-    command: { color: "#a78bfa", fontWeight: 600 },
-    path: { color: "#f59e0b", background: "rgba(245,158,11,0.08)", borderRadius: 3, padding: "0 2px" },
+    file: { color: "#D09899", background: "rgba(245,158,11,0.08)", borderRadius: 3, padding: "0 2px" },
+    command: { color: "#347792", fontWeight: 600 },
+    path: { color: "#D09899", background: "rgba(245,158,11,0.08)", borderRadius: 3, padding: "0 2px" },
   }
   return parts.map((p, i) => <span key={i} style={S[p.type]}>{p.text}</span>)
 }
@@ -411,7 +411,7 @@ export function DesktopInputBar({
           padding: 8, marginBottom: 4, zIndex: 60,
         }}>
           {/* Header */}
-          <div style={{ fontSize: 10, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, padding: "0 6px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#D09899", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, padding: "0 6px" }}>
             {fileQuery ? `@${fileQuery}` : "@"} {"\u2014"} {locale === "zh-TW" ? "選擇檔案" : "Select file"}
           </div>
           {/* CWD breadcrumb */}
@@ -525,8 +525,8 @@ export function DesktopInputBar({
             rows={1}
             style={{
               width: "100%", background: "transparent", border: "none", outline: "none",
-              fontSize: 14, color: input ? "transparent" : (activeMode === "interrupt" ? "#ef4444" : activeMode === "task" ? "#3b82f6" : textPrimary),
-              caretColor: activeMode === "interrupt" ? "#ef4444" : activeMode === "task" ? "#3b82f6" : textPrimary,
+              fontSize: 14, color: input ? "transparent" : (activeMode === "interrupt" ? "#FB8184" : activeMode === "task" ? "#37ACC0" : textPrimary),
+              caretColor: activeMode === "interrupt" ? "#FB8184" : activeMode === "task" ? "#37ACC0" : textPrimary,
               fontFamily: "inherit", lineHeight: "28px",
               resize: "none", overflow: "hidden",
             }}
@@ -552,7 +552,7 @@ export function DesktopInputBar({
             border: `1px solid ${taskMode ? (dark ? "rgba(59,130,246,0.4)" : "rgba(59,130,246,0.3)") : border}`,
             cursor: "pointer",
             background: taskMode ? (dark ? "rgba(59,130,246,0.15)" : "rgba(59,130,246,0.08)") : "transparent",
-            color: taskMode ? "#3b82f6" : textMuted,
+            color: taskMode ? "#37ACC0" : textMuted,
             display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
             flexShrink: 0, fontSize: 11, fontWeight: 600, fontFamily: "inherit",
             transition: "all 0.15s",
@@ -575,7 +575,7 @@ export function DesktopInputBar({
             border: `1px solid ${interruptMode ? (dark ? "rgba(239,68,68,0.4)" : "rgba(239,68,68,0.3)") : border}`,
             cursor: "pointer",
             background: interruptMode ? (dark ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)") : "transparent",
-            color: interruptMode ? "#ef4444" : textMuted,
+            color: interruptMode ? "#FB8184" : textMuted,
             display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
             flexShrink: 0, fontSize: 11, fontWeight: 600, fontFamily: "inherit",
             transition: "all 0.15s",
@@ -665,7 +665,7 @@ export function DesktopInputBar({
           style={{
             width: 32, height: 32, borderRadius: 7, border: "none",
             cursor: (hasContent || interruptMode) ? "pointer" : "default",
-            background: interruptMode ? "#ef4444" : taskMode ? "#3b82f6" : (hasContent ? "#37ACC0" : (dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.08)")),
+            background: interruptMode ? "#FB8184" : taskMode ? "#37ACC0" : (hasContent ? "#37ACC0" : (dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.08)")),
             color: (hasContent || interruptMode || taskMode) ? "#ffffff" : textMuted,
             display: "flex", alignItems: "center", justifyContent: "center",
             transition: "background 0.15s",
@@ -685,11 +685,11 @@ export function DesktopInputBar({
 
       {/* Hotkey hints */}
       <div style={{ display: "flex", gap: 14, padding: "5px 4px 0", fontSize: 11, color: textMuted }}>
-        <span style={{ color: "#a78bfa" }}>/skill chain</span>
-        <span style={{ color: "#f59e0b" }}>@file</span>
+        <span style={{ color: "#347792" }}>/skill chain</span>
+        <span style={{ color: "#D09899" }}>@file</span>
         <span style={{ color: "#6ee7b7" }}>{">"}agent</span>
-        <span style={taskMode ? { color: "#3b82f6", fontWeight: 600 } : { color: "#3b82f6" }}>Ctrlx2 {locale === "zh-TW" ? "任務" : "task"}</span>
-        <span style={interruptMode ? { color: "#ef4444", fontWeight: 600 } : { color: "#ef4444" }}>Tabx2 {locale === "zh-TW" ? "中斷" : "interrupt"}</span>
+        <span style={taskMode ? { color: "#37ACC0", fontWeight: 600 } : { color: "#37ACC0" }}>Ctrlx2 {locale === "zh-TW" ? "任務" : "task"}</span>
+        <span style={interruptMode ? { color: "#FB8184", fontWeight: 600 } : { color: "#FB8184" }}>Tabx2 {locale === "zh-TW" ? "中斷" : "interrupt"}</span>
         <span style={{ color: "#37ACC0" }}>Shift+Tab {locale === "zh-TW" ? "切換" : "switch"}</span>
         <span style={{ color: "#37ACC0" }}>Ctrl+N new</span>
         <span>Esc close</span>

@@ -545,7 +545,7 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
             const isActive = settings.sandboxLevel === preset.sandboxLevel
               && settings.requirePlanReview === preset.requirePlanReview
               && settings.requireMergeApproval === preset.requireMergeApproval
-            const colors: Record<string, string> = { autonomous: "#22c55e", supervised: "#37ACC0", guarded: "#ef4444" }
+            const colors: Record<string, string> = { autonomous: "#BDD1C6", supervised: "#37ACC0", guarded: "#FB8184" }
             const labels = locale.startsWith("zh")
               ? { autonomous: "自主", supervised: "監督", guarded: "嚴謹" }
               : { autonomous: "Autonomous", supervised: "Supervised", guarded: "Guarded" }

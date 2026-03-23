@@ -5,8 +5,8 @@ import type { PrdItem, PrdSummary, PrdPriority, Task } from "../../../types"
 const StandardsContent = lazy(() => import("../../StandardsPage").then(m => ({ default: m.StandardsContent })))
 
 const PRIORITY_LABELS: Record<PrdPriority, { label: string; color: string; bg: string }> = {
-  p0: { label: "P0", color: "#ef4444", bg: "rgba(239,68,68,0.12)" },
-  p1: { label: "P1", color: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+  p0: { label: "P0", color: "#FB8184", bg: "rgba(239,68,68,0.12)" },
+  p1: { label: "P1", color: "#D09899", bg: "rgba(245,158,11,0.12)" },
   p2: { label: "P2", color: "#37ACC0", bg: "rgba(55,172,192,0.12)" },
   p3: { label: "P3", color: "#94a3b8", bg: "rgba(148,163,184,0.12)" },
 }
@@ -14,8 +14,8 @@ const PRIORITY_LABELS: Record<PrdPriority, { label: string; color: string; bg: s
 const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   pending: { bg: "rgba(148,163,184,0.1)", text: "#94a3b8", border: "rgba(148,163,184,0.2)" },
   in_progress: { bg: "rgba(96,165,250,0.1)", text: "#60a5fa", border: "rgba(96,165,250,0.2)" },
-  done: { bg: "rgba(34,197,94,0.1)", text: "#22c55e", border: "rgba(34,197,94,0.2)" },
-  completed: { bg: "rgba(34,197,94,0.1)", text: "#22c55e", border: "rgba(34,197,94,0.2)" },
+  done: { bg: "rgba(34,197,94,0.1)", text: "#BDD1C6", border: "rgba(34,197,94,0.2)" },
+  completed: { bg: "rgba(34,197,94,0.1)", text: "#BDD1C6", border: "rgba(34,197,94,0.2)" },
   skipped: { bg: "rgba(148,163,184,0.06)", text: "#64748b", border: "rgba(148,163,184,0.15)" },
 }
 
@@ -296,7 +296,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
                               <span style={{ fontSize: 10, color: textSecondary, opacity: 0.4, fontFamily: "'JetBrains Mono', monospace" }}>{Math.round(progress)}%</span>
                             </div>
                             <div style={{ height: 3, borderRadius: 2, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)" }}>
-                              <div style={{ height: "100%", borderRadius: 2, width: `${progress}%`, background: done ? "#22c55e" : "linear-gradient(90deg, #37ACC0, #347792)", transition: "width 0.3s ease" }} />
+                              <div style={{ height: "100%", borderRadius: 2, width: `${progress}%`, background: done ? "#BDD1C6" : "linear-gradient(90deg, #37ACC0, #347792)", transition: "width 0.3s ease" }} />
                             </div>
                           </div>
                         )}
@@ -442,7 +442,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
             {prd.title}
           </h3>
           {isDone(prd.status) ? (
-            <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 5, background: "rgba(34,197,94,0.12)", color: "#22c55e" }}>DONE</span>
+            <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 5, background: "rgba(34,197,94,0.12)", color: "#BDD1C6" }}>DONE</span>
           ) : (
             <button onClick={() => updatePrdField(prd.id, { status: "done" })}
               style={{ fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 5, background: "transparent", color: textSecondary, border: `1px solid ${border}`, cursor: "pointer", fontFamily: "inherit" }}>
@@ -456,7 +456,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
               <span style={{ fontSize: 11, color: textSecondary }}>{t("prd.progress") || "Progress"}</span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: doneCount === totalCount ? "#22c55e" : "#37ACC0", fontFamily: "'JetBrains Mono', monospace" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: doneCount === totalCount ? "#BDD1C6" : "#37ACC0", fontFamily: "'JetBrains Mono', monospace" }}>
                 {doneCount}/{totalCount}{skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}
               </span>
             </div>
@@ -464,7 +464,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
               <div style={{
                 height: "100%", borderRadius: 3,
                 width: `${totalCount > 0 ? ((doneCount + skippedCount) / totalCount) * 100 : 0}%`,
-                background: (doneCount + skippedCount) === totalCount ? "#22c55e" : "linear-gradient(90deg, #37ACC0, #347792)",
+                background: (doneCount + skippedCount) === totalCount ? "#BDD1C6" : "linear-gradient(90deg, #37ACC0, #347792)",
                 transition: "width 0.3s ease",
               }} />
             </div>
@@ -521,7 +521,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
                     {a.adopted && <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: "rgba(55,172,192,0.15)", color: "#37ACC0", textTransform: "uppercase" }}>Adopted</span>}
                   </div>
                   {(a.pros || []).map((p: string, j: number) => (
-                    <div key={`p${j}`} style={{ fontSize: 12, color: "#22c55e", lineHeight: 1.5, display: "flex", gap: 4 }}>
+                    <div key={`p${j}`} style={{ fontSize: 12, color: "#BDD1C6", lineHeight: 1.5, display: "flex", gap: 4 }}>
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="20 6 9 17 4 12" /></svg>
                       <span>{p}</span>
                     </div>
@@ -544,7 +544,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
           <div style={sectionStyle}>
             <div style={labelStyle}>{t("prd.scope") || "Scope"}</div>
             {(prd.scope.included || []).map((item: string, i: number) => (
-              <div key={`in${i}`} style={{ fontSize: 12, color: "#22c55e", lineHeight: 1.7, display: "flex", gap: 5 }}>
+              <div key={`in${i}`} style={{ fontSize: 12, color: "#BDD1C6", lineHeight: 1.7, display: "flex", gap: 5 }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ flexShrink: 0, marginTop: 4 }}><polyline points="20 6 9 17 4 12" /></svg>
                 <span>{item}</span>
               </div>
@@ -649,7 +649,7 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
                 <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {group.prdTitle}
                 </div>
-                <span style={{ fontSize: 10, fontWeight: 600, color: doneCount === group.tasks.length ? "#22c55e" : textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
+                <span style={{ fontSize: 10, fontWeight: 600, color: doneCount === group.tasks.length ? "#BDD1C6" : textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
                   {doneCount}/{group.tasks.length}
                 </span>
               </div>

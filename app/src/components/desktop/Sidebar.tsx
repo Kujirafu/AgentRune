@@ -48,12 +48,12 @@ interface SidebarProps {
 }
 
 const statusColor: Record<string, string> = {
-  blocked: "#ef4444", working: "#3b82f6", idle: "#94a3b8", done: "#22c55e",
+  blocked: "#FB8184", working: "#37ACC0", idle: "#94a3b8", done: "#BDD1C6",
 }
 
 // Task status → color
 const taskStatusColor: Record<string, string> = {
-  pending: "#f59e0b", in_progress: "#3b82f6", done: "#22c55e", skipped: "#94a3b8",
+  pending: "#D09899", in_progress: "#37ACC0", done: "#BDD1C6", skipped: "#94a3b8",
 }
 
 // Lucide-style task status icons
@@ -220,7 +220,7 @@ export function Sidebar({
         <span style={{ fontSize: 15, fontWeight: 700, color: textPrimary }}>AgentRune</span>
         <span style={{
           width: 7, height: 7, borderRadius: "50%",
-          background: wsConnected ? "#22c55e" : "#ef4444",
+          background: wsConnected ? "#BDD1C6" : "#FB8184",
         }} />
       </div>
 
@@ -431,7 +431,7 @@ export function Sidebar({
             <span style={{
               position: "absolute", top: -2, right: -2,
               width: 14, height: 14, borderRadius: 7,
-              background: "#ef4444", color: "#fff", fontSize: 9, fontWeight: 700,
+              background: "#FB8184", color: "#fff", fontSize: 9, fontWeight: 700,
               display: "flex", alignItems: "center", justifyContent: "center",
             }}>{totalPending}</span>
           )}
@@ -498,12 +498,12 @@ export function Sidebar({
                 {pendingPhaseGate && (
                   <div style={{ padding: "8px 12px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}` }}>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#FB8184" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
                       <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{pendingPhaseGate.automationName} — Phase {pendingPhaseGate.completedPhase}</span>
                     </div>
                     <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                      <button onClick={() => onPhaseGateRespond?.("proceed")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "none", background: "#22c55e", color: "#fff" }}>Proceed</button>
-                      <button onClick={() => onPhaseGateRespond?.("abort")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "1px solid rgba(248,113,113,0.3)", background: "transparent", color: "#ef4444" }}>Abort</button>
+                      <button onClick={() => onPhaseGateRespond?.("proceed")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "none", background: "#BDD1C6", color: "#fff" }}>Proceed</button>
+                      <button onClick={() => onPhaseGateRespond?.("abort")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "1px solid rgba(248,113,113,0.3)", background: "transparent", color: "#FB8184" }}>Abort</button>
                     </div>
                   </div>
                 )}
@@ -511,10 +511,10 @@ export function Sidebar({
                 {pendingReauthQueue.map(req => (
                   <div key={req.automationId} style={{ padding: "8px 12px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}` }}>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#D09899" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
                       <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{req.automationName} — {req.violationType}</span>
                     </div>
-                    <button onClick={() => onReauth?.(req.automationId)} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "none", background: "#f59e0b", color: "#fff" }}>Re-auth</button>
+                    <button onClick={() => onReauth?.(req.automationId)} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "none", background: "#D09899", color: "#fff" }}>Re-auth</button>
                   </div>
                 ))}
                 {/* Agent permission requests */}
@@ -534,7 +534,7 @@ export function Sidebar({
                     }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                         {resolvedFeedback.has(ev.id) ? (
-                          <span style={{ fontSize: 12, fontWeight: 700, color: resolvedFeedback.get(ev.id) === "approved" ? "#22c55e" : "#ef4444" }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: resolvedFeedback.get(ev.id) === "approved" ? "#BDD1C6" : "#FB8184" }}>
                             {resolvedFeedback.get(ev.id) === "approved" ? "Approved" : "Denied"}
                           </span>
                         ) : (
@@ -614,7 +614,7 @@ export function Sidebar({
                       <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
                         <span style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0" }}>#{sessionIdx}</span>
                         <span style={{ fontSize: 12, color: textPrimary }}>{ev.decision?.purpose || ev.title}</span>
-                        <span style={{ fontSize: 10, color: ev.status === "completed" ? "#22c55e" : "#ef4444", fontWeight: 600, marginLeft: "auto" }}>
+                        <span style={{ fontSize: 10, color: ev.status === "completed" ? "#BDD1C6" : "#FB8184", fontWeight: 600, marginLeft: "auto" }}>
                           {ev.status === "completed" ? "Approved" : "Denied"}
                         </span>
                       </div>

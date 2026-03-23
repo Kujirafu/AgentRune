@@ -25,7 +25,7 @@ interface SessionCardProps {
 }
 
 const statusColor: Record<string, string> = {
-  blocked: "#ef4444", working: "#3b82f6", idle: "#94a3b8", done: "#22c55e",
+  blocked: "#FB8184", working: "#37ACC0", idle: "#94a3b8", done: "#BDD1C6",
 }
 
 const statusLabel: Record<string, string> = {
@@ -178,7 +178,7 @@ export function SessionCard({ session, digest, events, index, theme, expanded, o
             style={{
               width: 18, height: 18, borderRadius: 4, flexShrink: 0,
               display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer", color: "#ef4444",
+              cursor: "pointer", color: "#FB8184",
             }}
           >
             {/* Lucide Trash2 */}

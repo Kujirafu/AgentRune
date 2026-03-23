@@ -23,7 +23,7 @@ export interface DesktopTerminalPanelProps {
 }
 
 const statusColor: Record<string, string> = {
-  blocked: "#ef4444", working: "#3b82f6", idle: "#94a3b8", done: "#22c55e",
+  blocked: "#FB8184", working: "#37ACC0", idle: "#94a3b8", done: "#BDD1C6",
 }
 
 export function DesktopTerminalPanel({
@@ -234,7 +234,7 @@ export function DesktopTerminalPanel({
                   background: "transparent", cursor: "pointer", color: textSecondary,
                   display: "flex", alignItems: "center", justifyContent: "center",
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#ef4444" }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#FB8184" }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = textSecondary }}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

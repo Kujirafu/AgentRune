@@ -455,7 +455,7 @@ export function GitTool({ projectId, theme, t: _t }: GitToolProps) {
                 fontFamily: "inherit",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#D09899" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
               </svg>
               Worktrees
@@ -485,9 +485,9 @@ export function GitTool({ projectId, theme, t: _t }: GitToolProps) {
                       display: "flex", alignItems: "center", gap: 10,
                       padding: "10px 14px", background: cardBg,
                       borderTop: i > 0 ? `1px solid ${border}` : "none",
-                      borderLeft: `3px solid ${isMain ? "#37ACC0" : "#f59e0b"}`,
+                      borderLeft: `3px solid ${isMain ? "#37ACC0" : "#D09899"}`,
                     }}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={isMain ? "#37ACC0" : "#f59e0b"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={isMain ? "#37ACC0" : "#D09899"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                       </svg>
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -515,7 +515,7 @@ export function GitTool({ projectId, theme, t: _t }: GitToolProps) {
                             width: 26, height: 26, borderRadius: 6, flexShrink: 0,
                             border: `1px solid ${dark ? "rgba(239,68,68,0.2)" : "rgba(239,68,68,0.15)"}`,
                             background: dark ? "rgba(239,68,68,0.06)" : "rgba(239,68,68,0.04)",
-                            color: "#ef4444", cursor: "pointer",
+                            color: "#FB8184", cursor: "pointer",
                             display: "flex", alignItems: "center", justifyContent: "center",
                             opacity: worktreeAction === wt.path ? 0.4 : 1,
                           }}

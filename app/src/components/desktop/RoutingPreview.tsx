@@ -74,7 +74,7 @@ export function RoutingPreview({
             </span>
             {/* New session badge */}
             {!route.sessionId && (
-              <span style={{ fontSize: 8, color: "#f59e0b", fontWeight: 600, padding: "1px 4px", borderRadius: 3, background: "rgba(245,158,11,0.1)" }}>
+              <span style={{ fontSize: 8, color: "#D09899", fontWeight: 600, padding: "1px 4px", borderRadius: 3, background: "rgba(245,158,11,0.1)" }}>
                 NEW
               </span>
             )}

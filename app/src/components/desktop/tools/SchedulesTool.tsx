@@ -132,7 +132,7 @@ export function SchedulesTool({
                         }}
                         style={{
                           width: 7, height: 7, borderRadius: "50%",
-                          background: r.status === "success" ? "#22c55e" : r.status === "failed" ? "#ef4444" : "#94a3b8",
+                          background: r.status === "success" ? "#BDD1C6" : r.status === "failed" ? "#FB8184" : "#94a3b8",
                           cursor: "pointer",
                         }}
                       />
@@ -191,7 +191,7 @@ export function SchedulesTool({
                   }}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    onMouseEnter={(e) => { (e.currentTarget.parentElement as HTMLElement).style.color = "#ef4444" }}
+                    onMouseEnter={(e) => { (e.currentTarget.parentElement as HTMLElement).style.color = "#FB8184" }}
                     onMouseLeave={(e) => { (e.currentTarget.parentElement as HTMLElement).style.color = textSecondary }}
                   >
                     <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
