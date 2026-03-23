@@ -133,10 +133,20 @@ export function CommandCenter(props: CommandCenterProps) {
         s.status !== "recoverable" && digests.has(s.id)
       )
       if (confirmed.length === 0) return null
-      // Prefer idle session — agent is free to take new work
-      const idleSession = confirmed.find(s => digests.get(s.id)?.status === "idle")
-      if (idleSession) return idleSession.id
-      // All sessions busy → create new session (multi-session dispatch)
+      // Smart dispatch: if an idle session's taskTitle is related to new text, prefer it
+      const keywords = text.toLowerCase().split(/\s+/).filter(w => w.length > 2).slice(0, 5)
+      const idleSessions = confirmed.filter(s => digests.get(s.id)?.status === "idle")
+      if (idleSessions.length > 0 && keywords.length > 0) {
+        const scored = idleSessions.map(s => {
+          const title = (s.taskTitle || "").toLowerCase()
+          const matches = keywords.filter(k => title.includes(k)).length
+          return { session: s, score: matches }
+        }).sort((a, b) => b.score - a.score)
+        if (scored[0].score > 0) return scored[0].session.id
+      }
+      // Any idle session
+      if (idleSessions.length > 0) return idleSessions[0].id
+      // All sessions busy → create new session
       return null
     }
     const sid = resolveTarget()
@@ -346,7 +356,7 @@ export function CommandCenter(props: CommandCenterProps) {
             digests={digests}
             automations={automations}
             activeView={activeView}
-            onChangeView={setActiveView}
+            onChangeView={(v) => { setActiveView(v); props.onCloseInlinePanel?.() }}
             onExpandSession={handleExpandSession}
             theme={theme}
             wsConnected={wsConnected}

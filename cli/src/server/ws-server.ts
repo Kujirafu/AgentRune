@@ -781,6 +781,7 @@ export function createServer(portOverride?: number) {
   const eventStore = new EventStore()
   const progressInterceptor = new ProgressInterceptor()
   const sessionLastTitle = new Map<string, string>()  // Track last meaningful event title per session
+  const sessionTaskTitle = new Map<string, string>()  // User-assigned task title (from initialCommand or first message)
 
   // --- Recoverable sessions: scan persisted events on startup ---
   interface RecoverableSession {
@@ -1322,6 +1323,7 @@ export function createServer(portOverride?: number) {
         ...s,
         status: "active" as const,
         worktreeBranch: wt?.branch || null,
+        taskTitle: sessionTaskTitle.get(s.id) || undefined,
         lastEventTitle,
         summaryText: digest.summary || lastEventTitle,
         nextAction: digest.nextAction,
@@ -4281,6 +4283,20 @@ export function createServer(portOverride?: number) {
 
                   // Forward initial command if one was queued (from desktop "no session" flow)
                   if (initialCommand) {
+                    // Extract short task title from command for session card display
+                    const chainMatch = initialCommand.match(/\[AgentLore Skill Chain:\s*(\S+)/i)
+                    const taskTitle = chainMatch
+                      ? `/${chainMatch[1]}`
+                      : initialCommand.replace(/\n.*/s, "").slice(0, 40).trim()
+                    if (taskTitle) {
+                      sessionTaskTitle.set(session.id, taskTitle)
+                      // Broadcast to clients so SessionCard updates
+                      for (const [client, csid] of clientSessions) {
+                        if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                          client.send(JSON.stringify({ type: "session_task_title", sessionId: session.id, taskTitle }))
+                        }
+                      }
+                    }
                     setTimeout(() => {
                       // Use bracket paste mode so Claude Code treats multi-line text as a single paste
                       sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
@@ -4496,6 +4512,18 @@ export function createServer(portOverride?: number) {
                   sessions.write(targetId, `${commandPrompt}\n`)
                   log.info(`Batch: injected /${cmdMatch[1]} for session ${targetId}`)
                   break
+                }
+              }
+              // Extract task title from first real user message (skip control chars)
+              if (!sessionTaskTitle.has(targetId) && inputStr.length > 3 && !/^[\x03\x1b\r\n]/.test(inputStr)) {
+                const title = inputStr.replace(/\r?\n.*/s, "").trim().slice(0, 40)
+                if (title.length > 2) {
+                  sessionTaskTitle.set(targetId, title)
+                  for (const [c, sid] of clientSessions) {
+                    if (sid === targetId && c.readyState === WebSocket.OPEN) {
+                      c.send(JSON.stringify({ type: "session_task_title", sessionId: targetId, taskTitle: title }))
+                    }
+                  }
                 }
               }
               sessions.write(targetId, inputStr)

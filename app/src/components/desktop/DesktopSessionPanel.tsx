@@ -181,7 +181,8 @@ export function DesktopSessionPanel({
 
   const status = digest?.status || "idle"
   const sessionNumber = index != null ? `#${index + 1}` : ""
-  const label = sessionNumber ? `${sessionNumber} ${digest?.displayLabel || session.agentId}` : (digest?.displayLabel || session.agentId)
+  const taskName = session.taskTitle || digest?.displayLabel || session.agentId
+  const label = sessionNumber ? `${sessionNumber} ${taskName}` : taskName
   const color = statusColor[status] || "#94a3b8"
   const summary = digest?.summary || ""
   const nextAction = digest?.nextAction || ""

@@ -43,7 +43,7 @@ export function SessionCard({ session, digest, events, index, theme, expanded, o
   const status = digest?.status || "idle"
   const color = statusColor[status] || "#94a3b8"
   const agentDef = AGENTS.find(a => a.id === session.agentId)
-  const label = digest?.displayLabel || agentDef?.name || session.agentId
+  const label = session.taskTitle || digest?.displayLabel || agentDef?.name || session.agentId
   const summary = digest?.summary || ""
   const isDone = status === "done"
   const isBlocked = status === "blocked"

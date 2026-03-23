@@ -83,6 +83,7 @@ export interface AppSession {
   worktreeBranch?: string | null
   status?: "active" | "recoverable"
   claudeSessionId?: string
+  taskTitle?: string
 }
 
 export interface SmartAction {

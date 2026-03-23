@@ -1613,6 +1613,13 @@ export function App() {
         return [...prev, { id: sid, projectId: pid, agentId: aid, worktreeBranch: (msg.worktreeBranch as string) || undefined }]
       })
     }))
+    // Task title updates from server
+    unsubs.push(on("session_task_title", (msg) => {
+      const sid = msg.sessionId as string
+      const title = msg.taskTitle as string
+      if (!sid || !title) return
+      setActiveSessions(prev => prev.map(s => s.id === sid ? { ...s, taskTitle: title } : s))
+    }))
     // Session ended (killed/exited by any client)
     unsubs.push(on("session_ended", (msg) => {
       const sid = msg.sessionId as string
