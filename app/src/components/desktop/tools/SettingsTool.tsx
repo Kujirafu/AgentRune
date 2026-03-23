@@ -551,7 +551,7 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
               : { autonomous: "Autonomous", supervised: "Supervised", guarded: "Guarded" }
             const descs = locale.startsWith("zh")
               ? { autonomous: "全權自主，不問你", supervised: "有沙盒，有限制", guarded: "嚴格沙盒 + 計畫審查" }
-              : { autonomous: "Full autonomy, no restrictions", supervised: "Sandboxed with limits", guarded: "Strict sandbox + plan review" }
+              : { autonomous: "Full autonomy", supervised: "Sandboxed", guarded: "Strict + review" }
             return (
               <button key={profile} onClick={() => {
                 update("sandboxLevel", preset.sandboxLevel)
@@ -574,13 +574,29 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
             )
           })}
         </div>
-        {/* Show current detailed settings below cards */}
-        <div style={{ fontSize: 11, color: textMuted, marginTop: 10, padding: "6px 0", borderTop: `1px solid ${sectionBorder}` }}>
-          {locale.startsWith("zh") ? "沙盒" : "Sandbox"}: <strong>{settings.sandboxLevel}</strong>
-          {" / "}
-          {locale.startsWith("zh") ? "計畫審查" : "Plan review"}: <strong>{settings.requirePlanReview ? "ON" : "OFF"}</strong>
-          {" / "}
-          {locale.startsWith("zh") ? "合併審核" : "Merge approval"}: <strong>{settings.requireMergeApproval ? "ON" : "OFF"}</strong>
+        {/* Detailed settings — always visible, change any = auto custom */}
+        <div style={{ marginTop: 10, padding: "8px 0", borderTop: `1px solid ${sectionBorder}` }}>
+          <Row label={locale.startsWith("zh") ? "沙盒等級" : "Sandbox Level"}
+               description={locale.startsWith("zh") ? "限制 agent 的檔案、網路、shell 存取" : "Restrict file, network, shell access"}>
+            <SelectField
+              value={settings.sandboxLevel}
+              options={[
+                { value: "none" as const, label: locale.startsWith("zh") ? "無限制" : "None" },
+                { value: "permissive" as const, label: locale.startsWith("zh") ? "寬鬆" : "Permissive" },
+                { value: "moderate" as const, label: locale.startsWith("zh") ? "中等" : "Moderate" },
+                { value: "strict" as const, label: locale.startsWith("zh") ? "嚴格" : "Strict" },
+              ]}
+              onChange={(v) => update("sandboxLevel", v)}
+            />
+          </Row>
+          <Row label={locale.startsWith("zh") ? "計畫審查" : "Plan Review"}
+               description={locale.startsWith("zh") ? "執行前需要你確認計畫" : "Must approve plan before execution"}>
+            <Toggle checked={settings.requirePlanReview} onChange={(v) => update("requirePlanReview", v)} />
+          </Row>
+          <Row label={locale.startsWith("zh") ? "合併審核" : "Merge Approval"}
+               description={locale.startsWith("zh") ? "合併回主分支前需要你批准" : "Must approve before merging to main"}>
+            <Toggle checked={settings.requireMergeApproval} onChange={(v) => update("requireMergeApproval", v)} />
+          </Row>
         </div>
       </div>
     </div>
