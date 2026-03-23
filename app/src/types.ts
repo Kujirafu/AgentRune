@@ -68,6 +68,10 @@ export interface ProjectSettings {
   cursorSandbox: CursorSandbox
   // Routing
   routingRules?: RoutingRule[]
+  // Global sandbox (overridden by feature-specific: automation trustProfile, skill chain config)
+  sandboxLevel: "strict" | "moderate" | "permissive" | "none"
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
   // Injected at launch time (not persisted)
   locale?: string
 }
@@ -271,6 +275,9 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   cursorMode: "default",
   cursorModel: "",
   cursorSandbox: "default",
+  sandboxLevel: "moderate",
+  requirePlanReview: false,
+  requireMergeApproval: false,
 }
 
 // AgentRune Protocol — injected into every agent's system/initial prompt.

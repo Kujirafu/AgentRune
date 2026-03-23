@@ -127,24 +127,27 @@ export function CommandCenter(props: CommandCenterProps) {
   // Handle send from input bar (with optional images)
   const handleSend = useCallback((text: string, images?: string[]) => {
     const resolveTarget = () => {
+      // Explicit target always wins
       if (targetSessionId) return targetSessionId
       const confirmed = activeSessions.filter(s =>
         s.status !== "recoverable" && digests.has(s.id)
       )
-      const workingSession = confirmed.find(s => {
-        const d = digests.get(s.id)
-        return d?.status === "working" || d?.status === "idle"
-      })
-      return workingSession?.id || confirmed[0]?.id || null
+      if (confirmed.length === 0) return null
+      // Prefer idle session — agent is free to take new work
+      const idleSession = confirmed.find(s => digests.get(s.id)?.status === "idle")
+      if (idleSession) return idleSession.id
+      // All sessions busy → create new session (multi-session dispatch)
+      return null
     }
     const sid = resolveTarget()
+    console.log("[CMD] handleSend:", { sid, targetSessionId, activeCount: activeSessions.length, selectedProjectId, textLen: text.length })
     if (!sid) {
-      // No session — create one with initialCommand; server forwards it after init
       const pid = selectedProjectId || projects[0]?.id
+      console.log("[CMD] No session, creating new. pid:", pid)
       if (pid) {
         const newId = `${pid}_${Date.now()}`
         const userSettings = getSettings(pid)
-        send({
+        const ok = send({
           type: "attach",
           projectId: pid,
           agentId: "claude",
@@ -154,6 +157,7 @@ export function CommandCenter(props: CommandCenterProps) {
           autoSaveKeysPath: getAutoSaveKeysPath(),
           initialCommand: text,
         })
+        console.log("[CMD] attach sent:", ok, "newId:", newId)
       }
       return
     }
@@ -163,6 +167,16 @@ export function CommandCenter(props: CommandCenterProps) {
     if (images && images.length > 0) msg.images = images
     send(msg)
     setTimeout(() => send({ type: "session_input", sessionId: sid, data: "\r" }), isSlash ? 300 : 500)
+    // Store user message event (like MissionControl does)
+    const userEvent = {
+      id: `usr_${Date.now()}`,
+      timestamp: Date.now(),
+      type: "user_message" as const,
+      status: "completed" as const,
+      title: text.length > 60 ? text.slice(0, 60) + "..." : text,
+      detail: text.length > 60 ? text : undefined,
+    }
+    send({ type: "store_event", sessionId: sid, event: userEvent })
   }, [targetSessionId, send, activeSessions, digests, selectedProjectId, projects, props.onLaunch])
 
   // Handle raw send (e.g. interrupt \x03) to specific session
@@ -192,6 +206,18 @@ export function CommandCenter(props: CommandCenterProps) {
         // Disable bypass → immediate restart
         onKillSession(targetSid).then(() => {
           setTimeout(() => props.onLaunch(session.projectId, session.agentId), 500)
+        })
+      }
+      return
+    }
+
+    // Sandbox level change → restart all sessions with new settings
+    if (next.sandboxLevel !== prev.sandboxLevel || next.requirePlanReview !== prev.requirePlanReview || next.requireMergeApproval !== prev.requireMergeApproval) {
+      // Restart all non-recoverable sessions with new sandbox
+      const toRestart = activeSessions.filter(s => s.status !== "recoverable")
+      for (const s of toRestart) {
+        onKillSession(s.id).then(() => {
+          setTimeout(() => props.onLaunch(s.projectId, s.agentId), 500)
         })
       }
       return

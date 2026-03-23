@@ -507,13 +507,63 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
           />
         </Row>
         <Row label={t("settings.bypass")} description={t("settings.bypassDesc")}>
-          <Toggle checked={settings.bypass} onChange={(v) => update("bypass", v)} />
+          <Toggle checked={settings.bypass} onChange={(v) => {
+            update("bypass", v)
+            if (v) update("sandboxLevel", "none")
+            else if (settings.sandboxLevel === "none") update("sandboxLevel", "moderate")
+          }} />
         </Row>
         <Row label={t("settings.planMode")} description={t("settings.planModeDesc")}>
           <Toggle checked={settings.planMode} onChange={(v) => update("planMode", v)} />
         </Row>
         <Row label={t("settings.autoEdit")} description={t("settings.autoEditDesc")}>
           <Toggle checked={settings.autoEdit} onChange={(v) => update("autoEdit", v)} />
+        </Row>
+      </div>
+
+      {/* Sandbox section */}
+      <div style={{
+        fontSize: 11, fontWeight: 700, color: textMuted,
+        textTransform: "uppercase", letterSpacing: 1,
+        marginBottom: 8, marginTop: 24, paddingLeft: 2,
+      }}>
+        {locale.startsWith("zh") ? "沙盒（全域預設）" : "Sandbox (Global Default)"}
+      </div>
+      <div style={{
+        padding: "4px 16px", borderRadius: 10,
+        background: sectionBg,
+        border: `1px solid ${sectionBorder}`,
+        backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+      }}>
+        <div style={{ padding: "8px 0", fontSize: 11, color: textMuted, lineHeight: 1.5 }}>
+          {locale.startsWith("zh")
+            ? "全域沙盒是預設值。排程、Skill Chain 等功能可以各自覆蓋這個設定。"
+            : "Global sandbox is the default. Automations, Skill Chains, etc. can override per-feature."}
+        </div>
+        <Row label={locale.startsWith("zh") ? "沙盒等級" : "Sandbox Level"}
+             description={locale.startsWith("zh") ? "限制 agent 的檔案、網路、shell 存取權限" : "Restrict agent file, network, shell access"}>
+          <SelectField
+            value={settings.sandboxLevel}
+            options={[
+              { value: "strict" as const, label: locale.startsWith("zh") ? "嚴格" : "Strict" },
+              { value: "moderate" as const, label: locale.startsWith("zh") ? "中等" : "Moderate" },
+              { value: "permissive" as const, label: locale.startsWith("zh") ? "寬鬆" : "Permissive" },
+              { value: "none" as const, label: locale.startsWith("zh") ? "無限制" : "None" },
+            ]}
+            onChange={(v) => {
+              update("sandboxLevel", v)
+              if (v === "none" && !settings.bypass) update("bypass", true)
+              if (v !== "none" && settings.bypass) update("bypass", false)
+            }}
+          />
+        </Row>
+        <Row label={locale.startsWith("zh") ? "要求計畫審查" : "Require Plan Review"}
+             description={locale.startsWith("zh") ? "agent 必須先提出計畫，你確認後才能執行" : "Agent must present a plan and wait for your approval before executing"}>
+          <Toggle checked={settings.requirePlanReview} onChange={(v) => update("requirePlanReview", v)} />
+        </Row>
+        <Row label={locale.startsWith("zh") ? "要求合併審核" : "Require Merge Approval"}
+             description={locale.startsWith("zh") ? "agent 完成工作後，需要你批准才能合併回主分支" : "Agent must get your approval before merging work back to main branch"}>
+          <Toggle checked={settings.requireMergeApproval} onChange={(v) => update("requireMergeApproval", v)} />
         </Row>
       </div>
     </div>
