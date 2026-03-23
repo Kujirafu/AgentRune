@@ -2,6 +2,8 @@ import { useState, useEffect } from "react"
 import { SpringOverlay } from "./SpringOverlay"
 import type { ProjectSettings, CodexMode, CodexModel, CodexReasoningEffort, ClaudeEffort, AiderModel, OpenClawProvider, CursorMode, CursorSandbox } from "../types"
 import { useLocale, SUPPORTED_LOCALES } from "../lib/i18n/index.js"
+import { TRUST_PROFILE_PRESETS } from "../data/automation-types"
+const TRUST_PRESETS = TRUST_PROFILE_PRESETS
 import { getVolumeKeysEnabled, setVolumeKeysEnabled, getKeepAwakeEnabled, setKeepAwakeEnabled, getWorktreeEnabled, setWorktreeEnabled, getAutoSaveKeysEnabled, setAutoSaveKeysEnabled, getAutoSaveKeysPath, setAutoSaveKeysPath, getNotificationsEnabled, setNotificationsEnabled, getAutoUpdateEnabled, setAutoUpdateEnabled, getLastUpdateCheck, setLastUpdateCheck, getSkippedVersion, setSkippedVersion } from "../lib/storage"
 import { App } from "@capacitor/app"
 import { Browser } from "@capacitor/browser"
@@ -958,7 +960,7 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                   active={settings.bypass}
                   onChange={(v) => onChange({ ...settings, bypass: v })}
                 />
-                {/* Sandbox Level */}
+                {/* Trust Profile */}
                 <div style={{
                   display: "flex", flexDirection: "column", gap: 8,
                   padding: "16px 20px", borderRadius: 20,
@@ -967,31 +969,51 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                   backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
                   boxShadow: "var(--glass-shadow)",
                 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                     </svg>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{t("perm.title") || "Sandbox"}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+                        {locale.startsWith("zh") ? "信任等級" : "Trust Level"}
+                      </div>
                       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
                         {locale.startsWith("zh") ? "搭配 Bypass 使用可限制自主範圍" : "Limits what bypass mode can do"}
                       </div>
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                    {(["none", "permissive", "moderate", "strict"] as const).map(level => {
-                      const active = (settings.sandboxLevel || "none") === level
-                      const labels: Record<string, string> = locale.startsWith("zh")
-                        ? { none: "自主", permissive: "寬鬆", moderate: "中等", strict: "嚴格" }
-                        : { none: "None", permissive: "Permissive", moderate: "Moderate", strict: "Strict" }
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {(["autonomous", "supervised", "guarded"] as const).map(profile => {
+                      const preset = TRUST_PRESETS[profile]
+                      const isActive = (settings.sandboxLevel || "none") === preset.sandboxLevel
+                        && (settings.requirePlanReview || false) === preset.requirePlanReview
+                        && (settings.requireMergeApproval || false) === preset.requireMergeApproval
+                      const colors: Record<string, string> = { autonomous: "#22c55e", supervised: "#37ACC0", guarded: "#ef4444" }
+                      const labels = locale.startsWith("zh")
+                        ? { autonomous: "自主", supervised: "監督", guarded: "嚴謹" }
+                        : { autonomous: "Auto", supervised: "Supervised", guarded: "Guarded" }
+                      const descs = locale.startsWith("zh")
+                        ? { autonomous: "全權自主", supervised: "有沙盒限制", guarded: "嚴格 + 審查" }
+                        : { autonomous: "Full autonomy", supervised: "Sandboxed", guarded: "Strict + review" }
                       return (
-                        <button key={level} onClick={() => onChange({ ...settings, sandboxLevel: level })} style={{
-                          flex: 1, padding: "8px 0", borderRadius: 12, fontSize: 12, fontWeight: active ? 700 : 500,
-                          border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
-                          background: active ? "rgba(55,172,192,0.1)" : "transparent",
-                          color: active ? "#37ACC0" : "var(--text-secondary)",
-                          cursor: "pointer",
-                        }}>{labels[level]}</button>
+                        <button key={profile} onClick={() => onChange({
+                          ...settings,
+                          sandboxLevel: preset.sandboxLevel,
+                          requirePlanReview: preset.requirePlanReview,
+                          requireMergeApproval: preset.requireMergeApproval,
+                        })} style={{
+                          flex: 1, padding: "10px 4px", borderRadius: 14, cursor: "pointer",
+                          border: isActive ? `2px solid ${colors[profile]}` : "1px solid var(--glass-border)",
+                          background: isActive ? `${colors[profile]}15` : "transparent",
+                          textAlign: "center",
+                        }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: isActive ? colors[profile] : "var(--text-primary)", marginBottom: 2 }}>
+                            {labels[profile]}
+                          </div>
+                          <div style={{ fontSize: 10, color: "var(--text-secondary)", lineHeight: 1.2 }}>
+                            {descs[profile]}
+                          </div>
+                        </button>
                       )
                     })}
                   </div>

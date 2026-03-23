@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react"
 import type { ProjectSettings, ClaudeEffort, CodexModel, CodexMode, CodexReasoningEffort, CursorMode, CursorSandbox, GeminiApprovalMode, AiderModel, OpenClawProvider, RoutingRule } from "../../../types"
 import { DEFAULT_SETTINGS, AGENTS } from "../../../types"
+import { TRUST_PROFILE_PRESETS, type TrustProfile } from "../../../data/automation-types"
 import { getSettings, saveSettings, getWorktreeEnabled, setWorktreeEnabled } from "../../../lib/storage"
 import { useLocale, SUPPORTED_LOCALES } from "../../../lib/i18n/index.js"
 import { RoutingRulesEditor } from "../RoutingRulesEditor"
@@ -519,46 +520,68 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
         </Row>
       </div>
 
-      {/* Sandbox section */}
+      {/* Trust Profile section (same UI as AutomationSheet) */}
       <div style={{
         fontSize: 11, fontWeight: 700, color: textMuted,
         textTransform: "uppercase", letterSpacing: 1,
         marginBottom: 8, marginTop: 24, paddingLeft: 2,
       }}>
-        {locale.startsWith("zh") ? "沙盒（全域預設）" : "Sandbox (Global Default)"}
+        {locale.startsWith("zh") ? "信任等級（全域預設）" : "Trust Level (Global Default)"}
       </div>
       <div style={{
-        padding: "4px 16px", borderRadius: 10,
+        padding: "12px 16px", borderRadius: 10,
         background: sectionBg,
         border: `1px solid ${sectionBorder}`,
         backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
       }}>
-        <div style={{ padding: "8px 0", fontSize: 11, color: textMuted, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.5, marginBottom: 10 }}>
           {locale.startsWith("zh")
-            ? "全域沙盒是預設值。排程、Skill Chain 等功能可以各自覆蓋這個設定。"
-            : "Global sandbox is the default. Automations, Skill Chains, etc. can override per-feature."}
+            ? "全域預設值。排程、Skill Chain 等功能可以各自覆蓋。"
+            : "Global default. Automations, Skill Chains can override per-feature."}
         </div>
-        <Row label={locale.startsWith("zh") ? "沙盒等級" : "Sandbox Level"}
-             description={locale.startsWith("zh") ? "限制 agent 的檔案、網路、shell 存取權限" : "Restrict agent file, network, shell access"}>
-          <SelectField
-            value={settings.sandboxLevel}
-            options={[
-              { value: "strict" as const, label: locale.startsWith("zh") ? "嚴格" : "Strict" },
-              { value: "moderate" as const, label: locale.startsWith("zh") ? "中等" : "Moderate" },
-              { value: "permissive" as const, label: locale.startsWith("zh") ? "寬鬆" : "Permissive" },
-              { value: "none" as const, label: locale.startsWith("zh") ? "無限制" : "None" },
-            ]}
-            onChange={(v) => update("sandboxLevel", v)}
-          />
-        </Row>
-        <Row label={locale.startsWith("zh") ? "要求計畫審查" : "Require Plan Review"}
-             description={locale.startsWith("zh") ? "agent 必須先提出計畫，你確認後才能執行" : "Agent must present a plan and wait for your approval before executing"}>
-          <Toggle checked={settings.requirePlanReview} onChange={(v) => update("requirePlanReview", v)} />
-        </Row>
-        <Row label={locale.startsWith("zh") ? "要求合併審核" : "Require Merge Approval"}
-             description={locale.startsWith("zh") ? "agent 完成工作後，需要你批准才能合併回主分支" : "Agent must get your approval before merging work back to main branch"}>
-          <Toggle checked={settings.requireMergeApproval} onChange={(v) => update("requireMergeApproval", v)} />
-        </Row>
+        <div style={{ display: "flex", gap: 8 }}>
+          {(["autonomous", "supervised", "guarded"] as const).map((profile) => {
+            const preset = TRUST_PROFILE_PRESETS[profile]
+            const isActive = settings.sandboxLevel === preset.sandboxLevel
+              && settings.requirePlanReview === preset.requirePlanReview
+              && settings.requireMergeApproval === preset.requireMergeApproval
+            const colors: Record<string, string> = { autonomous: "#22c55e", supervised: "#37ACC0", guarded: "#ef4444" }
+            const labels = locale.startsWith("zh")
+              ? { autonomous: "自主", supervised: "監督", guarded: "嚴謹" }
+              : { autonomous: "Autonomous", supervised: "Supervised", guarded: "Guarded" }
+            const descs = locale.startsWith("zh")
+              ? { autonomous: "全權自主，不問你", supervised: "有沙盒，有限制", guarded: "嚴格沙盒 + 計畫審查" }
+              : { autonomous: "Full autonomy, no restrictions", supervised: "Sandboxed with limits", guarded: "Strict sandbox + plan review" }
+            return (
+              <button key={profile} onClick={() => {
+                update("sandboxLevel", preset.sandboxLevel)
+                update("requirePlanReview", preset.requirePlanReview)
+                update("requireMergeApproval", preset.requireMergeApproval)
+              }} style={{
+                flex: 1, padding: "10px 8px", borderRadius: 10, cursor: "pointer",
+                border: isActive ? `2px solid ${colors[profile]}` : `1px solid ${inputBorder}`,
+                background: isActive ? `${colors[profile]}10` : inputBg,
+                textAlign: "center", fontFamily: "inherit",
+                transition: "all 0.15s",
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: isActive ? colors[profile] : textPrimary, marginBottom: 4 }}>
+                  {labels[profile]}
+                </div>
+                <div style={{ fontSize: 10, color: textSecondary, lineHeight: 1.3 }}>
+                  {descs[profile]}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+        {/* Show current detailed settings below cards */}
+        <div style={{ fontSize: 11, color: textMuted, marginTop: 10, padding: "6px 0", borderTop: `1px solid ${sectionBorder}` }}>
+          {locale.startsWith("zh") ? "沙盒" : "Sandbox"}: <strong>{settings.sandboxLevel}</strong>
+          {" / "}
+          {locale.startsWith("zh") ? "計畫審查" : "Plan review"}: <strong>{settings.requirePlanReview ? "ON" : "OFF"}</strong>
+          {" / "}
+          {locale.startsWith("zh") ? "合併審核" : "Merge approval"}: <strong>{settings.requireMergeApproval ? "ON" : "OFF"}</strong>
+        </div>
       </div>
     </div>
   )
