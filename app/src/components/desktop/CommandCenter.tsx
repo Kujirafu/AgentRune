@@ -238,13 +238,16 @@ export function CommandCenter(props: CommandCenterProps) {
     }
   }, [targetSessionId, activeSessions, send, onKillSession, props.onLaunch])
 
-  // Kill + resume helper: restart session with same Claude conversation
+  // Restart session with resume — uses server-side restart_session which preserves Claude conversation
   const restartWithResume = useCallback((sessionToRestart: AppSession) => {
-    const claudeId = sessionToRestart.claudeSessionId
-    onKillSession(sessionToRestart.id).then(() => {
-      setTimeout(() => props.onLaunch(sessionToRestart.projectId, sessionToRestart.agentId, claudeId), 500)
+    const pid = sessionToRestart.projectId
+    const userSettings = pid ? getSettings(pid) : undefined
+    send({
+      type: "restart_session",
+      settings: userSettings,
+      autoSaveKeysPath: getAutoSaveKeysPath(),
     })
-  }, [onKillSession, props.onLaunch])
+  }, [send])
 
   const confirmBypass = useCallback(() => {
     setBypassConfirmPending(false)

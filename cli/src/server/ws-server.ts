@@ -4980,12 +4980,32 @@ export function createServer(portOverride?: number) {
           sessionEngines.set(newSession.id, newEngine)
           sessionRecentEvents.set(newSession.id, [])
           clientEngines.set(ws, newEngine)
+
+          // Resume Claude Code conversation if possible
+          const claudeId = sessionClaudeMap.get(currentSid)?.claudeSessionId
+          const settings = msg.settings ? normalizeAgentSettings(msg.settings as Record<string, unknown>) : sessionLaunchSettings.get(currentSid)?.settings
+          if (settings) {
+            sessionLaunchSettings.set(newSession.id, { agentId: restartAgentId, settings, projectId: restartProject.id })
+            const launch = buildAgentLaunch(restartAgentId, settings, {
+              projectId: restartProject.id,
+              port: PORT,
+              continueSession: restartAgentId === "claude",
+              resumeSessionId: restartAgentId === "claude" ? claudeId : undefined,
+            })
+            if (launch.command) {
+              setTimeout(() => {
+                sessions.write(newSession.id, `${launch.command}\r`)
+                log.info(`[restart] Agent resumed: ${launch.command}`)
+              }, 1500)
+            }
+          }
+
           ws.send(JSON.stringify({
             type: "session_restarted",
             sessionId: newSession.id,
             agentId: restartAgentId,
           }))
-          log.info(`Session restarted: ${currentSid} → ${newSession.id} (${restartAgentId})`)
+          log.info(`Session restarted: ${currentSid} → ${newSession.id} (${restartAgentId})${claudeId ? ` (resuming Claude ${claudeId.slice(0,8)})` : ""}`)
           break
         }
         case "detach": {
