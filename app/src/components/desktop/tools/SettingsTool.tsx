@@ -104,21 +104,43 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
   function SelectField<T extends string>({ value, options, onChange }: {
     value: T; options: { value: T; label: string }[]; onChange: (v: T) => void
   }) {
+    const [open, setOpen] = React.useState(false)
+    const selected = options.find(o => o.value === value)
     return (
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as T)}
-        style={{
+      <div style={{ position: "relative", minWidth: 120 }}>
+        <button onClick={() => setOpen(!open)} style={{
           padding: "5px 10px", borderRadius: 6,
           border: `1px solid ${inputBorder}`,
           background: inputBg, color: textPrimary,
           fontSize: 12, fontFamily: "inherit",
-          outline: "none", cursor: "pointer",
-          minWidth: 120,
-        }}
-      >
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
+          cursor: "pointer", width: "100%",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <span>{selected?.label || value}</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 6, opacity: 0.5 }}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        {open && (
+          <div style={{
+            position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, marginTop: 2,
+            borderRadius: 8, border: `1px solid ${inputBorder}`,
+            background: dark ? "rgba(15,23,42,0.98)" : "rgba(255,255,255,0.98)",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+            overflow: "hidden",
+          }}>
+            {options.map(o => (
+              <button key={o.value} onClick={() => { onChange(o.value); setOpen(false) }} style={{
+                display: "block", width: "100%", padding: "6px 10px", border: "none",
+                background: o.value === value ? "rgba(55,172,192,0.1)" : "transparent",
+                color: o.value === value ? "#37ACC0" : textPrimary,
+                fontSize: 12, fontWeight: o.value === value ? 600 : 400,
+                fontFamily: "inherit", cursor: "pointer", textAlign: "left",
+              }}>{o.label}</button>
+            ))}
+          </div>
+        )}
+      </div>
     )
   }
 
@@ -577,19 +599,42 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
         </div>
         {/* Detailed settings — always visible, change any = auto custom */}
         <div style={{ marginTop: 10, padding: "8px 0", borderTop: `1px solid ${sectionBorder}` }}>
-          <Row label={locale.startsWith("zh") ? "沙盒等級" : "Sandbox Level"}
-               description={locale.startsWith("zh") ? "限制 agent 的檔案、網路、shell 存取" : "Restrict file, network, shell access"}>
-            <SelectField
-              value={settings.sandboxLevel}
-              options={[
-                { value: "none" as const, label: locale.startsWith("zh") ? "無限制" : "None" },
-                { value: "permissive" as const, label: locale.startsWith("zh") ? "寬鬆" : "Permissive" },
-                { value: "moderate" as const, label: locale.startsWith("zh") ? "中等" : "Moderate" },
-                { value: "strict" as const, label: locale.startsWith("zh") ? "嚴格" : "Strict" },
-              ]}
-              onChange={(v) => update("sandboxLevel", v)}
-            />
-          </Row>
+          <div style={{ fontSize: 12, fontWeight: 600, color: textPrimary, marginBottom: 8 }}>
+            {locale.startsWith("zh") ? "沙盒等級" : "Sandbox Level"}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+            {([
+              { value: "none", label: locale.startsWith("zh") ? "無限制" : "None",
+                desc: locale.startsWith("zh") ? "讀寫任何檔案 / 執行任何指令 / 存取網路" : "Read/write any file, run any command, access network" },
+              { value: "permissive", label: locale.startsWith("zh") ? "寬鬆" : "Permissive",
+                desc: locale.startsWith("zh") ? "專案內讀寫 / git·npm 可用 / 限制外部網路" : "Read/write within project, git/npm allowed, limited external network" },
+              { value: "moderate", label: locale.startsWith("zh") ? "中等" : "Moderate",
+                desc: locale.startsWith("zh") ? "專案內唯讀 / 限制 shell 指令 / 無外部網路" : "Read-only within project, restricted shell, no external network" },
+              { value: "strict", label: locale.startsWith("zh") ? "嚴格" : "Strict",
+                desc: locale.startsWith("zh") ? "限制讀取範圍 / 無 shell / 無網路" : "Restricted reads, no shell, no network" },
+            ] as const).map(opt => {
+              const active = settings.sandboxLevel === opt.value
+              return (
+                <button key={opt.value} onClick={() => update("sandboxLevel", opt.value)} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 8,
+                  border: active ? "2px solid #37ACC0" : `1px solid ${inputBorder}`,
+                  background: active ? "rgba(55,172,192,0.06)" : "transparent",
+                  cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+                  transition: "all 0.15s",
+                }}>
+                  <div style={{
+                    width: 16, height: 16, borderRadius: 8, flexShrink: 0,
+                    border: active ? "5px solid #37ACC0" : `2px solid ${dark ? "#475569" : "#94a3b8"}`,
+                    background: active ? "#fff" : "transparent",
+                  }} />
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: active ? "#37ACC0" : textPrimary }}>{opt.label}</div>
+                    <div style={{ fontSize: 10, color: textSecondary, lineHeight: 1.3, marginTop: 1 }}>{opt.desc}</div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
           <Row label={locale.startsWith("zh") ? "計畫審查" : "Plan Review"}
                description={locale.startsWith("zh") ? "執行前需要你確認計畫" : "Must approve plan before execution"}>
             <Toggle checked={settings.requirePlanReview} onChange={(v) => update("requirePlanReview", v)} />

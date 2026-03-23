@@ -2559,19 +2559,32 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 4, fontWeight: 600 }}>
                       {t("sandbox.level") || "Sandbox Level"}
                     </div>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      {(["strict", "moderate", "permissive", "none"] as const).map((level) => {
-                        const active = formSandboxLevel === level
-                        const colors: Record<string, string> = { strict: "#ef4444", moderate: "#f59e0b", permissive: "#22c55e", none: "#94a3b8" }
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {([
+                        { value: "none" as const, desc: locale.startsWith("zh") ? "讀寫任何檔案 / 任何指令 / 網路" : "Any file, any command, network" },
+                        { value: "permissive" as const, desc: locale.startsWith("zh") ? "專案內讀寫 / git·npm / 限制網路" : "Project read/write, git/npm, limited network" },
+                        { value: "moderate" as const, desc: locale.startsWith("zh") ? "專案唯讀 / 限制指令 / 無網路" : "Read-only, restricted commands, no network" },
+                        { value: "strict" as const, desc: locale.startsWith("zh") ? "限制讀取 / 無指令 / 無網路" : "Restricted reads, no shell, no network" },
+                      ]).map((opt) => {
+                        const active = formSandboxLevel === opt.value
                         return (
-                          <button key={level} onClick={() => { setFormSandboxLevel(level); setScanResult(null) }} style={{
-                            flex: 1, padding: "4px 6px", borderRadius: 6,
-                            border: active ? `1.5px solid ${colors[level]}` : "1px solid var(--glass-border)",
-                            background: active ? `${colors[level]}15` : "transparent",
-                            color: active ? colors[level] : "var(--text-secondary)",
-                            fontSize: 10, fontWeight: 600, cursor: "pointer",
+                          <button key={opt.value} onClick={() => { setFormSandboxLevel(opt.value); setScanResult(null) }} style={{
+                            display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8,
+                            border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
+                            background: active ? "rgba(55,172,192,0.08)" : "transparent",
+                            cursor: "pointer", textAlign: "left",
                           }}>
-                            {t(`sandbox.level.${level}`) || level}
+                            <div style={{
+                              width: 12, height: 12, borderRadius: 6, flexShrink: 0,
+                              border: active ? "4px solid #37ACC0" : "2px solid var(--text-secondary)",
+                              background: active ? "#fff" : "transparent",
+                            }} />
+                            <div>
+                              <span style={{ fontSize: 11, fontWeight: 600, color: active ? "#37ACC0" : "var(--text-primary)" }}>
+                                {t(`sandbox.level.${opt.value}`) || opt.value}
+                              </span>
+                              <span style={{ fontSize: 9, color: "var(--text-secondary)", marginLeft: 6 }}>{opt.desc}</span>
+                            </div>
                           </button>
                         )
                       })}
