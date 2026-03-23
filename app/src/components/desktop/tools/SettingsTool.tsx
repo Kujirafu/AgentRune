@@ -5,6 +5,7 @@ import { TRUST_PROFILE_PRESETS, type TrustProfile } from "../../../data/automati
 import { getSettings, saveSettings, getWorktreeEnabled, setWorktreeEnabled } from "../../../lib/storage"
 import { useLocale, SUPPORTED_LOCALES } from "../../../lib/i18n/index.js"
 import { RoutingRulesEditor } from "../RoutingRulesEditor"
+import { trackDesktopSandboxChange, trackDesktopBypassToggle } from "../../../lib/analytics"
 
 interface SettingsToolProps {
   projectId: string | null

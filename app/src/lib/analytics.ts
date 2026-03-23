@@ -226,6 +226,64 @@ export function trackViewModeChange(mode: "board" | "terminal") {
   track("view_mode_change", { mode })
 }
 
+// ── Desktop-specific tracking ──
+
+function trackDesktop(event: string, properties: Record<string, unknown> = {}) {
+  if (optOut) return
+  const json = JSON.stringify(properties)
+  const safeProps = json.length <= MAX_PROPERTIES_SIZE ? properties : { _truncated: true }
+  queue.push({ event, properties: safeProps, platform: "desktop" })
+  if (queue.length >= MAX_QUEUE) flush()
+}
+
+export function trackDesktopSandboxChange(level: string, profile: string) {
+  trackDesktop("sandbox_change", { level, profile })
+}
+
+export function trackDesktopPermissionApprove(sessionId: string, purpose: string, action: string) {
+  trackDesktop("permission_approve", { sessionId: sessionId.slice(0, 20), purpose, action })
+}
+
+export function trackDesktopSessionCreate(projectId: string, agentId: string, hasInitialCommand: boolean) {
+  trackDesktop("session_create", { projectId, agentId, hasInitialCommand })
+}
+
+export function trackDesktopSessionRestart(projectId: string, reason: string) {
+  trackDesktop("session_restart", { projectId, reason })
+}
+
+export function trackDesktopCommandSend(sessionId: string, isSlash: boolean, isChain: boolean) {
+  trackDesktop("command_send", { sessionId: sessionId.slice(0, 20), isSlash, isChain })
+}
+
+export function trackDesktopToolView(view: string) {
+  trackDesktop("tool_view", { view })
+}
+
+export function trackDesktopSessionExpand(sessionId: string) {
+  trackDesktop("session_expand", { sessionId: sessionId.slice(0, 20) })
+}
+
+export function trackDesktopPermissionWidgetOpen() {
+  trackDesktop("permission_widget_open", {})
+}
+
+export function trackDesktopBypassToggle(enabled: boolean) {
+  trackDesktop("bypass_toggle", { enabled })
+}
+
+export function trackDesktopSessionKill(sessionId: string) {
+  trackDesktop("session_kill", { sessionId: sessionId.slice(0, 20) })
+}
+
+export function trackDesktopThemeToggle(theme: string) {
+  trackDesktop("theme_toggle", { theme })
+}
+
+export function trackDesktopNewProject(name: string) {
+  trackDesktop("new_project", { name })
+}
+
 /** @internal — test-only: reset module state */
 export function _resetForTesting() {
   queue.length = 0

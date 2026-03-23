@@ -16,6 +16,7 @@ import { GitTool } from "./tools/GitTool"
 import { SettingsTool } from "./tools/SettingsTool"
 import type { AutomationTemplate } from "../../data/automation-types"
 import { getSettings, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../../lib/storage"
+import { trackDesktopSessionCreate, trackDesktopCommandSend, trackDesktopToolView, trackDesktopSessionExpand, trackDesktopSessionRestart, trackDesktopBypassToggle, trackDesktopSessionKill, trackDesktopNewProject } from "../../lib/analytics"
 
 export type ToolView = "sessions" | "prd" | "git" | "schedules" | "workflows" | "settings"
 
@@ -151,6 +152,8 @@ export function CommandCenter(props: CommandCenterProps) {
     }
     const sid = resolveTarget()
     console.log("[CMD] handleSend:", { sid, targetSessionId, activeCount: activeSessions.length, selectedProjectId, textLen: text.length })
+    if (!sid) trackDesktopSessionCreate(selectedProjectId || "", "claude", !!text)
+    else trackDesktopCommandSend(sid, text.startsWith("/"), !!text.match(/\[AgentLore Skill Chain/))
     if (!sid) {
       const pid = selectedProjectId || projects[0]?.id
       console.log("[CMD] No session, creating new. pid:", pid)
@@ -250,6 +253,7 @@ export function CommandCenter(props: CommandCenterProps) {
 
   // Restart session with resume — uses server-side restart_session which preserves Claude conversation
   const restartWithResume = useCallback((sessionToRestart: AppSession) => {
+    trackDesktopSessionRestart(sessionToRestart.projectId, "settings_change")
     const pid = sessionToRestart.projectId
     const userSettings = pid ? getSettings(pid) : undefined
     send({
@@ -280,6 +284,7 @@ export function CommandCenter(props: CommandCenterProps) {
   }, [expandedSessions])
 
   const handleExpandSession = useCallback((sessionId: string) => {
+    trackDesktopSessionExpand(sessionId)
     setExpandedSessions(prev => {
       const next = new Set(prev)
       if (next.has(sessionId)) next.delete(sessionId)
@@ -356,7 +361,7 @@ export function CommandCenter(props: CommandCenterProps) {
             digests={digests}
             automations={automations}
             activeView={activeView}
-            onChangeView={(v) => { setActiveView(v); props.onCloseInlinePanel?.() }}
+            onChangeView={(v) => { setActiveView(v); props.onCloseInlinePanel?.(); trackDesktopToolView(v) }}
             onExpandSession={handleExpandSession}
             theme={theme}
             wsConnected={wsConnected}
@@ -725,3 +730,4 @@ export function CommandCenter(props: CommandCenterProps) {
     </div>
   )
 }
+// Tracking imports are added at component level — see below

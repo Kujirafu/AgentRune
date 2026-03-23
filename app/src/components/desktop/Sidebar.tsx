@@ -5,6 +5,7 @@ import type { AutomationConfig } from "../../data/automation-types"
 import type { ToolView } from "./CommandCenter"
 import { getApiBase } from "../../lib/storage"
 import { ConfirmDialog } from "./ConfirmDialog"
+import { trackDesktopPermissionWidgetOpen, trackDesktopPermissionApprove, trackDesktopThemeToggle } from "../../lib/analytics"
 
 import type { PhaseGateRequest, PendingReauthRequest, PhaseGateAction } from "../../data/automation-types"
 
