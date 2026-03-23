@@ -958,6 +958,45 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
                   active={settings.bypass}
                   onChange={(v) => onChange({ ...settings, bypass: v })}
                 />
+                {/* Sandbox Level */}
+                <div style={{
+                  display: "flex", flexDirection: "column", gap: 8,
+                  padding: "16px 20px", borderRadius: 20,
+                  border: "1px solid var(--glass-border)",
+                  background: "var(--card-bg)",
+                  backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+                  boxShadow: "var(--glass-shadow)",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    </svg>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{t("perm.title") || "Sandbox"}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
+                        {locale.startsWith("zh") ? "搭配 Bypass 使用可限制自主範圍" : "Limits what bypass mode can do"}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                    {(["none", "permissive", "moderate", "strict"] as const).map(level => {
+                      const active = (settings.sandboxLevel || "none") === level
+                      const labels: Record<string, string> = locale.startsWith("zh")
+                        ? { none: "自主", permissive: "寬鬆", moderate: "中等", strict: "嚴格" }
+                        : { none: "None", permissive: "Permissive", moderate: "Moderate", strict: "Strict" }
+                      return (
+                        <button key={level} onClick={() => onChange({ ...settings, sandboxLevel: level })} style={{
+                          flex: 1, padding: "8px 0", borderRadius: 12, fontSize: 12, fontWeight: active ? 700 : 500,
+                          border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
+                          background: active ? "rgba(55,172,192,0.1)" : "transparent",
+                          color: active ? "#37ACC0" : "var(--text-secondary)",
+                          cursor: "pointer",
+                        }}>{labels[level]}</button>
+                      )
+                    })}
+                  </div>
+                </div>
+
                 <ToggleCard
                   label={t("settings.planMode")}
                   description={t("settings.planModeDesc")}

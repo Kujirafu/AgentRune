@@ -860,6 +860,13 @@ export function MissionControl({
           setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
         }
       }
+      // Sandbox level change → restart to apply new SkillMonitor
+      if (newSettings.sandboxLevel !== prev.sandboxLevel && sessionId) {
+        showToast(locale.startsWith("zh") ? "沙盒等級已變更，重啟中..." : "Sandbox changed — restarting...", 3000)
+        onKillSession(sessionId)
+        setEvents([])
+        setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+      }
     }
 
     if (agentId === "codex") {
