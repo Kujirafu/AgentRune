@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, it, expect, beforeEach, vi } from "vitest"
 import {
   getSettings,
   saveSettings,
@@ -322,5 +322,264 @@ describe("getWorktreeEnabled / setWorktreeEnabled", () => {
     setWorktreeEnabled(false)
     setWorktreeEnabled(true)
     expect(getWorktreeEnabled()).toBe(true)
+  })
+})
+
+// ── Routing Rules ────────────────────────────────────────────────
+
+import {
+  getCachedGlobalRoutingRules,
+  cacheGlobalRoutingRules,
+  getProjectRoutingRules,
+  getKeepAwakeEnabled,
+  setKeepAwakeEnabled,
+  getLastProject,
+  saveLastProject,
+  getAutoSaveKeysEnabled,
+  setAutoSaveKeysEnabled,
+  getAutoSaveKeysPath,
+  setAutoSaveKeysPath,
+  getNotificationsEnabled,
+  setNotificationsEnabled,
+  getAutoUpdateEnabled,
+  setAutoUpdateEnabled,
+  getLastUpdateCheck,
+  setLastUpdateCheck,
+  getSkippedVersion,
+  setSkippedVersion,
+  getUpdateDetectedAt,
+  setUpdateDetectedAt,
+  clearUpdateDetected,
+  getUpdateNotified,
+  setUpdateNotified,
+  getFcmToken,
+  setFcmToken,
+  getApiKeyServices,
+  syncSettingsFromServer,
+} from "./storage"
+
+describe("getCachedGlobalRoutingRules / cacheGlobalRoutingRules", () => {
+  it("returns empty array when not cached", () => {
+    expect(getCachedGlobalRoutingRules()).toEqual([])
+  })
+
+  it("roundtrips cached rules", () => {
+    const rules = [{ id: "r1", pattern: "fix*", target: "agent-a" }]
+    cacheGlobalRoutingRules(rules as any)
+    expect(getCachedGlobalRoutingRules()).toEqual(rules)
+  })
+
+  it("returns empty array on corrupted JSON", () => {
+    localStorage.setItem("agentrune_global_routing_rules", "bad!")
+    expect(getCachedGlobalRoutingRules()).toEqual([])
+  })
+})
+
+describe("getProjectRoutingRules", () => {
+  it("returns empty array when project has no routing rules", () => {
+    expect(getProjectRoutingRules("no-rules")).toEqual([])
+  })
+
+  it("returns routing rules from project settings", () => {
+    const rules = [{ id: "r1", pattern: "*", target: "t" }]
+    localStorage.setItem(
+      "agentrune_settings_proj-rr",
+      JSON.stringify({ routingRules: rules }),
+    )
+    expect(getProjectRoutingRules("proj-rr")).toEqual(rules)
+  })
+})
+
+// ── Keep Awake ──────────────────────────────────────────────────
+
+describe("getKeepAwakeEnabled / setKeepAwakeEnabled", () => {
+  it("defaults to false", () => {
+    expect(getKeepAwakeEnabled()).toBe(false)
+  })
+  it("roundtrips true", () => {
+    setKeepAwakeEnabled(true)
+    expect(getKeepAwakeEnabled()).toBe(true)
+  })
+  it("roundtrips false", () => {
+    setKeepAwakeEnabled(true)
+    setKeepAwakeEnabled(false)
+    expect(getKeepAwakeEnabled()).toBe(false)
+  })
+})
+
+// ── Last Project ────────────────────────────────────────────────
+
+describe("getLastProject / saveLastProject", () => {
+  it("returns null when not set", () => {
+    expect(getLastProject()).toBeNull()
+  })
+  it("roundtrips project id", () => {
+    saveLastProject("proj-42")
+    expect(getLastProject()).toBe("proj-42")
+  })
+})
+
+// ── Auto Save Keys ──────────────────────────────────────────────
+
+describe("getAutoSaveKeysEnabled / setAutoSaveKeysEnabled", () => {
+  it("defaults to false", () => {
+    expect(getAutoSaveKeysEnabled()).toBe(false)
+  })
+  it("roundtrips true", () => {
+    setAutoSaveKeysEnabled(true)
+    expect(getAutoSaveKeysEnabled()).toBe(true)
+  })
+})
+
+describe("getAutoSaveKeysPath / setAutoSaveKeysPath", () => {
+  it("returns default path when not set", () => {
+    expect(getAutoSaveKeysPath()).toBe("~/.agentrune/secrets")
+  })
+  it("stores custom path", () => {
+    setAutoSaveKeysPath("/custom/path")
+    expect(getAutoSaveKeysPath()).toBe("/custom/path")
+  })
+  it("falls back to default on empty/whitespace", () => {
+    setAutoSaveKeysPath("  ")
+    expect(getAutoSaveKeysPath()).toBe("~/.agentrune/secrets")
+  })
+})
+
+// ── Notifications ───────────────────────────────────────────────
+
+describe("getNotificationsEnabled / setNotificationsEnabled", () => {
+  it("defaults to false", () => {
+    expect(getNotificationsEnabled()).toBe(false)
+  })
+  it("roundtrips true", () => {
+    setNotificationsEnabled(true)
+    expect(getNotificationsEnabled()).toBe(true)
+  })
+})
+
+// ── Auto Update ─────────────────────────────────────────────────
+
+describe("getAutoUpdateEnabled / setAutoUpdateEnabled", () => {
+  it("defaults to true when not set", () => {
+    expect(getAutoUpdateEnabled()).toBe(true)
+  })
+  it("returns false when set to false", () => {
+    setAutoUpdateEnabled(false)
+    expect(getAutoUpdateEnabled()).toBe(false)
+  })
+})
+
+describe("getLastUpdateCheck / setLastUpdateCheck", () => {
+  it("returns 0 when not set", () => {
+    expect(getLastUpdateCheck()).toBe(0)
+  })
+  it("roundtrips timestamp", () => {
+    setLastUpdateCheck(1700000000)
+    expect(getLastUpdateCheck()).toBe(1700000000)
+  })
+})
+
+describe("getSkippedVersion / setSkippedVersion", () => {
+  it("returns null when not set", () => {
+    expect(getSkippedVersion()).toBeNull()
+  })
+  it("roundtrips version string", () => {
+    setSkippedVersion("1.2.3")
+    expect(getSkippedVersion()).toBe("1.2.3")
+  })
+  it("clears on null", () => {
+    setSkippedVersion("1.2.3")
+    setSkippedVersion(null)
+    expect(getSkippedVersion()).toBeNull()
+  })
+})
+
+// ── Update Detection ────────────────────────────────────────────
+
+describe("getUpdateDetectedAt / setUpdateDetectedAt / clearUpdateDetected", () => {
+  it("returns null when not set", () => {
+    expect(getUpdateDetectedAt()).toBeNull()
+  })
+  it("roundtrips version and timestamp", () => {
+    setUpdateDetectedAt("2.0.0", 1700000000)
+    expect(getUpdateDetectedAt()).toEqual({ version: "2.0.0", at: 1700000000 })
+  })
+  it("clears detection", () => {
+    setUpdateDetectedAt("2.0.0", 1700000000)
+    clearUpdateDetected()
+    expect(getUpdateDetectedAt()).toBeNull()
+  })
+  it("returns null on corrupted JSON", () => {
+    localStorage.setItem("agentrune_update_detected", "oops")
+    expect(getUpdateDetectedAt()).toBeNull()
+  })
+})
+
+describe("getUpdateNotified / setUpdateNotified", () => {
+  it("returns null when not set", () => {
+    expect(getUpdateNotified()).toBeNull()
+  })
+  it("roundtrips notified version", () => {
+    setUpdateNotified("2.0.0")
+    expect(getUpdateNotified()).toBe("2.0.0")
+  })
+})
+
+// ── FCM Token ───────────────────────────────────────────────────
+
+describe("getFcmToken / setFcmToken", () => {
+  it("returns null when not set", () => {
+    expect(getFcmToken()).toBeNull()
+  })
+  it("roundtrips token", () => {
+    setFcmToken("fcm-xyz-123")
+    expect(getFcmToken()).toBe("fcm-xyz-123")
+  })
+})
+
+// ── API Key Services ────────────────────────────────────────────
+
+describe("getApiKeyServices", () => {
+  it("returns non-empty list of services", () => {
+    const services = getApiKeyServices()
+    expect(services.length).toBeGreaterThan(0)
+    expect(services[0]).toHaveProperty("envVar")
+    expect(services[0]).toHaveProperty("label")
+  })
+  it("includes Anthropic", () => {
+    const services = getApiKeyServices()
+    expect(services.find((s) => s.envVar === "ANTHROPIC_API_KEY")).toBeTruthy()
+  })
+})
+
+// ── syncSettingsFromServer ──────────────────────────────────────
+
+describe("syncSettingsFromServer", () => {
+  it("merges server settings with defaults and caches locally", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ model: "opus" }),
+    }) as any
+    const result = await syncSettingsFromServer("proj-sync")
+    expect(result.model).toBe("opus")
+    // Should be cached in localStorage
+    const cached = getSettings("proj-sync")
+    expect(cached.model).toBe("opus")
+  })
+
+  it("falls back to local settings on fetch failure", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline")) as any
+    localStorage.setItem(
+      "agentrune_settings_proj-sync",
+      JSON.stringify({ model: "haiku" }),
+    )
+    const result = await syncSettingsFromServer("proj-sync")
+    expect(result.model).toBe("haiku")
+  })
+
+  it("falls back to local settings on non-ok response", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false }) as any
+    const result = await syncSettingsFromServer("proj-sync")
+    expect(result).toEqual(DEFAULT_SETTINGS)
   })
 })
