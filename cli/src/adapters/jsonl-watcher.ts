@@ -136,8 +136,8 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
         })
       } else if (name === "Read") {
         const filePath = input.file_path || "unknown"
-        // Skip injection reads (rules.md, agentlore.md)
-        if (/\.agentrune[/\\](rules|agentlore)\.md$/.test(filePath)) continue
+        // Skip memory injection reads (rules.md, agentlore.md, context sections)
+        if (/\.agentrune[/\\](rules|agentlore)\.md$/.test(filePath) || /\.agentrune[/\\]context[/\\].+\.md$/.test(filePath)) continue
         events.push({
           id: makeId(),
           timestamp: ts,
@@ -223,8 +223,8 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
     if (block.type === "text" && block.text) {
       const text = block.text.trim()
       if (text.length < 5) continue
-      // Filter injection prompt responses (agent reading rules.md/agentlore.md on startup)
-      if (/已讀完.*(?:rules\.md|agentlore\.md)|讀取.*(?:rules\.md|agentlore\.md)|Read.*\.agentrune\/(rules|agentlore)\.md/i.test(text.split("\n")[0])) continue
+      // Filter memory injection prompt responses (agent reading rules.md / agentlore.md / context sections)
+      if (/已讀完.*(?:rules\.md|agentlore\.md|context)|讀取.*(?:rules\.md|agentlore\.md|context)|Read.*\.agentrune\/(?:rules|agentlore)\.md|Read.*\.agentrune\/context\/.+\.md/i.test(text.split("\n")[0])) continue
       // Short text: title only. Long text: first line as title, full text as detail
       const firstLine = text.split("\n")[0]
       const isLong = text.length > firstLine.length + 1 || text.includes("\n")
@@ -314,7 +314,7 @@ function userToEvents(line: JsonlLine): AgentEvent[] {
 
   // Filter out non-user content:
   // 1. AgentRune injected prompts (rules instruction, install checks)
-  if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md)/.test(text)) return []
+  if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md|context\/.+\.md)/.test(text)) return []
   if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(text)) return []
   if (/command -v .* >\/dev\/null 2>&1 \|\|/.test(text)) return []
   // 2. Claude Code system/internal XML tags (system-reminder, command-name, local-command-*, etc.)

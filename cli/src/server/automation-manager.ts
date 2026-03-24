@@ -358,8 +358,8 @@ function buildAgentProtocol(locale?: string): string {
   const langHint = locale ? ` Respond in the user's language (${locale}).` : ""
   return [
     "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-    `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory — treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
-    "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+    `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (the project memory index). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+    "MEMORY: .agentrune/agentlore.md is the memory index. Do NOT read every context file by default. Use the index to choose only the sections relevant to the current task. If the right section is unclear, search the structured memory sections and then read the best matches. When you learn something stable, update the matching memory section instead of bloating the index. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system - the user cannot see those.",
   ].join(" ")
 }
 

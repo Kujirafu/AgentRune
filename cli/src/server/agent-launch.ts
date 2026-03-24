@@ -232,14 +232,14 @@ function buildAgentProtocol(locale: string, projectId?: string): { full: string;
   return {
     full: [
       "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
-      "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. If agentlore.md contains an Index section with links to other files, follow those links to read detailed sections. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
+      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (the project memory index). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+      "MEMORY: .agentrune/agentlore.md is the memory index. Do NOT read every context file by default. Use the index to choose only the sections relevant to the current task. If the right section is unclear, search the structured memory sections and then read the best matches. When you learn something stable, update the matching memory section instead of bloating the index. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system - the user cannot see those.",
       prdHint,
     ].filter(Boolean).join(" "),
     short: [
       "AGENTRUNE: If .agentrune/rules.md exists, read and follow it.",
-      "Read .agentrune/agentlore.md (project memory) - if missing, create it (mkdir -p .agentrune) by scanning the project.",
-      "agentlore.md IS your memory - read on start, write when you learn. If it has an Index with links, follow them. Do NOT use your own memory system - only .agentrune/agentlore.md.",
+      "Read .agentrune/agentlore.md (the project memory index) - if missing, create it (mkdir -p .agentrune) by scanning the project.",
+      "Use the index to choose only the relevant memory sections. Do not read every section by default. Search the structured memory sections if the right one is unclear. Do NOT use your own memory system - only .agentrune/agentlore.md and its linked sections.",
       langHint.trim(),
       prdHint.trim(),
     ].filter(Boolean).join(" "),

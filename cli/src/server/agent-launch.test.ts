@@ -78,6 +78,19 @@ describe("agent-launch", () => {
     ])
   })
 
+  it("tells fresh sessions to use the memory index and read only relevant sections", () => {
+    const launch = buildAgentLaunch("codex", {
+      locale: "zh-TW",
+    }, {
+      projectId: "demo",
+    })
+
+    const protocolArg = launch.args.at(-1) || ""
+    expect(protocolArg).toContain("project memory index")
+    expect(protocolArg).toContain("Do not read every section by default")
+    expect(protocolArg).toContain("Search the structured memory sections")
+  })
+
   it("quotes shell arguments safely for POSIX shells", () => {
     const command = serializeShellCommand([
       "codex",

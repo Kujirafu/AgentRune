@@ -31,8 +31,9 @@ import { SkillMonitor } from "./skill-monitor.js"
 import { createManifestForLevel, type SandboxLevel } from "./skill-manifest.js"
 import { readAuditLog, listAuditDates, getRecentAuditEntries, getAutomationAudit } from "./audit-log.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
-import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
-import { initAgentloreStructure, migrateMonolithicAgentlore, listContextSections, readContextSection, writeContextSection, isAllowedContextSectionFile } from "./agentlore-init.js"
+import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, getRulesPath } from "./behavior-rules.js"
+import { listContextSections, readContextSection, writeContextSection, isAllowedContextSectionFile, searchContextSections, routeContextSections } from "./agentlore-init.js"
+import { ensureProjectMemoryReady } from "./project-memory.js"
 import { getRequestClientIp, isExemptApiAuthPath, isTrustedLocalRequest } from "./request-security.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
@@ -3027,61 +3028,96 @@ export function createServer(portOverride?: number) {
 
   // --- Shared Memory (agentlore.md) endpoints ---
 
-  app.get("/api/memory", (_req, res) => {
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.json({ content: "", path: "" }); return }
-    const content = getProjectMemory(cwd)
-    res.json({ content, path: getMemoryPath(cwd) })
+  app.get("/api/memory", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ content: "", path: "" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const content = getProjectMemory(project.cwd)
+    res.json({ content, path: getMemoryPath(project.cwd) })
   })
 
   app.put("/api/memory", express.json(), (req, res) => {
     const { content } = req.body
     if (typeof content !== "string") { res.status(400).json({ error: "Missing content" }); return }
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
-    updateProjectMemory(cwd, content)
-    log.info(`[Memory] Updated agentlore.md for project at ${cwd} (${content.length} chars)`)
-    res.json({ ok: true, path: getMemoryPath(cwd) })
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    updateProjectMemory(project.cwd, content)
+    log.info(`[Memory] Updated agentlore.md for project at ${project.cwd} (${content.length} chars)`)
+    res.json({ ok: true, path: getMemoryPath(project.cwd) })
   })
 
   // --- Agentlore Context Section endpoints ---
 
-  app.get("/api/memory/sections", (_req, res) => {
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.json({ sections: [] }); return }
-    res.json({ sections: listContextSections(cwd) })
+  app.get("/api/memory/sections", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ sections: [] }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    res.json({ sections: listContextSections(project.cwd) })
+  })
+
+  app.get("/api/memory/search", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ results: [] }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const query = typeof req.query.q === "string" ? req.query.q : ""
+    const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 5
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 20) : 5
+    res.json({ results: searchContextSections(project.cwd, query, { limit }) })
+  })
+
+  app.post("/api/memory/route", express.json(), (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const task = typeof req.body?.task === "string" ? req.body.task : ""
+    const changedFiles = Array.isArray(req.body?.changedFiles)
+      ? req.body.changedFiles.filter((file: unknown): file is string => typeof file === "string")
+      : []
+    const maxSectionsRaw = typeof req.body?.maxSections === "number" ? req.body.maxSections : undefined
+    const maxSections = typeof maxSectionsRaw === "number"
+      ? Math.min(Math.max(Math.trunc(maxSectionsRaw), 1), 6)
+      : undefined
+
+    res.json(routeContextSections(project.cwd, { task, changedFiles, maxSections }))
   })
 
   app.get("/api/memory/sections/:file", (req, res) => {
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
     if (!isAllowedContextSectionFile(req.params.file)) {
       res.status(400).json({ error: "Invalid section file name" }); return
     }
-    const content = readContextSection(cwd, req.params.file)
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const content = readContextSection(project.cwd, req.params.file)
     res.json({ content, file: req.params.file })
   })
 
   app.put("/api/memory/sections/:file", express.json(), (req, res) => {
     const { content } = req.body
     if (typeof content !== "string") { res.status(400).json({ error: "Missing content" }); return }
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
     // Validate file name (only allow known section files)
     if (!isAllowedContextSectionFile(req.params.file)) {
       res.status(400).json({ error: "Invalid section file name" }); return
     }
-    writeContextSection(cwd, req.params.file, content)
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    writeContextSection(project.cwd, req.params.file, content)
     log.info(`[Memory] Updated context section ${req.params.file} (${content.length} chars)`)
     res.json({ ok: true })
   })
 
-  app.post("/api/memory/migrate", (_req, res) => {
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
-    const result = migrateMonolithicAgentlore(cwd)
-    log.info(`[Memory] Migration: ${result.migrated ? `migrated ${result.sections.join(", ")}` : "skipped (already structured)"}`)
-    res.json(result)
+  app.post("/api/memory/migrate", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    const result = ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    log.info(`[Memory] Migration: ${result.migrated.migrated ? `migrated ${result.migrated.sections.join(", ")}` : "skipped (already structured)"}`)
+    res.json({
+      migrated: result.migrated,
+      initialized: result.initialized,
+      path: getMemoryPath(project.cwd),
+    })
   })
 
   // --- Standards endpoints ---
@@ -3629,6 +3665,26 @@ export function createServer(portOverride?: number) {
     return null
   }
 
+  function resolveProjectFromRequest(req: { query?: Record<string, unknown>; body?: Record<string, unknown> }): Project | null {
+    const bodyProjectId = typeof req.body?.projectId === "string" ? req.body.projectId : ""
+    const queryProjectId = typeof req.query?.projectId === "string" ? req.query.projectId : ""
+    const projectId = bodyProjectId || queryProjectId
+    if (projectId) {
+      return projects.find((candidate) => candidate.id === projectId) || null
+    }
+
+    for (const [, sid] of clientSessions) {
+      const s = sessions.get(sid)
+      if (s) return s.project
+    }
+
+    return projects[0] || null
+  }
+
+  function resolveProjectCwdFromRequest(req: { query?: Record<string, unknown>; body?: Record<string, unknown> }): string | null {
+    return resolveProjectFromRequest(req)?.cwd || null
+  }
+
   // --- WebSocket ---
 
   const clientSessions = new Map<WebSocket, string>()
@@ -3890,6 +3946,11 @@ export function createServer(portOverride?: number) {
           if (isNewSession) {
             // New session (no prior PTY) — create worktree for isolation
             try {
+              ensureProjectMemoryReady(project.cwd, {
+                projectId: project.id,
+                projectName: project.name,
+                port: PORT,
+              })
               let wtm = worktreeManagers.get(project.id)
               if (!wtm) {
                 wtm = new WorktreeManager(project.cwd)
@@ -4259,8 +4320,11 @@ export function createServer(portOverride?: number) {
             }
 
             // --- Ensure rules.md + agentlore context structure exists ---
-            ensureRulesFile(sessionProject.cwd)
-            ensurePrdApiSection(sessionProject.cwd, PORT, sessionProject.id)
+            ensureProjectMemoryReady(sessionProject.cwd, {
+              projectId: sessionProject.id,
+              projectName: sessionProject.name,
+              port: PORT,
+            })
             const rulesPath = getRulesPath(sessionProject.cwd)
             const memoryPath = getMemoryPath(sessionProject.cwd)
             const hasRules = existsSync(rulesPath)
@@ -4292,7 +4356,8 @@ export function createServer(portOverride?: number) {
                   return
                 }
 
-                // Build short instruction pointing agent to rules + memory files
+                // Build short instruction pointing agent to rules + memory files.
+                /*
                 const parts: string[] = []
                 if (hasRules) parts.push("讀取 .agentrune/rules.md（行為規範）")
                 if (hasMemory) {
@@ -4312,6 +4377,28 @@ export function createServer(portOverride?: number) {
                   detail: hasRules || hasMemory
                     ? `正在載入 ${[hasRules && "rules.md", hasMemory && "agentlore.md"].filter(Boolean).join(", ")}`
                     : "正在建立 agentlore.md…",
+                }
+                */
+                const instructionParts: string[] = []
+                if (hasRules) instructionParts.push("Read .agentrune/rules.md first and follow it.")
+                if (hasMemory) {
+                  instructionParts.push("Then read .agentrune/agentlore.md as the project memory index.")
+                } else {
+                  instructionParts.push("Create .agentrune/agentlore.md as a short project memory index if it is missing.")
+                }
+                instructionParts.push("Do not read every memory section by default. Use the index to open only the sections relevant to this task.")
+                instructionParts.push("If the right section is unclear, search the structured memory sections and read the best matches.")
+                instructionParts.push("When you learn something stable, update the matching memory section instead of bloating the index.")
+                const instruction = instructionParts.join(" ")
+
+                const initTargets = [hasRules && "rules.md", hasMemory && "agentlore.md"].filter(Boolean).join(", ")
+                const initEvent: AgentEvent = {
+                  id: `init_${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: "info",
+                  status: "in_progress",
+                  title: "Initializing project memory",
+                  detail: initTargets ? `Preparing ${initTargets}` : "Creating agentlore.md",
                 }
                 for (const [client, csid] of clientSessions) {
                   if (csid === session.id && client.readyState === WebSocket.OPEN) {

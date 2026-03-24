@@ -89,11 +89,30 @@ function ToolIcon({ tool, color }: { tool: string; color: string }) {
   }
 }
 
+function MessageCenterIcon({ color }: { color: string }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 12h-4l-3 4H9l-3-4H2" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </svg>
+  )
+}
+
 interface SidebarTask {
   id: number
   title: string
   status: string
   prdTitle?: string
+}
+
+interface CompletionNotice {
+  id: string
+  sessionId: string
+  sessionIdx: number
+  label: string
+  summary: string
+  nextAction: string
+  updatedAt: number
 }
 
 export function Sidebar({
@@ -109,21 +128,79 @@ export function Sidebar({
   const dark = theme === "dark"
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null)
   const [permPanel, setPermPanel] = useState(false)
-  const [permTab, setPermTab] = useState<"live" | "history">("live")
+  const [permTab, setPermTab] = useState<"inbox" | "recent">("inbox")
   // Track resolved items for feedback animation (eventId → "approved" | "denied")
   const [resolvedFeedback, setResolvedFeedback] = useState<Map<string, string>>(new Map())
+  const [completionNotices, setCompletionNotices] = useState<CompletionNotice[]>([])
+  const [unreadCompletionIds, setUnreadCompletionIds] = useState<Set<string>>(new Set())
 
   const totalPending = pendingPermissions.length + (pendingPhaseGate ? 1 : 0) + pendingReauthQueue.length
+  const unreadCompletionCount = unreadCompletionIds.size
+  const totalInboxBadges = totalPending + unreadCompletionCount
+  const hasInboxAlerts = totalInboxBadges > 0
 
-  // Auto-open panel when new approvals arrive
-  const prevPermCount = React.useRef(0)
+  const completionSnapshotRef = React.useRef<Map<string, { status: string; updatedAt: number }>>(new Map())
   useEffect(() => {
-    if (totalPending > prevPermCount.current && totalPending > 0) {
+    const nextSnapshot = new Map<string, { status: string; updatedAt: number }>()
+    const additions: CompletionNotice[] = []
+
+    sessions.forEach((session, index) => {
+      const digest = digests.get(session.id)
+      if (!digest) return
+      const updatedAt = digest.updatedAt || Date.now()
+      const previous = completionSnapshotRef.current.get(session.id)
+
+      if (previous && previous.status !== "done" && digest.status === "done") {
+        additions.push({
+          id: `${session.id}:${updatedAt}`,
+          sessionId: session.id,
+          sessionIdx: index + 1,
+          label: digest.displayLabel || session.taskTitle || `Session ${index + 1}`,
+          summary: digest.summary || t("desktop.sessionCompleted"),
+          nextAction: digest.nextAction,
+          updatedAt,
+        })
+      }
+
+      nextSnapshot.set(session.id, { status: digest.status, updatedAt })
+    })
+
+    completionSnapshotRef.current = nextSnapshot
+
+    if (additions.length === 0) return
+
+    setCompletionNotices((prev) => {
+      const merged = new Map<string, CompletionNotice>()
+      for (const item of [...additions, ...prev]) merged.set(item.id, item)
+      return [...merged.values()]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 10)
+    })
+    setUnreadCompletionIds((prev) => {
+      const next = new Set(prev)
+      for (const item of additions) next.add(item.id)
+      return next
+    })
+  }, [sessions, digests, t])
+
+  // Auto-open panel when new approvals or completions arrive
+  const prevInboxCounts = React.useRef({ pending: 0, completions: 0 })
+  useEffect(() => {
+    const previous = prevInboxCounts.current
+    if (totalPending > previous.pending && totalPending > 0) {
       setPermPanel(true)
-      setPermTab("live")
+      setPermTab("inbox")
+    } else if (unreadCompletionCount > previous.completions && unreadCompletionCount > 0) {
+      setPermPanel(true)
+      setPermTab("recent")
     }
-    prevPermCount.current = totalPending
-  }, [totalPending])
+    prevInboxCounts.current = { pending: totalPending, completions: unreadCompletionCount }
+  }, [totalPending, unreadCompletionCount])
+
+  useEffect(() => {
+    if (!permPanel || permTab !== "recent" || unreadCompletionIds.size === 0) return
+    setUnreadCompletionIds(new Set())
+  }, [permPanel, permTab, unreadCompletionIds])
   const textPrimary = dark ? "#e2e8f0" : "#1e293b"
   const textSecondary = dark ? "#94a3b8" : "#64748b"
   const textMuted = dark ? "#475569" : "#94a3b8"
@@ -443,37 +520,43 @@ export function Sidebar({
         </div>
       )}
 
-      {/* Bottom: permission widget + theme toggle */}
+      {/* Bottom: message center + theme toggle */}
       <div style={{
         padding: "10px 16px",
-        borderTop: totalPending > 0 ? "2px solid rgba(55,172,192,0.4)" : `1px solid ${dividerColor}`,
+        borderTop: hasInboxAlerts ? "2px solid rgba(55,172,192,0.4)" : `1px solid ${dividerColor}`,
         display: "flex", alignItems: "center", gap: 8,
         position: "relative",
         transition: "border-top 0.3s ease",
       }}>
-        {/* Permission shield button */}
+        {/* Message center button */}
         <button
-          onClick={() => { if (!permPanel) trackDesktopPermissionWidgetOpen(); setPermPanel(!permPanel) }}
+          onClick={() => {
+            if (!permPanel) {
+              trackDesktopPermissionWidgetOpen()
+              if (totalPending > 0) setPermTab("inbox")
+              else if (unreadCompletionCount > 0) setPermTab("recent")
+            }
+            setPermPanel(!permPanel)
+          }}
           style={{
             width: 28, height: 28, borderRadius: 6, border: "none",
-            background: totalPending > 0 ? "rgba(55,172,192,0.15)" : "transparent",
+            background: hasInboxAlerts ? "rgba(55,172,192,0.15)" : "transparent",
             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-            color: totalPending > 0 ? "#37ACC0" : textSecondary,
+            color: hasInboxAlerts ? "#37ACC0" : textSecondary,
             position: "relative",
-            animation: totalPending > 0 ? "pulse 2s infinite" : "none",
+            animation: hasInboxAlerts ? "pulse 2s infinite" : "none",
           }}
-          title={t("perm.title")}
+          title={t("desktop.messageCenter")}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          </svg>
-          {totalPending > 0 && (
+          <MessageCenterIcon color="currentColor" />
+          {totalInboxBadges > 0 && (
             <span style={{
               position: "absolute", top: -2, right: -2,
-              width: 14, height: 14, borderRadius: 7,
-              background: "#FB8184", color: "#fff", fontSize: 9, fontWeight: 700,
+              minWidth: 14, height: 14, borderRadius: 7, padding: "0 3px",
+              background: totalPending > 0 ? "#FB8184" : "#37ACC0",
+              color: "#fff", fontSize: 9, fontWeight: 700,
               display: "flex", alignItems: "center", justifyContent: "center",
-            }}>{totalPending}</span>
+            }}>{Math.min(totalInboxBadges, 9)}</span>
           )}
         </button>
         {/* Theme toggle */}
@@ -501,26 +584,30 @@ export function Sidebar({
         {/* Permission panel — expands upward */}
         {permPanel && (
           <div style={{
-            position: "absolute", bottom: 48, left: 0, width: 230,
+            position: "absolute", bottom: 48, left: 0, width: 300,
             background: dark ? "rgba(15,23,42,0.97)" : "rgba(255,255,255,0.97)",
             backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
             border: `1px solid ${dividerColor}`,
             borderRadius: 12, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
             zIndex: 100, overflow: "hidden",
-            maxHeight: 400,
+            maxHeight: 440,
           }}>
-            {/* Header with tabs + close */}
-            <div style={{ display: "flex", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${dividerColor}` }}>
-              <button onClick={() => setPermTab("live")} style={{
-                fontSize: 12, fontWeight: permTab === "live" ? 700 : 500, border: "none", background: "none", cursor: "pointer",
-                color: permTab === "live" ? "#37ACC0" : textSecondary, padding: "4px 10px", borderRadius: 6,
-                ...(permTab === "live" ? { background: "rgba(55,172,192,0.1)" } : {}),
-              }}>Live ({totalPending})</button>
-              <button onClick={() => setPermTab("history")} style={{
-                fontSize: 12, fontWeight: permTab === "history" ? 700 : 500, border: "none", background: "none", cursor: "pointer",
-                color: permTab === "history" ? "#37ACC0" : textSecondary, padding: "4px 10px", borderRadius: 6,
-                ...(permTab === "history" ? { background: "rgba(55,172,192,0.1)" } : {}),
-              }}>History</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderBottom: `1px solid ${dividerColor}` }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: dark ? "rgba(55,172,192,0.12)" : "rgba(55,172,192,0.08)",
+                color: "#37ACC0",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0,
+              }}>
+                <MessageCenterIcon color="currentColor" />
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: textPrimary }}>{t("desktop.messageCenter")}</div>
+                <div style={{ fontSize: 11, color: textMuted }}>
+                  {hasInboxAlerts ? `${totalInboxBadges} ${t("desktop.newItems")}` : t("desktop.noRecentActivity")}
+                </div>
+              </div>
               <div style={{ flex: 1 }} />
               <button onClick={() => setPermPanel(false)} style={{
                 width: 22, height: 22, borderRadius: 6, border: "none", background: "transparent", cursor: "pointer",
@@ -531,9 +618,21 @@ export function Sidebar({
                 </svg>
               </button>
             </div>
+            <div style={{ display: "flex", gap: 6, padding: "8px 12px", borderBottom: `1px solid ${dividerColor}` }}>
+              <button onClick={() => setPermTab("inbox")} style={{
+                fontSize: 12, fontWeight: permTab === "inbox" ? 700 : 500, border: "none", background: "none", cursor: "pointer",
+                color: permTab === "inbox" ? "#37ACC0" : textSecondary, padding: "4px 10px", borderRadius: 6,
+                ...(permTab === "inbox" ? { background: "rgba(55,172,192,0.1)" } : {}),
+              }}>{t("desktop.inbox")} ({totalPending})</button>
+              <button onClick={() => setPermTab("recent")} style={{
+                fontSize: 12, fontWeight: permTab === "recent" ? 700 : 500, border: "none", background: "none", cursor: "pointer",
+                color: permTab === "recent" ? "#37ACC0" : textSecondary, padding: "4px 10px", borderRadius: 6,
+                ...(permTab === "recent" ? { background: "rgba(55,172,192,0.1)" } : {}),
+              }}>{t("desktop.recent")}{unreadCompletionCount > 0 ? ` (${unreadCompletionCount})` : ""}</button>
+            </div>
             {/* Content */}
-            <div style={{ overflowY: "auto", maxHeight: 340, padding: "8px 0" }}>
-              {permTab === "live" && (<>
+            <div style={{ overflowY: "auto", maxHeight: 360, padding: "8px 0" }}>
+              {permTab === "inbox" && (<>
                 {/* Phase gate */}
                 {pendingPhaseGate && (
                   <div style={{ padding: "8px 12px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}` }}>
@@ -559,7 +658,7 @@ export function Sidebar({
                 ))}
                 {/* Agent permission requests */}
                 {totalPending === 0
-                  ? <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: textMuted }}>No pending approvals</div>
+                  ? <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: textMuted }}>{t("desktop.noInbox")}</div>
                   : pendingPermissions.map(({ event: ev, sessionId: sid, sessionIdx }, permIdx) => ev.decision && (
                     <div key={ev.id} style={{
                       padding: "8px 12px",
@@ -647,20 +746,96 @@ export function Sidebar({
                     </div>
                   ))
               }</>)}
-              {permTab === "history" && (
-                permissionHistory.length === 0
-                  ? <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: textMuted }}>No recent permissions</div>
-                  : permissionHistory.map(({ event: ev, sessionIdx }) => (
-                    <div key={ev.id} style={{ padding: "6px 12px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.03)"}` }}>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                        <span style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0" }}>#{sessionIdx}</span>
-                        <span style={{ fontSize: 12, color: textPrimary }}>{ev.decision?.purpose || ev.title}</span>
-                        <span style={{ fontSize: 10, color: ev.status === "completed" ? "#BDD1C6" : "#FB8184", fontWeight: 600, marginLeft: "auto" }}>
-                          {ev.status === "completed" ? "Approved" : "Denied"}
-                        </span>
+              {permTab === "recent" && (
+                completionNotices.length === 0 && permissionHistory.length === 0
+                  ? <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: textMuted }}>{t("desktop.noRecentActivity")}</div>
+                  : <>
+                    {completionNotices.length > 0 && (
+                      <div style={{ padding: "2px 12px 8px", fontSize: 10, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase", color: textMuted }}>
+                        {t("desktop.completedSessions")}
                       </div>
-                    </div>
-                  ))
+                    )}
+                    {completionNotices.map((item) => (
+                      <div key={item.id} style={{
+                        padding: "10px 12px",
+                        borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}`,
+                        background: unreadCompletionIds.has(item.id)
+                          ? (dark ? "rgba(55,172,192,0.08)" : "rgba(55,172,192,0.05)")
+                          : "transparent",
+                        borderLeft: unreadCompletionIds.has(item.id) ? "3px solid #37ACC0" : "3px solid transparent",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#BDD1C6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                            <polyline points="22 4 12 14.01 9 11.01" />
+                          </svg>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0" }}>#{item.sessionIdx}</span>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: textPrimary, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {item.label}
+                          </span>
+                          <span style={{ fontSize: 10, color: textMuted, flexShrink: 0 }}>
+                            {new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                          <button onClick={() => { onJumpToSession?.(item.sessionId); setPermPanel(false) }} title={t("desktop.openSession")} style={{
+                            width: 20, height: 20, borderRadius: 4, border: "none", background: "transparent", cursor: "pointer",
+                            display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, flexShrink: 0,
+                          }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                              <polyline points="15 3 21 3 21 9" />
+                              <line x1="10" y1="14" x2="21" y2="3" />
+                            </svg>
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: textMuted, marginBottom: 4 }}>{t("desktop.sessionCompleted")}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: textMuted, marginBottom: 2 }}>{t("desktop.summary")}</div>
+                        <div style={{
+                          fontSize: 12,
+                          color: textSecondary,
+                          lineHeight: 1.5,
+                          marginBottom: item.nextAction ? 8 : 0,
+                          display: "-webkit-box",
+                          WebkitBoxOrient: "vertical",
+                          WebkitLineClamp: 3,
+                          overflow: "hidden",
+                        }}>
+                          {item.summary}
+                        </div>
+                        {item.nextAction && (
+                          <>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: textMuted, marginBottom: 2 }}>{t("desktop.nextStep")}</div>
+                            <div style={{
+                              fontSize: 12,
+                              color: textPrimary,
+                              lineHeight: 1.5,
+                              display: "-webkit-box",
+                              WebkitBoxOrient: "vertical",
+                              WebkitLineClamp: 2,
+                              overflow: "hidden",
+                            }}>
+                              {item.nextAction}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {permissionHistory.length > 0 && (
+                      <div style={{ padding: "10px 12px 8px", fontSize: 10, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase", color: textMuted }}>
+                        {t("desktop.permissionHistory")}
+                      </div>
+                    )}
+                    {permissionHistory.map(({ event: ev, sessionIdx }) => (
+                      <div key={ev.id} style={{ padding: "6px 12px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.03)"}` }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0" }}>#{sessionIdx}</span>
+                          <span style={{ fontSize: 12, color: textPrimary }}>{ev.decision?.purpose || ev.title}</span>
+                          <span style={{ fontSize: 10, color: ev.status === "completed" ? "#BDD1C6" : "#FB8184", fontWeight: 600, marginLeft: "auto" }}>
+                            {ev.status === "completed" ? "Approved" : "Denied"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </>
               )}
             </div>
           </div>

@@ -103,6 +103,70 @@ program
     await watchCommand(opts)
   })
 
+const memory = program
+  .command("memory")
+  .description("Inspect and manage local project memory")
+
+memory
+  .command("init")
+  .description("Initialize or migrate .agentrune project memory in the target project")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .action(async (pathArg) => {
+    const { memoryInitCommand } = await import("./commands/memory.js")
+    await memoryInitCommand(pathArg)
+  })
+
+memory
+  .command("index")
+  .description("Print the project memory index (agentlore.md)")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .action(async (pathArg) => {
+    const { memoryIndexCommand } = await import("./commands/memory.js")
+    await memoryIndexCommand(pathArg)
+  })
+
+memory
+  .command("sections")
+  .description("List structured memory sections")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .action(async (pathArg) => {
+    const { memorySectionsCommand } = await import("./commands/memory.js")
+    await memorySectionsCommand(pathArg)
+  })
+
+memory
+  .command("read")
+  .description("Read one structured memory section")
+  .argument("<file>", "Section file name, such as stack.md")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .action(async (file, pathArg) => {
+    const { memoryReadCommand } = await import("./commands/memory.js")
+    await memoryReadCommand(file, pathArg)
+  })
+
+memory
+  .command("search")
+  .description("Search structured memory sections")
+  .argument("<query>", "Search query")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .option("-l, --limit <n>", "Maximum results")
+  .action(async (query, pathArg, opts) => {
+    const { memorySearchCommand } = await import("./commands/memory.js")
+    await memorySearchCommand(query, pathArg, opts.limit)
+  })
+
+memory
+  .command("route")
+  .description("Recommend which memory sections to read first for a task")
+  .argument("<task>", "Task description")
+  .argument("[path]", "Project root (defaults to current working directory)")
+  .option("-f, --file <path>", "Relevant changed file", (value, previous: string[] = []) => [...previous, value], [])
+  .option("-m, --max <n>", "Maximum number of sections")
+  .action(async (task, pathArg, opts) => {
+    const { memoryRouteCommand } = await import("./commands/memory.js")
+    await memoryRouteCommand(task, { path: pathArg, files: opts.file, max: opts.max })
+  })
+
 // Default action (no args) = start --foreground
 program.action(async () => {
   const { startCommand } = await import("./commands/start.js")
