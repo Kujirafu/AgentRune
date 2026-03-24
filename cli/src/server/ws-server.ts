@@ -700,7 +700,16 @@ export function createServer(portOverride?: number) {
   app.use("/api", requireAuth)
 
   const server = createHttpServer(app)
-  const wss = new WebSocketServer({ server })
+  const wss = new WebSocketServer({
+    server,
+    maxPayload: 1 * 1024 * 1024,
+    verifyClient: ({ req }: { req: import("node:http").IncomingMessage }) => {
+      const origin = req.headers.origin
+      // Allow connections with no origin (non-browser clients, Electron, CLI tools)
+      if (!origin) return true
+      return isAllowedOrigin(origin) !== false
+    },
+  })
 
   // Broadcast to ALL connected WS clients (for session lifecycle sync)
   function broadcastAll(msg: Record<string, unknown>) {

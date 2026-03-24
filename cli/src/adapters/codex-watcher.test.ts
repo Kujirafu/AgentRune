@@ -7,15 +7,15 @@ import { codexLineToEvents, codexSessionCwdMatchesProject, readCodexSessionCwd }
 describe("codex-watcher", () => {
   it("matches the same project across path separators and case differences", () => {
     expect(codexSessionCwdMatchesProject(
-      "C:\\Users\\agres\\Documents\\Test\\AgentRune-New",
-      "c:/users/agres/documents/test/agentrune-new",
+      "C:\\Users\\testuser\\Projects\\MyApp",
+      "c:/users/testuser/projects/myapp",
     )).toBe(true)
   })
 
   it("rejects unrelated project paths", () => {
     expect(codexSessionCwdMatchesProject(
-      "C:\\Users\\agres\\Documents\\Test\\AgentRune-New",
-      "C:\\Users\\agres\\Documents\\OtherProject",
+      "C:\\Users\\testuser\\Projects\\MyApp",
+      "C:\\Users\\testuser\\Documents\\OtherProject",
     )).toBe(false)
   })
 
@@ -25,13 +25,13 @@ describe("codex-watcher", () => {
     writeFileSync(sessionPath, [
       JSON.stringify({
         type: "session_meta",
-        payload: { cwd: "C:\\Users\\agres\\Documents\\Test\\AgentRune-New" },
+        payload: { cwd: "C:\\Users\\testuser\\Projects\\MyApp" },
       }),
       JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "hello" } }),
       "",
     ].join("\n"))
 
-    expect(readCodexSessionCwd(sessionPath)).toBe("C:\\Users\\agres\\Documents\\Test\\AgentRune-New")
+    expect(readCodexSessionCwd(sessionPath)).toBe("C:\\Users\\testuser\\Projects\\MyApp")
   })
 
   it("skips commentary agent_message events", () => {

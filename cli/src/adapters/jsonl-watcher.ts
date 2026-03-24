@@ -16,8 +16,8 @@ const claimedJsonlFiles = new Set<string>()
 
 /** Convert project CWD to Claude's project directory name */
 function cwdToClaudeDir(cwd: string): string {
-  // Claude Code encodes path: C:\Users\agres\Documents\Test\AgentWiki
-  // → C--Users-agres-Documents-Test-AgentWiki
+  // Claude Code encodes path: C:\Users\me\Projects\MyApp
+  // → C--Users-me-Projects-MyApp
   // Claude also converts dots to dashes: .worktrees → -worktrees
   const normalized = cwd.replace(/\\/g, "/")
   return normalized.replace(/^([A-Za-z]):/, "$1-").replace(/[/.]/g, "-")

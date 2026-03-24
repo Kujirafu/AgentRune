@@ -41,10 +41,10 @@ async function testAnsiParser() {
   const noisePatterns = [
     "Background command 'start daemon' completed",
     "background command 'npm run build' started",
-    "Update(C:\\Users\\agres\\Documents\\Test\\file.ts)",
+    "Update(C:\\Users\\testuser\\Projects\\file.ts)",
     "Update(/home/user/project/file.ts)",
-    "Read(C:\\Users\\agres\\Documents\\Test\\file.ts)",
-    "Edit(C:\\Users\\agres\\Documents\\Test\\file.ts)",
+    "Read(C:\\Users\\testuser\\Projects\\file.ts)",
+    "Edit(C:\\Users\\testuser\\Projects\\file.ts)",
     "Write(/home/user/project/file.ts)",
     "Session a1b2c3d4",
     "500 tokens remaining",
@@ -54,7 +54,7 @@ async function testAnsiParser() {
     "plan mode on (Shift+Tab to cycle)",
     "/remote.control is active",
     "├── src/",
-    "PS C:\\Users\\agres>",
+    "PS C:\\Users\\testuser>",
     // New patterns from thinking panel screenshots
     "Found 1 settings issue · /doctor for details",
     "107257 tokens",
@@ -395,7 +395,7 @@ async function testJsonlFilePipeline() {
   console.log("\n━━━ Test 4: JSONL file → WS events pipeline ━━━")
 
   // Create a fake project directory matching our CWD encoding
-  const testCwd = "C:\\Users\\agres\\Documents\\Test\\AgentRune-TestProject"
+  const testCwd = "C:\\Users\\testuser\\Projects\\AgentRune-TestProject"
   const encoded = testCwd.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "$1-").replace(/\//g, "-")
   const projectDir = join(homedir(), ".claude", "projects", encoded)
 

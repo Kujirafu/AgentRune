@@ -34,6 +34,7 @@ const OPENCLAW_PROVIDERS = ["default", "openai", "anthropic", "ollama", "custom"
 const GEMINI_APPROVAL_MODES = ["default", "auto_edit", "yolo", "plan"] as const
 const CURSOR_MODES = ["default", "plan", "ask"] as const
 const CURSOR_SANDBOXES = ["default", "enabled", "disabled"] as const
+const SANDBOX_LEVELS = ["strict", "moderate", "permissive", "none"] as const
 
 const SAFE_TOKEN_RE = /^[A-Za-z0-9._:/-]{1,120}$/
 const SAFE_LOCALE_RE = /^[A-Za-z0-9_-]{1,32}$/
@@ -195,7 +196,7 @@ export function normalizeAgentSettings(rawSettings?: AgentSettingsInput): Normal
     cursorMode: readEnum(settings, "cursorMode", CURSOR_MODES, DEFAULT_AGENT_SETTINGS.cursorMode),
     cursorModel: readSafeToken(settings, "cursorModel"),
     cursorSandbox: readEnum(settings, "cursorSandbox", CURSOR_SANDBOXES, DEFAULT_AGENT_SETTINGS.cursorSandbox),
-    sandboxLevel: typeof settings.sandboxLevel === "string" ? settings.sandboxLevel : DEFAULT_AGENT_SETTINGS.sandboxLevel,
+    sandboxLevel: readEnum(settings, "sandboxLevel", SANDBOX_LEVELS, DEFAULT_AGENT_SETTINGS.sandboxLevel as "none"),
     requirePlanReview: readBoolean(settings, "requirePlanReview", DEFAULT_AGENT_SETTINGS.requirePlanReview),
     requireMergeApproval: readBoolean(settings, "requireMergeApproval", DEFAULT_AGENT_SETTINGS.requireMergeApproval),
     locale: sanitizeLocale(settings.locale),

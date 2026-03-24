@@ -7,6 +7,11 @@ import { log } from "../shared/logger.js"
 import { isEncrypted, readEncryptedFile, writeEncryptedFile } from "./crypto.js"
 
 const KEY_VAULT_DIRNAME = "金鑰庫"
+
+/** Escape string for safe use in RegExp constructor */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
 const MARKDOWN_SECRET_REGEX = /###\s+([^\n`]+?)\s*\r?\n```\r?\n([\s\S]*?)\r?\n```/g
 
 // Only inject API-style keys into PTY sessions.
@@ -166,10 +171,12 @@ export function saveVaultKey(envVar: string, value: string): void {
     content = "# AgentRune API Keys\n"
   }
 
-  const entryRegex = new RegExp(`### ${envVar}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
+  const safeVar = escapeRegex(envVar)
+  const entryRegex = new RegExp(`### ${safeVar}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
   const newEntry = `### ${envVar}\n\`\`\`\n${value.trim()}\n\`\`\``
 
   if (entryRegex.test(content)) {
+    entryRegex.lastIndex = 0
     content = content.replace(entryRegex, newEntry)
   } else {
     content = content.trimEnd() + `\n\n${newEntry}\n`
@@ -188,7 +195,8 @@ export function deleteVaultKey(envVar: string): void {
 
   let content = readEncryptedFile(filePath)
   if (!content) return
-  const entryRegex = new RegExp(`\\n*### ${envVar}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
+  const safeVar2 = escapeRegex(envVar)
+  const entryRegex = new RegExp(`\\n*### ${safeVar2}\\s*\\n\`\`\`\\n[\\s\\S]*?\\n\`\`\``, "g")
   content = content.replace(entryRegex, "")
   writeEncryptedFile(filePath, content)
   log.info(`Deleted API key: ${envVar}`)
