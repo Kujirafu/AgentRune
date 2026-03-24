@@ -216,12 +216,12 @@ export function Sidebar({
       setPermPanel(true)
       setPermTab("inbox")
       if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current)
-      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 1000)
+      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 3000)
     } else if (unreadCompletionCount > previous.completions && unreadCompletionCount > 0) {
       setPermPanel(true)
       setPermTab("recent")
       if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current)
-      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 1000)
+      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 3000)
     }
     prevInboxCounts.current = { pending: totalPending, completions: unreadCompletionCount }
   }, [totalPending, unreadCompletionCount])
