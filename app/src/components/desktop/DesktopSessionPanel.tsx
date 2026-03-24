@@ -1,11 +1,12 @@
-import React, { useState, useMemo, useRef, useEffect, lazy, Suspense } from "react"
+import React, { useState, useMemo, useRef, useEffect, Suspense } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AppSession, AgentEvent } from "../../types"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
 import { getSettings } from "../../lib/storage"
+import { lazyRetry } from "../../lib/lazy-retry"
 
-const DesktopTerminalPanel = lazy(() =>
+const DesktopTerminalPanel = lazyRetry(() =>
   import("./DesktopTerminalPanel").then(m => ({ default: m.DesktopTerminalPanel }))
 )
 

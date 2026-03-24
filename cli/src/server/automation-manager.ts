@@ -1668,12 +1668,18 @@ export class AutomationManager {
                     const topicText = (directive.text.split("\n---\n")[0] || "").slice(0, 200)
                     // Jittered delay: 15-30 min (anti-detection: not always the same gap)
                     const delayMin = 15 + Math.floor(Math.random() * 16)
+                    // Sanitize topicText for safe env var usage (strip shell metacharacters)
+                    const safeTopicText = topicText.replace(/[^\p{L}\p{N}\s.,!?;:'"()\-]/gu, "")
+                    // Only forward safe env vars — avoid leaking API keys to child process
+                    const safeEnv: Record<string, string> = { X_REPLY_TOPIC: safeTopicText }
+                    for (const k of ["PATH", "HOME", "USERPROFILE", "NODE_ENV", "LANG", "TERM"]) {
+                      if (process.env[k]) safeEnv[k] = process.env[k]!
+                    }
                     const child = spawn("npx", ["tsx", replyScript, "--delay-min", String(delayMin)], {
-                      shell: true,
                       detached: true,
                       stdio: "ignore",
                       cwd: project.cwd,
-                      env: { ...process.env, X_REPLY_TOPIC: topicText },
+                      env: safeEnv,
                     })
                     child.unref()
                     log.info(`[Automation] X reply bot spawned (PID ${child.pid}), will start in ~${delayMin} min`)
@@ -2368,7 +2374,16 @@ export class AutomationManager {
       if (!existsSync(filePath)) return
 
       const content = readAtomicEncrypted(filePath)
-      if (!content) return
+      if (!content) {
+        // File exists but can't be read/decrypted — likely encryption key mismatch (salt was regenerated)
+        log.warn(`[Automation] automations.json exists but could not be decrypted. This usually means the encryption salt (~/.agentrune/.encryption-salt) was regenerated. Backing up the unreadable file and starting fresh.`)
+        try {
+          const backupPath = `${filePath}.bak.${Date.now()}`
+          renameSync(filePath, backupPath)
+          log.info(`[Automation] Backed up unreadable automations to ${backupPath}`)
+        } catch {}
+        return
+      }
       const data: AutomationConfig[] = JSON.parse(content)
       let needsSave = false
       for (const auto of data) {

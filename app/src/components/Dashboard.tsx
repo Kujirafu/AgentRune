@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, lazy, Suspense } from "react"
+import React, { useState, useCallback, useRef, useEffect, Suspense } from "react"
 import type { Project, AppSession, AgentEvent } from "../types"
 import { AGENTS } from "../types"
 import { DesktopOnboarding } from "./desktop/DesktopOnboarding"
@@ -9,12 +9,13 @@ import { useAutomations } from "../hooks/useAutomations"
 import { isSummaryNoise } from "../lib/session-summary"
 import { CommandCenter } from "./desktop/CommandCenter"
 import { QuickLaunchDialog } from "./desktop/QuickLaunchDialog"
+import { lazyRetry } from "../lib/lazy-retry"
 
-const AutomationSheet = lazy(() => import("./AutomationSheet").then(m => ({ default: m.AutomationSheet })))
-const FireCrewSheet = lazy(() => import("./FireCrewSheet"))
-const AutomationReportSheet = lazy(() => import("./AutomationReportSheet"))
-const CrewReportSheet = lazy(() => import("./CrewReportSheet"))
-const ChainBuilder = lazy(() => import("./ChainBuilder").then(m => ({ default: m.ChainBuilder })))
+const AutomationSheet = lazyRetry(() => import("./AutomationSheet").then(m => ({ default: m.AutomationSheet })))
+const FireCrewSheet = lazyRetry(() => import("./FireCrewSheet"))
+const AutomationReportSheet = lazyRetry(() => import("./AutomationReportSheet"))
+const CrewReportSheet = lazyRetry(() => import("./CrewReportSheet"))
+const ChainBuilder = lazyRetry(() => import("./ChainBuilder").then(m => ({ default: m.ChainBuilder })))
 
 // --- Session label helpers (match UnifiedPanel pattern) ---
 function getSessionLabels(): Record<string, string> {

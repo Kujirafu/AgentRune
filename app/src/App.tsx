@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
+import { useState, useEffect, useRef, useCallback, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
 import type { PhaseGateRequest, PhaseGateAction, PendingReauthRequest } from "./data/automation-types"
@@ -6,15 +6,16 @@ import { getLastProject, saveLastProject, getVolumeKeysEnabled, getKeepAwakeEnab
 import { LocalNotifications } from "@capacitor/local-notifications"
 import { PushNotifications } from "@capacitor/push-notifications"
 import { LaunchPad } from "./components/LaunchPad"
-const TerminalView = lazy(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
-const MissionControl = lazy(() => import("./components/MissionControl").then(m => ({ default: m.MissionControl })))
-const ProjectOverview = lazy(() => import("./components/ProjectOverview").then(m => ({ default: m.ProjectOverview })))
-const UnifiedPanel = lazy(() => import("./components/UnifiedPanel").then(m => ({ default: m.UnifiedPanel })))
-const DiffPanel = lazy(() => import("./components/DiffPanel").then(m => ({ default: m.DiffPanel })))
-const ChainBuilder = lazy(() => import("./components/ChainBuilder").then(m => ({ default: m.ChainBuilder })))
-const PhaseGateSheet = lazy(() => import("./components/PhaseGateSheet"))
-const ReauthSheet = lazy(() => import("./components/ReauthSheet"))
-const Dashboard = lazy(() => import("./components/Dashboard").then(m => ({ default: m.Dashboard })))
+import { lazyRetry } from "./lib/lazy-retry"
+const TerminalView = lazyRetry(() => import("./components/TerminalView").then(m => ({ default: m.TerminalView })))
+const MissionControl = lazyRetry(() => import("./components/MissionControl").then(m => ({ default: m.MissionControl })))
+const ProjectOverview = lazyRetry(() => import("./components/ProjectOverview").then(m => ({ default: m.ProjectOverview })))
+const UnifiedPanel = lazyRetry(() => import("./components/UnifiedPanel").then(m => ({ default: m.UnifiedPanel })))
+const DiffPanel = lazyRetry(() => import("./components/DiffPanel").then(m => ({ default: m.DiffPanel })))
+const ChainBuilder = lazyRetry(() => import("./components/ChainBuilder").then(m => ({ default: m.ChainBuilder })))
+const PhaseGateSheet = lazyRetry(() => import("./components/PhaseGateSheet"))
+const ReauthSheet = lazyRetry(() => import("./components/ReauthSheet"))
+const Dashboard = lazyRetry(() => import("./components/Dashboard").then(m => ({ default: m.Dashboard })))
 import { App as CapApp } from "@capacitor/app"
 import { useIsDesktop } from "./hooks/useIsDesktop"
 import { Browser } from "@capacitor/browser"
@@ -1613,8 +1614,9 @@ export function App() {
     if (isCapacitor() && !base) return
     console.log(`[App] Loading projects: base=${base} wsConnected=${wsConnected} isAuthed=${isAuthed}`)
     fetch(`${base}/api/projects`)
-      .then((r) => r.json())
+      .then((r) => r.ok ? r.json() : Promise.reject(r.status))
       .then((data) => {
+        if (!Array.isArray(data)) return
         setProjects(data)
         // Auto-select last used project or first
         const last = getLastProject()
@@ -1636,8 +1638,9 @@ export function App() {
       const base = getApiBase()
       if (!base && isCapacitor()) return
       fetch(`${base}/api/projects`)
-        .then((r) => r.json())
+        .then((r) => r.ok ? r.json() : Promise.reject(r.status))
         .then((data) => {
+          if (!Array.isArray(data)) return
           setProjects(data)
           const last = getLastProject()
           if (last && data.find((p: Project) => p.id === last)) {

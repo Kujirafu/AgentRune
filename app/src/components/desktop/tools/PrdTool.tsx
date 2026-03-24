@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback, lazy, Suspense } from "react"
+import React, { useState, useEffect, useCallback, Suspense } from "react"
 import { getApiBase } from "../../../lib/storage"
 import type { PrdItem, PrdSummary, PrdPriority, Task } from "../../../types"
+import { lazyRetry } from "../../../lib/lazy-retry"
 
-const StandardsContent = lazy(() => import("../../StandardsPage").then(m => ({ default: m.StandardsContent })))
+const StandardsContent = lazyRetry(() => import("../../StandardsPage").then(m => ({ default: m.StandardsContent })))
 
 const PRIORITY_LABELS: Record<PrdPriority, { label: string; color: string; bg: string }> = {
   p0: { label: "P0", color: "#FB8184", bg: "rgba(239,68,68,0.12)" },

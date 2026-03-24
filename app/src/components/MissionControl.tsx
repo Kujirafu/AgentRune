@@ -10,14 +10,15 @@ import { ProgressCard } from "./ProgressCard"
 import type { AgentStatus } from "./StatusIndicator"
 import { InputBar } from "./InputBar"
 import type { SendFlags } from "./InputBar"
-import { lazy, Suspense } from "react"
-const SettingsSheet = lazy(() => import("./SettingsSheet").then(m => ({ default: m.SettingsSheet })))
-const FileBrowser = lazy(() => import("./FileBrowser").then(m => ({ default: m.FileBrowser })))
-const FilePreview = lazy(() => import("./FilePreview").then(m => ({ default: m.FilePreview })))
-const GitPanel = lazy(() => import("./GitPanel").then(m => ({ default: m.GitPanel })))
-const PlanPanel = lazy(() => import("./PlanPanel").then(m => ({ default: m.PlanPanel })))
+import { Suspense } from "react"
+import { lazyRetry } from "../lib/lazy-retry"
+const SettingsSheet = lazyRetry(() => import("./SettingsSheet").then(m => ({ default: m.SettingsSheet })))
+const FileBrowser = lazyRetry(() => import("./FileBrowser").then(m => ({ default: m.FileBrowser })))
+const FilePreview = lazyRetry(() => import("./FilePreview").then(m => ({ default: m.FilePreview })))
+const GitPanel = lazyRetry(() => import("./GitPanel").then(m => ({ default: m.GitPanel })))
+const PlanPanel = lazyRetry(() => import("./PlanPanel").then(m => ({ default: m.PlanPanel })))
 import { PathBadge } from "./PathBadge"
-const InsightSheet = lazy(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
+const InsightSheet = lazyRetry(() => import("./InsightSheet").then(m => ({ default: m.InsightSheet })))
 import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
