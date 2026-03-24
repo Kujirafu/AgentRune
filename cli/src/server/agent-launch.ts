@@ -34,6 +34,7 @@ const OPENCLAW_PROVIDERS = ["default", "openai", "anthropic", "ollama", "custom"
 const GEMINI_APPROVAL_MODES = ["default", "auto_edit", "yolo", "plan"] as const
 const CURSOR_MODES = ["default", "plan", "ask"] as const
 const CURSOR_SANDBOXES = ["default", "enabled", "disabled"] as const
+const SANDBOX_LEVELS = ["strict", "moderate", "permissive", "none"] as const
 
 const SAFE_TOKEN_RE = /^[A-Za-z0-9._:/-]{1,120}$/
 const SAFE_LOCALE_RE = /^[A-Za-z0-9_-]{1,32}$/
@@ -78,6 +79,10 @@ export interface NormalizedAgentSettings {
   cursorModel: string
   cursorSandbox: CursorSandbox
   locale: string
+  // Global sandbox
+  sandboxLevel: string
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
 }
 
 export const DEFAULT_AGENT_SETTINGS: NormalizedAgentSettings = {
@@ -100,6 +105,9 @@ export const DEFAULT_AGENT_SETTINGS: NormalizedAgentSettings = {
   cursorModel: "",
   cursorSandbox: "default",
   locale: "",
+  sandboxLevel: "none",
+  requirePlanReview: false,
+  requireMergeApproval: false,
 }
 
 export interface AgentLaunchOptions {
@@ -188,6 +196,9 @@ export function normalizeAgentSettings(rawSettings?: AgentSettingsInput): Normal
     cursorMode: readEnum(settings, "cursorMode", CURSOR_MODES, DEFAULT_AGENT_SETTINGS.cursorMode),
     cursorModel: readSafeToken(settings, "cursorModel"),
     cursorSandbox: readEnum(settings, "cursorSandbox", CURSOR_SANDBOXES, DEFAULT_AGENT_SETTINGS.cursorSandbox),
+    sandboxLevel: readEnum(settings, "sandboxLevel", SANDBOX_LEVELS, DEFAULT_AGENT_SETTINGS.sandboxLevel as "none"),
+    requirePlanReview: readBoolean(settings, "requirePlanReview", DEFAULT_AGENT_SETTINGS.requirePlanReview),
+    requireMergeApproval: readBoolean(settings, "requireMergeApproval", DEFAULT_AGENT_SETTINGS.requireMergeApproval),
     locale: sanitizeLocale(settings.locale),
   }
 }
@@ -222,14 +233,14 @@ function buildAgentProtocol(locale: string, projectId?: string): { full: string;
   return {
     full: [
       "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory - treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
-      "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system - user cannot see those.",
+      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (the project memory index). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+      "MEMORY: .agentrune/agentlore.md is the memory index. Do NOT read every context file by default. Use the index to choose only the sections relevant to the current task. If the right section is unclear, search the structured memory sections and then read the best matches. When you learn something stable, update the matching memory section instead of bloating the index. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system - the user cannot see those.",
       prdHint,
     ].filter(Boolean).join(" "),
     short: [
       "AGENTRUNE: If .agentrune/rules.md exists, read and follow it.",
-      "Read .agentrune/agentlore.md (project memory) - if missing, create it (mkdir -p .agentrune) by scanning the project.",
-      "agentlore.md IS your memory - read on start, write when you learn. Do NOT use your own memory system - only .agentrune/agentlore.md.",
+      "Read .agentrune/agentlore.md (the project memory index) - if missing, create it (mkdir -p .agentrune) by scanning the project.",
+      "Use the index to choose only the relevant memory sections. Do not read every section by default. Search the structured memory sections if the right one is unclear. Do NOT use your own memory system - only .agentrune/agentlore.md and its linked sections.",
       langHint.trim(),
       prdHint.trim(),
     ].filter(Boolean).join(" "),
@@ -276,7 +287,10 @@ function buildClaudeArgs(settings: NormalizedAgentSettings, options: AgentLaunch
     args.push("--permission-mode", "acceptEdits")
   }
 
-  args.push("--append-system-prompt", protocol.full)
+  // Only inject protocol on fresh sessions — resume/continue inherits previous system prompt
+  if (!resumeSessionId && !options.continueSession) {
+    args.push("--append-system-prompt", protocol.full)
+  }
   return args
 }
 

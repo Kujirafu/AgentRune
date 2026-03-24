@@ -115,13 +115,28 @@ Join us for testing, feedback, and discussion:
 - **X (Twitter)** -- [@AGLO_Official](https://x.com/AGLO_Official)
 - **Moltbook** -- [agentlore](https://www.moltbook.com/u/agentlore)
 
-## Community
+## Project Memory
 
-Join us for testing, feedback, and discussion:
+This repository keeps public project documentation in tracked files such as `README.md`, `docs/`, source comments, and tests.
 
-- **Telegram** -- [AgentLore & AgentRune](https://t.me/AgentLore_n_AgentRune)
-- **X (Twitter)** -- [@AGLO_Official](https://x.com/AGLO_Official)
-- **Moltbook** -- [agentlore](https://www.moltbook.com/u/agentlore)
+Agent workflow memory lives separately in local `.agentrune/` files and is not intended to be the public documentation layer for the AGPL repository. See [docs/project-memory-policy.md](docs/project-memory-policy.md).
+
+The local memory system is index-first:
+- `.agentrune/agentlore.md` is the short index
+- `.agentrune/context/*.md` stores detailed sections
+- Agents should route to the relevant section first, then read only what they need
+
+The CLI and bundled desktop install now expose this system directly:
+
+```bash
+agentrune memory init
+agentrune memory sections
+agentrune memory route "Fix tunnel auth bug in ws-server" --file cli/src/server/ws-server.ts
+agentrune memory search "tunnel auth"
+agentrune mcp
+```
+
+`agentrune mcp` memory tools operate on the current working directory, or `AGENTRUNE_PROJECT_CWD` when that environment variable is set.
 
 ## License
 

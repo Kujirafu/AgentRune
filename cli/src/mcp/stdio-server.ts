@@ -2,9 +2,20 @@
 // MCP server that proxies AgentLore API tools + provides local AgentRune tools
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { resolve } from "node:path"
 import { z } from "zod"
 import { loadConfig } from "../shared/config.js"
 import { readClipboard } from "../server/clipboard.js"
+import { getProjectMemory, getMemoryPath, updateProjectMemory } from "../server/behavior-rules.js"
+import {
+  isAllowedContextSectionFile,
+  listContextSections,
+  readContextSection,
+  routeContextSections,
+  searchContextSections,
+  writeContextSection,
+} from "../server/agentlore-init.js"
+import { ensureProjectMemoryReady } from "../server/project-memory.js"
 
 const AGENTLORE_BASE = "https://agentlore.vercel.app"
 
@@ -86,6 +97,22 @@ async function callAgentLoreApi(toolName: string, args: Record<string, unknown>)
   return res.json()
 }
 
+function resolveMemoryProjectCwd(projectCwd?: string): string {
+  const envCwd = process.env.AGENTRUNE_PROJECT_CWD
+  return resolve(projectCwd || envCwd || process.cwd())
+}
+
+function ensureLocalProjectMemory(projectCwd?: string): string {
+  const cwd = resolveMemoryProjectCwd(projectCwd)
+  const config = loadConfig()
+  ensureProjectMemoryReady(cwd, {
+    projectId: process.env.AGENTRUNE_PROJECT_ID,
+    projectName: process.env.AGENTRUNE_PROJECT_NAME,
+    port: config.port,
+  })
+  return cwd
+}
+
 export async function startMcpServer() {
   const server = new McpServer({
     name: "agentrune",
@@ -101,8 +128,14 @@ progress reports — they cannot see your raw terminal output.
 - report_progress: Report work progress to the user (MUST call after completing tasks)
 
 ## Shared Memory (agentlore.md)
-- read_memory: Read the project's shared memory (all agents share this file)
-- update_memory: Update the shared memory (overwrite with complete new content)
+- read_memory: Read the project memory index (agentlore.md)
+- list_memory_sections: List structured memory sections with metadata
+- route_memory_sections: Recommend which memory sections to read first for the current task
+- search_memory_sections: Search across structured memory sections
+- read_memory_section: Read one structured memory section
+- update_memory_section: Update one structured memory section
+- update_memory: Update the memory index if needed
+- Memory tools operate on AGENTRUNE_PROJECT_CWD when set, otherwise the current working directory
 
 ## Knowledge Management
 - log_prerequisite: Record prerequisites, constraints, or lessons learned
@@ -294,6 +327,10 @@ Call get_knowledge_guide first if unsure about the format.`,
     "Read the project's shared memory (agentlore.md). All agents share this file — it contains project patterns, architecture decisions, debugging insights, and workflow preferences.",
     {},
     async () => {
+      const cwd = ensureLocalProjectMemory()
+      const sections = listContextSections(cwd)
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projectCwd: cwd, sections }, null, 2) }] }
+
       const config = loadConfig()
       try {
         const res = await fetch(`http://localhost:${config.port}/api/memory`)
@@ -309,12 +346,148 @@ Call get_knowledge_guide first if unsure about the format.`,
   )
 
   server.tool(
+    "list_memory_sections",
+    "List the available structured memory sections, including descriptions, keywords, and path hints.",
+    {},
+    async () => {
+      const cwd = ensureLocalProjectMemory()
+      const content = getProjectMemory(cwd)
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "agentlore.md is empty. Initialize or update project memory first." }] }
+      }
+      return { content: [{ type: "text" as const, text: `${content}\n\n_path: ${getMemoryPath(cwd)}` }] }
+
+      const config = loadConfig()
+      try {
+        const res = await fetch(`http://localhost:${config.port}/api/memory/sections`)
+        const data = await res.json()
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not list memory sections. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
+    "route_memory_sections",
+    "Recommend which structured memory sections to read first for the current task. Use this after reading agentlore.md.",
+    {
+      task: z.string().describe("What you are trying to do"),
+      changedFiles: z.array(z.string()).optional().describe("Relevant file paths if already known"),
+      maxSections: z.number().optional().describe("Maximum sections to recommend (default: 3)"),
+    },
+    async ({ task, changedFiles, maxSections }) => {
+      const cwd = ensureLocalProjectMemory()
+      const data = routeContextSections(cwd, { task, changedFiles, maxSections })
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projectCwd: cwd, ...data }, null, 2) }] }
+
+      const config = loadConfig()
+      try {
+        const res = await fetch(`http://localhost:${config.port}/api/memory/route`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task, changedFiles, maxSections }),
+        })
+        const data = await res.json()
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not route memory sections. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
+    "search_memory_sections",
+    "Search structured memory sections when the right section is unclear or when you need fallback retrieval.",
+    {
+      query: z.string().describe("Search query"),
+      limit: z.number().optional().describe("Maximum results"),
+    },
+    async ({ query, limit }) => {
+      const cwd = ensureLocalProjectMemory()
+      const results = searchContextSections(cwd, query, { limit })
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projectCwd: cwd, results }, null, 2) }] }
+
+      const config = loadConfig()
+      try {
+        const url = new URL(`http://localhost:${config.port}/api/memory/search`)
+        url.searchParams.set("q", query)
+        if (typeof limit === "number") url.searchParams.set("limit", String(limit))
+        const res = await fetch(url)
+        const data = await res.json()
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not search memory sections. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
+    "read_memory_section",
+    "Read one structured memory section by file name, such as stack.md or security.md.",
+    {
+      file: z.string().describe("Section file name"),
+    },
+    async ({ file }) => {
+      if (!isAllowedContextSectionFile(file)) {
+        return { content: [{ type: "text" as const, text: `Error: invalid memory section "${file}".` }], isError: true }
+      }
+      const cwd = ensureLocalProjectMemory()
+      const content = readContextSection(cwd, file)
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projectCwd: cwd, file, content }, null, 2) }] }
+
+      const config = loadConfig()
+      try {
+        const res = await fetch(`http://localhost:${config.port}/api/memory/sections/${encodeURIComponent(file)}`)
+        const data = await res.json()
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not read memory section. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
+    "update_memory_section",
+    "Update one structured memory section. Use this for stable lessons, bugs, changelog notes, and other section-specific knowledge.",
+    {
+      file: z.string().describe("Section file name"),
+      content: z.string().describe("Complete new content for the section file"),
+    },
+    async ({ file, content }) => {
+      if (!isAllowedContextSectionFile(file)) {
+        return { content: [{ type: "text" as const, text: `Error: invalid memory section "${file}".` }], isError: true }
+      }
+      const cwd = ensureLocalProjectMemory()
+      writeContextSection(cwd, file, content)
+      return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, projectCwd: cwd, file }, null, 2) }] }
+
+      const config = loadConfig()
+      try {
+        const res = await fetch(`http://localhost:${config.port}/api/memory/sections/${encodeURIComponent(file)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        })
+        const data = await res.json()
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text" as const, text: "Could not update memory section. AgentRune daemon may not be running." }] }
+      }
+    }
+  )
+
+  server.tool(
     "update_memory",
     "Update the project's shared memory (agentlore.md). Pass the COMPLETE new content — it will overwrite the existing file. All agents (claude/codex/gemini) share this memory. Record: stable patterns, important file paths, architecture decisions, debugging insights, workflow preferences. Do NOT record: temporary state, in-progress work, unverified guesses.",
     {
       content: z.string().describe("Complete new content for agentlore.md (will overwrite existing)"),
     },
     async ({ content }) => {
+      const cwd = ensureLocalProjectMemory()
+      updateProjectMemory(cwd, content)
+      return { content: [{ type: "text" as const, text: `Updated agentlore.md (${content.length} chars) at ${getMemoryPath(cwd)}` }] }
+
       const config = loadConfig()
       try {
         await fetch(`http://localhost:${config.port}/api/memory`, {

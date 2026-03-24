@@ -18,21 +18,29 @@ import { ParseEngine } from "../adapters/parse-engine.js"
 import { JsonlWatcher } from "../adapters/jsonl-watcher.js"
 import { CodexWatcher } from "../adapters/codex-watcher.js"
 import { GeminiWatcher } from "../adapters/gemini-watcher.js"
-import { loadConfig, getConfigDir } from "../shared/config.js"
+import { loadConfig, saveConfig, getConfigDir } from "../shared/config.js"
+import type { RoutingRule } from "../shared/config.js"
+import { detectAgents } from "./agent-detect.js"
 import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
 import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
 import { buildPlanningConstraints } from "./planning-constraints.js"
-import { createFromTrustProfile } from "./authority-map.js"
+import { createFromTrustProfile, grantPermission } from "./authority-map.js"
+import { SkillMonitor } from "./skill-monitor.js"
+import { createManifestForLevel, type SandboxLevel } from "./skill-manifest.js"
 import { readAuditLog, listAuditDates, getRecentAuditEntries, getAutomationAudit } from "./audit-log.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
-import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
+import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, getRulesPath } from "./behavior-rules.js"
+import { listContextSections, readContextSection, writeContextSection, isAllowedContextSectionFile, searchContextSections, routeContextSections } from "./agentlore-init.js"
+import { ensureProjectMemoryReady } from "./project-memory.js"
+import { getRequestClientIp, isExemptApiAuthPath, isTrustedLocalRequest } from "./request-security.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
 import { AGENT_INSTALL_INFO, buildAgentLaunch, isLaunchAgentId, normalizeAgentSettings } from "./agent-launch.js"
 import { buildSessionActivityPayload, shouldSendCrashPush } from "./crash-notification.js"
+import { buildProjectSummaryResponse, buildSessionDigest } from "./project-summary.js"
 import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
 import { log } from "../shared/logger.js"
 import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
@@ -296,6 +304,49 @@ function loadProjectEvents(projectId: string): AgentEvent[] {
   return []
 }
 
+// --- Session agent type persistence ---
+// Tracks which agent type (claude/codex/gemini) each session uses.
+// Without this, recoverable sessions all default to "claude" after daemon restart.
+const sessionAgentTypesPath = join(homedir(), ".agentrune", "session-agents.json")
+const sessionAgentTypes = new Map<string, string>()
+function loadSessionAgentTypes() {
+  try {
+    if (existsSync(sessionAgentTypesPath)) {
+      const raw = JSON.parse(readFileSync(sessionAgentTypesPath, "utf-8"))
+      for (const [k, v] of Object.entries(raw)) {
+        sessionAgentTypes.set(k, v as string)
+      }
+    }
+  } catch { /* ignore */ }
+}
+function saveSessionAgentType(sessionId: string, agentId: string) {
+  sessionAgentTypes.set(sessionId, agentId)
+  try {
+    const obj: Record<string, string> = {}
+    // Only keep recent entries (last 200) to prevent unbounded growth
+    const entries = [...sessionAgentTypes.entries()].slice(-200)
+    for (const [k, v] of entries) obj[k] = v
+    writeFileSync(sessionAgentTypesPath, JSON.stringify(obj))
+  } catch { /* ignore */ }
+}
+loadSessionAgentTypes()
+
+function listPersistedProjectSessionIds(projectId: string): string[] {
+  try {
+    const prefix = projectId.replace(/[^a-zA-Z0-9_-]/g, "_") + "_"
+    return readdirSync(getEventsDir())
+      .filter((file) => file.startsWith(prefix) && file.endsWith(".json"))
+      .map((file) => file.replace(/\.json$/, ""))
+  } catch {
+    return []
+  }
+}
+
+function normalizeSummaryLocale(locale: unknown): "en" | "zh-TW" {
+  const value = typeof locale === "string" ? locale.toLowerCase() : ""
+  return value.startsWith("zh") ? "zh-TW" : "en"
+}
+
 // --- AgentLore heartbeat ---
 
 // Cached sibling daemon info — updated by probeSiblingDaemon, exposed via /api/daemon-info
@@ -354,7 +405,7 @@ function restartSiblingDaemon(port: number) {
     const configDir = join(process.env.HOME || process.env.USERPROFILE || "~", ".agentrune")
     const logFile = join(configDir, "daemon.log")
     const logFd = openSync(logFile, "a")
-    const pidSuffix = port !== 3456 ? `-${port}` : ""
+    const pidSuffix = port !== 3457 ? `-${port}` : ""
     const pidFile = join(configDir, `daemon${pidSuffix}.pid`)
 
     const child = childSpawn(process.execPath, [
@@ -518,7 +569,7 @@ const ALLOWED_ENV_KEYS = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_A
 
 export function createServer(portOverride?: number) {
   const config = loadConfig()
-  const PORT = portOverride || config.port || 3456
+  const PORT = portOverride || config.port || 3457
 
   // Check for CLI updates on startup (non-blocking)
   checkCliUpdate()
@@ -532,12 +583,16 @@ export function createServer(portOverride?: number) {
     res.header("X-Frame-Options", "DENY")
     res.header("X-XSS-Protection", "1; mode=block")
     res.header("Referrer-Policy", "no-referrer")
-    res.header("Content-Security-Policy", "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;")
+    // Electron mode needs 'unsafe-inline' for Vite-built scripts; terminal mode uses nonce-based CSP per-request
+    const csp = appDistPath
+      ? "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"
+      : "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;"
+    res.header("Content-Security-Policy", csp)
     next()
   })
 
   // CORS — allow cross-origin requests (phone app via tunnel)
-  const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost"])
+  const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "http://localhost", "https://agentlore.vercel.app"])
   function isAllowedOrigin(origin: string | undefined): string | false {
     if (!origin) return "http://localhost" // Same-origin requests have no origin — use localhost as default
     if (ALLOWED_ORIGINS.has(origin)) return origin
@@ -545,6 +600,8 @@ export function createServer(portOverride?: number) {
     if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
     // Allow capacitor with any scheme (http or capacitor)
     if (/^(capacitor|http):\/\/localhost$/.test(origin)) return origin
+    // Allow AgentLore preview deployments
+    if (/^https:\/\/agentlore[a-z0-9-]*\.vercel\.app$/.test(origin)) return origin
     return false
   }
   app.use((_req, res, next) => {
@@ -559,8 +616,34 @@ export function createServer(portOverride?: number) {
     next()
   })
 
-  // Serve terminal web UI at root — enables desktop sync terminal
+  // Serve React app — check env var first, then auto-detect app/dist/ relative to project root
+  let appDistPath = process.env.AGENTRUNE_APP_DIST
+  if (!appDistPath) {
+    // Auto-detect: look for app/dist relative to cli/dist (two levels up)
+    const autoPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "app", "dist")
+    if (existsSync(join(autoPath, "index.html"))) appDistPath = autoPath
+  }
+  if (appDistPath && existsSync(appDistPath)) {
+    app.use(express.static(appDistPath, {
+      setHeaders: (res, filePath) => {
+        // HTML must revalidate every time (prevents stale chunk references after rebuild)
+        if (filePath.endsWith(".html")) {
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+        }
+        // Hashed assets (*.js, *.css) can be cached indefinitely
+      },
+    }))
+  }
+
+  // Terminal web UI fallback — serves when no React app dist is configured
   app.get("/", (_req, res) => {
+    // If React app is being served, let it handle "/" via static middleware above
+    if (appDistPath && existsSync(appDistPath)) {
+      // static middleware already sent index.html — this won't be reached normally,
+      // but if it is (e.g. index.html missing), fall through to terminal HTML
+      const indexPath = join(appDistPath, "index.html")
+      if (existsSync(indexPath)) return // already handled by express.static
+    }
     const nonce = randomBytes(16).toString("base64")
     res.header("Content-Security-Policy", `default-src 'self'; script-src 'nonce-${nonce}' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;`)
     res.type("html").send(getTerminalHtml(nonce))
@@ -568,14 +651,6 @@ export function createServer(portOverride?: number) {
 
   // Session tokens for WS auth — Map<token, boundIp>
   const sessionTokens = new Map<string, string>()
-
-  /** Extract real client IP (cloudflared sets Cf-Connecting-Ip) */
-  function getClientIp(req: any): string {
-    return req.headers?.["cf-connecting-ip"]
-      || req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
-      || req.socket?.remoteAddress
-      || ""
-  }
 
   function issueSessionToken(clientIp?: string): string {
     const token = createSessionToken("local", clientIp)
@@ -589,12 +664,10 @@ export function createServer(portOverride?: number) {
   function requireAuth(req: any, res: any, next: any) {
     // Skip auth routes (pairing, device auth, cloud auth, etc.)
     // EXCEPT /api/auth/new-code which must require auth to prevent remote pairing bypass
-    if (req.path.startsWith("/api/auth/") && req.path !== "/api/auth/new-code") return next()
+    if (isExemptApiAuthPath(req.path || req.originalUrl || req.url)) return next()
 
     // Allow local connections without auth (same as WS local bypass)
-    const remoteAddr = req.socket?.remoteAddress || ""
-    const isLocal = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1"
-    if (isLocal) return next()
+    if (isTrustedLocalRequest(req)) return next()
 
     // Check for session token
     const authHeader = req.headers.authorization || ""
@@ -606,7 +679,7 @@ export function createServer(portOverride?: number) {
       return res.status(401).json({ error: "Authentication required" })
     }
 
-    const clientIp = getClientIp(req)
+    const clientIp = getRequestClientIp(req)
     const boundIp = sessionTokens.get(token)
     // Fast path: token in local cache — verify IP binding
     if (boundIp !== undefined) {
@@ -627,7 +700,24 @@ export function createServer(portOverride?: number) {
   app.use("/api", requireAuth)
 
   const server = createHttpServer(app)
-  const wss = new WebSocketServer({ server })
+  const wss = new WebSocketServer({
+    server,
+    maxPayload: 1 * 1024 * 1024,
+    verifyClient: ({ req }: { req: import("node:http").IncomingMessage }) => {
+      const origin = req.headers.origin
+      // Allow connections with no origin (non-browser clients, Electron, CLI tools)
+      if (!origin) return true
+      return isAllowedOrigin(origin) !== false
+    },
+  })
+
+  // Broadcast to ALL connected WS clients (for session lifecycle sync)
+  function broadcastAll(msg: Record<string, unknown>) {
+    const payload = JSON.stringify(msg)
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(payload)
+    }
+  }
 
   // Heartbeat: ping clients every 20s
   const wsAlive = new WeakMap<WebSocket, boolean>()
@@ -693,6 +783,7 @@ export function createServer(portOverride?: number) {
   const eventStore = new EventStore()
   const progressInterceptor = new ProgressInterceptor()
   const sessionLastTitle = new Map<string, string>()  // Track last meaningful event title per session
+  const sessionTaskTitle = new Map<string, string>()  // User-assigned task title (from initialCommand or first message)
 
   // --- Recoverable sessions: scan persisted events on startup ---
   interface RecoverableSession {
@@ -753,11 +844,23 @@ export function createServer(portOverride?: number) {
           } catch { /* skip unreadable */ }
 
           const mapping = sessionClaudeMap.get(entry.sessionId)
+          // Resolve agent type: persisted > infer from event IDs > sessionClaudeMap > "claude"
+          let agentId = sessionAgentTypes.get(entry.sessionId)
+          if (!agentId) {
+            // Infer from event ID prefixes: jw_=claude, cxw_=codex, gw_=gemini
+            try {
+              const events: AgentEvent[] = JSON.parse(readFileSync(join(eventsDir, entry.file), "utf-8"))
+              const sample = events.slice(0, 10)
+              if (sample.some(e => e.id.startsWith("cxw_"))) agentId = "codex"
+              else if (sample.some(e => e.id.startsWith("gw_"))) agentId = "gemini"
+            } catch { /* ignore */ }
+          }
+          if (!agentId) agentId = mapping ? "claude" : "claude"
           result.push({
             id: entry.sessionId,
             projectId,
             projectName: project.name,
-            agentId: "claude",
+            agentId,
             lastEventTitle: lastTitle || mapping?.lastTitle || "",
             lastActivity: entry.mtime,
             status: "recoverable",
@@ -774,15 +877,15 @@ export function createServer(portOverride?: number) {
 
   // --- Session-to-Claude mapping (persisted to disk for resume across daemon restarts) ---
   const sessionMapPath = join(getConfigDir(), "session-map.json")
-  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string }>()
-  let lastResumeTime = 0
+  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string }>()
+  const lastResumeTimeBySession = new Map<string, number>()
 
   function loadSessionMap() {
     try {
       if (existsSync(sessionMapPath)) {
         const raw = JSON.parse(readFileSync(sessionMapPath, "utf-8"))
         for (const [k, v] of Object.entries(raw)) {
-          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string })
+          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string })
         }
       }
     } catch { /* ignore */ }
@@ -794,12 +897,13 @@ export function createServer(portOverride?: number) {
     } catch { /* ignore */ }
   }
 
-  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string) {
+  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string, cwd?: string) {
     const existing = sessionClaudeMap.get(agentruneSessionId)
     sessionClaudeMap.set(agentruneSessionId, {
       claudeSessionId,
       projectId,
       lastTitle: lastTitle || existing?.lastTitle || "",
+      cwd: cwd || existing?.cwd,
     })
     saveSessionMap()
   }
@@ -896,6 +1000,12 @@ export function createServer(portOverride?: number) {
   const projects = loadProjects()
   buildInitialSessionMap()
   cachedRecoverable = scanRecoverableSessions()
+  // Filter out sessions that were explicitly closed by the user
+  const closedCount = cachedRecoverable.filter(r => closedSessionIds.has(r.id)).length
+  cachedRecoverable = cachedRecoverable.filter(r => !closedSessionIds.has(r.id))
+  if (closedCount > 0) {
+    log.info(`[Startup] Excluded ${closedCount} closed sessions from recoverable list`)
+  }
   log.info(`[Startup] Found ${cachedRecoverable.length} recoverable sessions`)
   const cfg = loadConfig()
   const automationManager = new AutomationManager(sessions, projects, (event) => {
@@ -966,7 +1076,7 @@ export function createServer(portOverride?: number) {
         }).catch(() => {})
       }
     }
-  }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS, schedulingEnabled: PORT !== 3456 })
+  }, { vaultPath: cfg.vaultPath, limits: ADMIN_LIMITS, schedulingEnabled: true })
 
   // --- Auth endpoints ---
 
@@ -990,9 +1100,7 @@ export function createServer(portOverride?: number) {
   // Used by sibling daemon and app failback to discover tunnel URLs
   app.get("/api/daemon-info", (req, res) => {
     // Restrict to localhost — this endpoint exposes tunnel URLs and should not be reachable via tunnel
-    const remoteIp = req.socket.remoteAddress || ""
-    const isLocalhost = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1"
-    if (!isLocalhost) {
+    if (!isTrustedLocalRequest(req)) {
       return res.status(403).json({ error: "Forbidden" })
     }
     res.json({
@@ -1001,6 +1109,34 @@ export function createServer(portOverride?: number) {
       tunnelUrl: (globalThis as any).__agentrune_tunnel_url__ || null,
       sibling: cachedSiblingInfo,
     })
+  })
+
+  // --- Social scraper trigger (localhost only, called from AgentLore dashboard) ---
+  app.post("/api/social-scrape", async (req, res) => {
+    if (!isTrustedLocalRequest(req)) {
+      return res.status(403).json({ error: "Forbidden — localhost only" })
+    }
+
+    try {
+      const { execFile } = await import("child_process")
+      const { resolve } = await import("path")
+      const agentlorePath = resolve(process.cwd(), "..", "AgentWiki")
+      const scriptPath = resolve(agentlorePath, "scripts", "social-scraper.ts")
+
+      const child = execFile("npx", ["tsx", scriptPath, "--prod"], {
+        cwd: agentlorePath,
+        env: { ...process.env },
+        timeout: 10 * 60 * 1000, // 10 min max
+      }, (err, stdout, stderr) => {
+        if (err) log.warn(`[social-scrape] finished with error: ${err.message}`)
+        else log.info(`[social-scrape] completed successfully`)
+      })
+
+      res.json({ ok: true, message: "Social scraper started" })
+    } catch (err) {
+      log.error(`[social-scrape] failed to start: ${err}`)
+      res.status(500).json({ error: "Failed to start scraper" })
+    }
   })
 
   app.get("/api/auth/check", (req, res) => {
@@ -1019,7 +1155,7 @@ export function createServer(portOverride?: number) {
   // Pair a new device with the 6-digit code shown in CLI
   app.post("/api/auth/pair", (req, res) => {
     // Rate limit by IP
-    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    const ip = getRequestClientIp(req) || "unknown"
     const now = Date.now()
     const attempt = pairAttempts.get(ip)
     if (attempt && attempt.resetAt > now && attempt.count >= 5) {
@@ -1092,7 +1228,7 @@ export function createServer(portOverride?: number) {
         return res.status(403).json({ error: "Device not registered under this account" })
       }
       // Phone token is valid and owns this device — issue a session token bound to client IP
-      const authClientIp = getClientIp(req)
+      const authClientIp = getRequestClientIp(req)
       const sessionToken = issueSessionToken(authClientIp)
       res.json({ authenticated: true, sessionToken })
     } catch (err: any) {
@@ -1102,7 +1238,7 @@ export function createServer(portOverride?: number) {
   })
 
   // Generate a new pairing code (for adding more devices)
-  app.post("/api/auth/new-code", (_req, res) => {
+  app.post("/api/auth/new-code", requireAuth, (_req, res) => {
     const code = generatePairingCode()
     res.json({ code, expiresIn: 300 })
   })
@@ -1158,17 +1294,50 @@ export function createServer(portOverride?: number) {
     res.json({ ok: true })
   })
 
-  app.get("/api/sessions", (_req, res) => {
+  app.get("/api/sessions", (req, res) => {
+    const locale = normalizeSummaryLocale(req.query.locale)
     const activeIds = new Set<string>()
+    const getSummaryEvents = (sessionId: string) => {
+      const liveEvents = sessionRecentEvents.get(sessionId)
+      if (liveEvents && liveEvents.length > 0) return liveEvents
+      const persistedEvents = loadPersistedEvents(sessionId)
+      if (persistedEvents.length > 0) return persistedEvents
+      return eventStore.getSessionEvents(sessionId)
+    }
     const allSessions = sessions.getAll().map((s) => {
       activeIds.add(s.id)
       // Attach worktree branch info if available
       const wtm = worktreeManagers.get(s.projectId)
       const wt = wtm?.get(s.id)
-      return { ...s, status: "active" as const, worktreeBranch: wt?.branch || null, lastEventTitle: sessionLastTitle.get(s.id) || "" }
+      const liveEvents = getSummaryEvents(s.id)
+      const digest = buildSessionDigest(s.id, s.agentId, liveEvents, locale)
+      const lastEventTitle = sessionLastTitle.get(s.id) || digest.summary || ""
+      return {
+        ...s,
+        status: "active" as const,
+        worktreeBranch: wt?.branch || null,
+        taskTitle: sessionTaskTitle.get(s.id) || undefined,
+        lastEventTitle,
+        summaryText: digest.summary || lastEventTitle,
+        nextAction: digest.nextAction,
+        summaryStatus: digest.status,
+        summaryUpdatedAt: digest.updatedAt,
+      }
     })
     // Append recoverable sessions that are not currently active and not closed during this daemon lifetime
-    const recoverable = cachedRecoverable.filter(r => !activeIds.has(r.id) && !closedSessionIds.has(r.id))
+    const recoverable = cachedRecoverable
+      .filter(r => !activeIds.has(r.id) && !closedSessionIds.has(r.id))
+      .map((session) => {
+        const storedEvents = getSummaryEvents(session.id)
+        const digest = buildSessionDigest(session.id, session.agentId, storedEvents, locale)
+        return {
+          ...session,
+          summaryText: digest.summary || session.lastEventTitle || "",
+          nextAction: digest.nextAction,
+          summaryStatus: digest.status,
+          summaryUpdatedAt: digest.updatedAt || session.lastActivity,
+        }
+      })
     res.json([...allSessions, ...recoverable])
   })
 
@@ -1491,6 +1660,8 @@ export function createServer(portOverride?: number) {
     persistClosedSessions()
     // Also remove from cachedRecoverable in-memory list
     cachedRecoverable = cachedRecoverable.filter(r => r.id !== killId)
+    // Broadcast session_killed to ALL connected clients immediately (don't wait for PTY exit)
+    broadcastAll({ type: "session_killed", sessionId: killId })
     res.json({ ok: true })
   })
 
@@ -1526,7 +1697,7 @@ export function createServer(portOverride?: number) {
       if (client.readyState === WebSocket.OPEN) {
         const list = sessionRecentEvents.get(sid)
         if (list) { list.push(event); persistEvents(sid, list) }
-        client.send(JSON.stringify({ type: "event", event }))
+        client.send(JSON.stringify({ type: "event", sessionId: sid, event }))
         sent++
       }
     }
@@ -1789,6 +1960,127 @@ export function createServer(portOverride?: number) {
       })
     } catch {
       res.status(500).json({ error: "Cannot read directory" })
+    }
+  })
+
+  // --- Project file listing (for @file picker) ---
+
+  app.get("/api/project-files/:projectId", (req, res) => {
+    const project = projects.find((p: any) => p.id === req.params.projectId)
+    if (!project) return res.status(404).json({ error: "Project not found" })
+    try {
+      // Use git ls-files for tracked files, fall back to recursive readdir
+      const raw = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+        cwd: project.cwd, encoding: "utf-8", timeout: 8000,
+      })
+      const files = raw.split("\n").filter(Boolean).slice(0, 2000)
+      res.json({ cwd: project.cwd, files })
+    } catch {
+      // Fallback: shallow listing
+      try {
+        const entries = readdirSync(project.cwd, { withFileTypes: true })
+          .filter(e => !e.name.startsWith(".") && !e.name.startsWith("node_modules"))
+          .map(e => e.isDirectory() ? e.name + "/" : e.name)
+          .sort()
+          .slice(0, 500)
+        res.json({ cwd: project.cwd, files: entries })
+      } catch {
+        res.status(500).json({ error: "Cannot list files" })
+      }
+    }
+  })
+
+  // --- Project settings sync (desktop + mobile) ---
+  app.get("/api/settings/:projectId", (req, res) => {
+    const project = projects.find((p: any) => p.id === req.params.projectId)
+    if (!project) return res.status(404).json({ error: "Project not found" })
+    try {
+      const settingsPath = join(project.cwd, ".agentrune", "settings.json")
+      const raw = readFileSync(settingsPath, "utf-8")
+      res.json(JSON.parse(raw))
+    } catch {
+      res.json({})
+    }
+  })
+
+  app.put("/api/settings/:projectId", (req, res) => {
+    const project = projects.find((p: any) => p.id === req.params.projectId)
+    if (!project) return res.status(404).json({ error: "Project not found" })
+    try {
+      const dir = join(project.cwd, ".agentrune")
+      mkdirSync(dir, { recursive: true })
+      const settingsPath = join(dir, "settings.json")
+      // Merge with existing (don't overwrite routingRules etc.)
+      let existing: any = {}
+      try { existing = JSON.parse(readFileSync(settingsPath, "utf-8")) } catch {}
+      const merged = { ...existing, ...req.body }
+      writeFileSync(settingsPath, JSON.stringify(merged, null, 2))
+      // Broadcast to all clients so they sync
+      broadcastAll({ type: "settings_changed", projectId: req.params.projectId, settings: merged })
+      res.json({ ok: true })
+    } catch (e: any) {
+      res.status(500).json({ error: e.message })
+    }
+  })
+
+  // --- Agent detection ---
+  let cachedAgents: ReturnType<typeof detectAgents> | null = null
+
+  app.get("/api/detect-agents", (_req, res) => {
+    if (!cachedAgents) cachedAgents = detectAgents()
+    res.json(cachedAgents)
+  })
+
+  app.post("/api/detect-agents/refresh", (_req, res) => {
+    cachedAgents = detectAgents()
+    res.json(cachedAgents)
+  })
+
+  // --- Global routing rules ---
+  app.get("/api/routing-rules", (_req, res) => {
+    const cfg = loadConfig()
+    res.json(cfg.routingRules || [])
+  })
+
+  app.put("/api/routing-rules", (req, res) => {
+    const rules: RoutingRule[] = req.body?.rules
+    if (!Array.isArray(rules)) return res.status(400).json({ error: "rules must be array" })
+    const cfg = loadConfig()
+    cfg.routingRules = rules
+    saveConfig(cfg)
+    res.json({ ok: true })
+  })
+
+  // --- Per-project routing rules ---
+  app.get("/api/routing-rules/:projectId", (req, res) => {
+    const project = projects.find((p: any) => p.id === req.params.projectId)
+    if (!project) return res.status(404).json({ error: "Project not found" })
+    try {
+      const settingsPath = join(project.cwd, ".agentrune", "settings.json")
+      const raw = readFileSync(settingsPath, "utf-8")
+      const settings = JSON.parse(raw)
+      res.json(settings.routingRules || [])
+    } catch {
+      res.json([])
+    }
+  })
+
+  app.put("/api/routing-rules/:projectId", (req, res) => {
+    const project = projects.find((p: any) => p.id === req.params.projectId)
+    if (!project) return res.status(404).json({ error: "Project not found" })
+    const rules: RoutingRule[] = req.body?.rules
+    if (!Array.isArray(rules)) return res.status(400).json({ error: "rules must be array" })
+    try {
+      const dir = join(project.cwd, ".agentrune")
+      mkdirSync(dir, { recursive: true })
+      const settingsPath = join(dir, "settings.json")
+      let settings: any = {}
+      try { settings = JSON.parse(readFileSync(settingsPath, "utf-8")) } catch {}
+      settings.routingRules = rules
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+      res.json({ ok: true })
+    } catch (e: any) {
+      res.status(500).json({ error: e.message })
     }
   })
 
@@ -2288,6 +2580,46 @@ export function createServer(portOverride?: number) {
     try { return JSON.parse(readFileSync(filePath, "utf-8")) } catch { return null }
   }
 
+  function listProjectPrds(projectId: string): PrdItem[] {
+    const dir = getPrdDir(projectId)
+    try {
+      return readdirSync(dir)
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => readPrd(join(dir, file)))
+        .filter((prd): prd is PrdItem => !!prd)
+        .sort((a, b) => {
+          if (a.status !== b.status) return a.status === "active" ? -1 : 1
+          if (a.priority !== b.priority) return a.priority < b.priority ? -1 : 1
+          return b.updatedAt - a.updatedAt
+        })
+    } catch {
+      return []
+    }
+  }
+
+  function prdToTaskStore(projectId: string, prd: PrdItem): TaskStore {
+    return {
+      projectId,
+      requirement: prd.goal || prd.title || "",
+      prd: {
+        goal: prd.goal || prd.title || "",
+        decisions: prd.decisions || [],
+        approaches: prd.approaches || [],
+        scope: prd.scope || { included: [], excluded: [] },
+      },
+      tasks: prd.tasks.map((task) => ({
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        priority: task.priority,
+        dependsOn: task.dependsOn,
+      })),
+      createdAt: prd.createdAt,
+      updatedAt: prd.updatedAt,
+    }
+  }
+
   function checkAutoComplete(prd: PrdItem): boolean {
     if (prd.status === "done" || prd.tasks.length === 0) return false
     const allDone = prd.tasks.every(t => t.status === "done" || t.status === "skipped")
@@ -2443,11 +2775,15 @@ export function createServer(portOverride?: number) {
 
   app.get("/api/tasks/:projectId", (req, res) => {
     const path = join(TASKS_DIR, `${req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
-    if (!existsSync(path)) return res.json(null)
+    if (!existsSync(path)) {
+      const latestPrd = listProjectPrds(req.params.projectId)[0]
+      return res.json(latestPrd ? prdToTaskStore(req.params.projectId, latestPrd) : null)
+    }
     try {
       res.json(JSON.parse(readFileSync(path, "utf-8")))
     } catch {
-      res.json(null)
+      const latestPrd = listProjectPrds(req.params.projectId)[0]
+      res.json(latestPrd ? prdToTaskStore(req.params.projectId, latestPrd) : null)
     }
   })
 
@@ -2501,59 +2837,103 @@ export function createServer(portOverride?: number) {
   // --- Project Summary (aggregate events across sessions) ---
 
   app.post("/api/project-summary", express.json(), async (req, res) => {
-    const { projectId } = req.body || {}
+    const { projectId, locale, sessionIds } = req.body || {}
     if (!projectId) {
       return res.status(400).json({ error: "Missing projectId" })
     }
 
     try {
-      // Collect events from all sessions belonging to this project
-      const projectSessions = eventStore.getSessionsByProject(projectId)
-      if (projectSessions.length === 0) {
-        return res.json({ summary: "No sessions found for this project." })
+      const summaryLocale = normalizeSummaryLocale(locale)
+      const sessionMeta = new Map<string, { agentId: string }>()
+      const requestedSessionIds = Array.isArray(sessionIds)
+        ? sessionIds.filter((sessionId): sessionId is string => typeof sessionId === "string" && sessionId.length > 0)
+        : null
+
+      if (requestedSessionIds && requestedSessionIds.length === 0) {
+        return res.json({
+          summary: summaryLocale === "zh-TW"
+            ? "目前還沒有足夠的進度可摘要，先打開最近的 session 看看。"
+            : "There is not enough progress to summarize yet. Open the most recent session first.",
+          recommendedSessionId: null,
+          recommendedReason: "",
+          sessions: [],
+        })
       }
 
-      // Gather recent events from all sessions (newest first, cap at 200)
-      const allEvents: AgentEvent[] = []
-      for (const session of projectSessions) {
-        const events = eventStore.getSessionEvents(session.id)
-        allEvents.push(...events)
-      }
-      allEvents.sort((a, b) => b.timestamp - a.timestamp)
-      const recentEvents = allEvents.slice(0, 200)
-
-      // Build a concatenated text from event titles/details
-      const eventLines = recentEvents.map(e => {
-        const ts = new Date(e.timestamp).toISOString().slice(0, 16)
-        const detail = e.detail ? ` — ${e.detail.slice(0, 120)}` : ""
-        return `[${ts}] ${e.type}: ${e.title}${detail}`
-      })
-      const concatenated = eventLines.join("\n")
-
-      log.info(`[project-summary] sessions=${projectSessions.length} events=${allEvents.length} textLen=${concatenated.length}`)
-
-      // Try LLM-based summary with dedicated summarization prompt
-      try {
-        const { callLlmForSummary } = await import("./llm-summary.js")
-        const summary = await callLlmForSummary(concatenated)
-        log.info(`[project-summary] LLM result: ${summary ? summary.slice(0, 80) : "(null)"}`)
-        if (summary) {
-          return res.json({ summary })
+      for (const session of sessions.getAll()) {
+        if (session.projectId === projectId && (!requestedSessionIds || requestedSessionIds.includes(session.id))) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
         }
-      } catch (llmErr: any) {
-        log.warn(`Project summary LLM fallback: ${llmErr.message}`)
+      }
+      for (const session of cachedRecoverable) {
+        if (
+          session.projectId === projectId
+          && !closedSessionIds.has(session.id)
+          && (!requestedSessionIds || requestedSessionIds.includes(session.id))
+        ) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
+        }
+      }
+      for (const session of eventStore.getSessionsByProject(projectId)) {
+        if (requestedSessionIds && !requestedSessionIds.includes(session.id)) continue
+        if (!sessionMeta.has(session.id)) {
+          sessionMeta.set(session.id, { agentId: session.agentId })
+        }
+      }
+      if (requestedSessionIds) {
+        for (const sessionId of requestedSessionIds) {
+          if (!sessionMeta.has(sessionId)) {
+            sessionMeta.set(sessionId, { agentId: "session" })
+          }
+        }
+      } else {
+        for (const sessionId of listPersistedProjectSessionIds(projectId)) {
+          if (!sessionMeta.has(sessionId)) {
+            sessionMeta.set(sessionId, { agentId: "session" })
+          }
+        }
       }
 
-      // Fallback: return concatenated event summaries
-      res.json({ summary: concatenated })
+      const summarySessions = Array.from(sessionMeta.entries())
+        .map(([sessionId, meta]) => {
+          const liveEvents = sessionRecentEvents.get(sessionId)
+          const persistedEvents = liveEvents && liveEvents.length > 0 ? liveEvents : loadPersistedEvents(sessionId)
+          const events = persistedEvents.length > 0 ? persistedEvents : eventStore.getSessionEvents(sessionId)
+          return {
+            sessionId,
+            agentId: meta.agentId,
+            events,
+          }
+        })
+        .filter((session) => session.events.length > 0)
+
+      if (summarySessions.length === 0) {
+        return res.json({
+          summary: summaryLocale === "zh-TW"
+            ? "目前還沒有足夠的進度可摘要，先打開最近的 session 看看。"
+            : "There is not enough progress to summarize yet. Open the most recent session first.",
+          recommendedSessionId: null,
+          recommendedReason: "",
+          sessions: [],
+        })
+      }
+
+      const response = buildProjectSummaryResponse(summarySessions, summaryLocale)
+      log.info(`[project-summary] project=${projectId} sessions=${summarySessions.length} recommended=${response.recommendedSessionId || "none"}`)
+      res.json(response)
     } catch (e: any) {
       log.error(`Project summary error: ${e.message}`)
       res.status(500).json({ error: "Failed to generate summary" })
     }
   })
+/*
+        const detail = e.detail ? ` — ${e.detail.slice(0, 120)}` : ""
+        return `[${ts}] ${e.type}: ${e.title}${detail}`
+  // --- Progress Report (MCP Gate Keeper ??APP broadcast) ---
 
   // --- Progress Report (MCP Gate Keeper → APP broadcast) ---
 
+*/
   app.post("/api/progress", express.json(), (req, res) => {
     const report = req.body
     if (!report || !report.title || !report.status) {
@@ -2578,9 +2958,9 @@ export function createServer(portOverride?: number) {
     }
 
     // Broadcast to ALL connected clients
-    for (const [client] of clientSessions) {
+    for (const [client, sid] of clientSessions) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "event", event }))
+        client.send(JSON.stringify({ type: "event", sessionId: sid, event }))
       }
     }
 
@@ -2657,21 +3037,96 @@ export function createServer(portOverride?: number) {
 
   // --- Shared Memory (agentlore.md) endpoints ---
 
-  app.get("/api/memory", (_req, res) => {
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.json({ content: "", path: "" }); return }
-    const content = getProjectMemory(cwd)
-    res.json({ content, path: getMemoryPath(cwd) })
+  app.get("/api/memory", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ content: "", path: "" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const content = getProjectMemory(project.cwd)
+    res.json({ content, path: getMemoryPath(project.cwd) })
   })
 
   app.put("/api/memory", express.json(), (req, res) => {
     const { content } = req.body
     if (typeof content !== "string") { res.status(400).json({ error: "Missing content" }); return }
-    const cwd = resolveProjectCwd()
-    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
-    updateProjectMemory(cwd, content)
-    log.info(`[Memory] Updated agentlore.md for project at ${cwd} (${content.length} chars)`)
-    res.json({ ok: true, path: getMemoryPath(cwd) })
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    updateProjectMemory(project.cwd, content)
+    log.info(`[Memory] Updated agentlore.md for project at ${project.cwd} (${content.length} chars)`)
+    res.json({ ok: true, path: getMemoryPath(project.cwd) })
+  })
+
+  // --- Agentlore Context Section endpoints ---
+
+  app.get("/api/memory/sections", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ sections: [] }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    res.json({ sections: listContextSections(project.cwd) })
+  })
+
+  app.get("/api/memory/search", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.json({ results: [] }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const query = typeof req.query.q === "string" ? req.query.q : ""
+    const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 5
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 20) : 5
+    res.json({ results: searchContextSections(project.cwd, query, { limit }) })
+  })
+
+  app.post("/api/memory/route", express.json(), (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const task = typeof req.body?.task === "string" ? req.body.task : ""
+    const changedFiles = Array.isArray(req.body?.changedFiles)
+      ? req.body.changedFiles.filter((file: unknown): file is string => typeof file === "string")
+      : []
+    const maxSectionsRaw = typeof req.body?.maxSections === "number" ? req.body.maxSections : undefined
+    const maxSections = typeof maxSectionsRaw === "number"
+      ? Math.min(Math.max(Math.trunc(maxSectionsRaw), 1), 6)
+      : undefined
+
+    res.json(routeContextSections(project.cwd, { task, changedFiles, maxSections }))
+  })
+
+  app.get("/api/memory/sections/:file", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    if (!isAllowedContextSectionFile(req.params.file)) {
+      res.status(400).json({ error: "Invalid section file name" }); return
+    }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    const content = readContextSection(project.cwd, req.params.file)
+    res.json({ content, file: req.params.file })
+  })
+
+  app.put("/api/memory/sections/:file", express.json(), (req, res) => {
+    const { content } = req.body
+    if (typeof content !== "string") { res.status(400).json({ error: "Missing content" }); return }
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    // Validate file name (only allow known section files)
+    if (!isAllowedContextSectionFile(req.params.file)) {
+      res.status(400).json({ error: "Invalid section file name" }); return
+    }
+    ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    writeContextSection(project.cwd, req.params.file, content)
+    log.info(`[Memory] Updated context section ${req.params.file} (${content.length} chars)`)
+    res.json({ ok: true })
+  })
+
+  app.post("/api/memory/migrate", (req, res) => {
+    const project = resolveProjectFromRequest(req)
+    if (!project) { res.status(400).json({ error: "No active project" }); return }
+    const result = ensureProjectMemoryReady(project.cwd, { projectId: project.id, projectName: project.name, port: PORT })
+    log.info(`[Memory] Migration: ${result.migrated.migrated ? `migrated ${result.migrated.sections.join(", ")}` : "skipped (already structured)"}`)
+    res.json({
+      migrated: result.migrated,
+      initialized: result.initialized,
+      path: getMemoryPath(project.cwd),
+    })
   })
 
   // --- Standards endpoints ---
@@ -2944,6 +3399,11 @@ export function createServer(portOverride?: number) {
 
   // --- Automation endpoints ---
 
+  // Cross-project: list all automations (desktop schedules view)
+  app.get("/api/automations", (req, res) => {
+    res.json(automationManager.list())
+  })
+
   app.get("/api/automations/:projectId", (req, res) => {
     res.json(automationManager.list(req.params.projectId))
   })
@@ -3050,7 +3510,7 @@ export function createServer(portOverride?: number) {
   }
 
   function auditRateLimiter(req: any, res: any, next: any) {
-    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    const ip = getRequestClientIp(req) || "unknown"
     if (!checkAuditRate(ip)) {
       return res.status(429).json({ error: "Too many requests", retryAfter: 60 })
     }
@@ -3130,11 +3590,14 @@ export function createServer(portOverride?: number) {
 
   app.post("/api/automations/:projectId/:id/reauth", express.json(), async (req, res) => {
     try {
-      const { action, noExpiry } = req.body
+      const { action, noExpiry, reviewNote } = req.body
       if (!action || !["approve", "deny"].includes(action)) {
         return res.status(400).json({ error: "action must be 'approve' or 'deny'" })
       }
-      const result = await automationManager.resolveReauth(req.params.id, action, { noExpiry: noExpiry === true })
+      const result = await automationManager.resolveReauth(req.params.id, action, {
+        noExpiry: noExpiry === true,
+        reviewNote: typeof reviewNote === "string" ? reviewNote : undefined,
+      })
       if (!result.success) return res.status(404).json({ error: result.message })
       res.json(result)
     } catch (err) {
@@ -3211,9 +3674,31 @@ export function createServer(portOverride?: number) {
     return null
   }
 
+  function resolveProjectFromRequest(req: { query?: Record<string, unknown>; body?: Record<string, unknown> }): Project | null {
+    const bodyProjectId = typeof req.body?.projectId === "string" ? req.body.projectId : ""
+    const queryProjectId = typeof req.query?.projectId === "string" ? req.query.projectId : ""
+    const projectId = bodyProjectId || queryProjectId
+    if (projectId) {
+      return projects.find((candidate) => candidate.id === projectId) || null
+    }
+
+    for (const [, sid] of clientSessions) {
+      const s = sessions.get(sid)
+      if (s) return s.project
+    }
+
+    return projects[0] || null
+  }
+
+  function resolveProjectCwdFromRequest(req: { query?: Record<string, unknown>; body?: Record<string, unknown> }): string | null {
+    return resolveProjectFromRequest(req)?.cwd || null
+  }
+
   // --- WebSocket ---
 
   const clientSessions = new Map<WebSocket, string>()
+  /** Desktop multi-session: tracks ALL sessions a client has attached to */
+  const clientAttachedSessions = new Map<WebSocket, Set<string>>()
   const clientEngines = new Map<WebSocket, ParseEngine>()
   const clientEventSessions = new Map<WebSocket, string>()
 
@@ -3226,6 +3711,95 @@ export function createServer(portOverride?: number) {
   const sessionEngines = new Map<string, ParseEngine>()
   const sessionRecentEvents = new Map<string, AgentEvent[]>()
   const sessionJsonlWatchers = new Map<string, { stop(): void; rescan?(): void; buildResumeOptions?(): AgentEvent | null; [key: string]: any }>()
+  // Global sandbox monitors for regular sessions (not automations — those have their own)
+  const sessionSandboxMonitors = new Map<string, SkillMonitor>()
+
+  // Common callback factory for JSONL watchers: store events, send to clients, broadcast activity.
+  // Defined at module scope so both "attach" and "request_events" handlers can use it.
+  const makeWatcherCallback = (sid: string) => (events: AgentEvent[]) => {
+    const filtered = events.filter(e => {
+      if (e.type === "user_message") return false
+      // Filter ParseEngine "X responded" (contains raw PTY garbage, JSONL watcher has clean version)
+      if (e.type === "info" && /^(?:Claude|Codex|Cursor|Gemini|Aider) responded/i.test(e.title || "")) return false
+      return true
+    })
+    if (filtered.length === 0) return
+
+    log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
+    lastJsonlActivity.set(sid, Date.now())
+    for (const e of filtered) {
+      if (e.type === "command_run" && e.status === "in_progress") {
+        pendingToolUse.set(sid, Date.now())
+      } else if (e.type === "command_run" && (e.status === "completed" || e.status === "failed")) {
+        pendingToolUse.delete(sid)
+      } else if (e.type !== "command_run") {
+        pendingToolUse.delete(sid)
+      }
+    }
+    if (crashedSessions.has(sid)) {
+      log.info(`[watcher-cb] Agent alive — clearing crash state for ${sid.slice(0, 8)}`)
+      crashedSessions.delete(sid)
+    }
+    crashPending.delete(sid)
+    crashRestartCount.delete(sid)
+    crashPushCooldown.delete(sid)
+
+    const list = sessionRecentEvents.get(sid)
+    if (list) {
+      list.push(...filtered)
+      // Remove token_usage from stored list — they take 60%+ space but add no value to events view
+      const meaningful = list.filter(e => e.type !== "token_usage")
+      if (meaningful.length > 500) meaningful.splice(0, meaningful.length - 500)
+      // Replace in-place
+      list.length = 0
+      list.push(...meaningful)
+      persistEvents(sid, list)
+    }
+    const serializedEvents = filtered.map(event => JSON.stringify({ type: "event", sessionId: sid, event }))
+    let sentCount = 0
+    for (const [client, attachedSet] of clientAttachedSessions) {
+      if (attachedSet.has(sid) && client.readyState === WebSocket.OPEN) {
+        sentCount++
+        for (const msg of serializedEvents) {
+          client.send(msg)
+        }
+        const eventSessionId = clientEventSessions.get(client)
+        if (eventSessionId) {
+          for (const event of filtered) {
+            eventStore.addEvent(eventSessionId, event)
+          }
+        }
+      }
+    }
+    log.info(`[watcher-cb] sent to ${sentCount} clients (total clientAttachedSessions=${clientAttachedSessions.size})`)
+    if (filtered.length > 0) {
+      const lastEvent = filtered[filtered.length - 1]
+      for (let i = filtered.length - 1; i >= 0; i--) {
+        if (filtered[i].title && isMeaningfulTitle(filtered[i].title)) {
+          sessionLastTitle.set(sid, filtered[i].title)
+          const existing = sessionClaudeMap.get(sid)
+          if (existing) { existing.lastTitle = filtered[i].title; saveSessionMap() }
+          break
+        }
+      }
+      const activityMsg = JSON.stringify(buildSessionActivityPayload(sid, lastEvent))
+      const sentClients = new Set<WebSocket>()
+      for (const [client] of clientSessions) {
+        if (client.readyState === WebSocket.OPEN) {
+          sentClients.add(client)
+          client.send(activityMsg)
+        }
+      }
+      for (const [client] of clientAttachedSessions) {
+        if (!sentClients.has(client) && client.readyState === WebSocket.OPEN) {
+          client.send(activityMsg)
+        }
+      }
+    }
+    progressInterceptor.onData(sid, filtered.some(e =>
+      e.type === "file_edit" || e.type === "file_create" || e.type === "command_run"
+    ))
+  }
 
   // Per-session timer for delayed Resume Session detection
   const resumeTimers = new Map<string, NodeJS.Timeout>()
@@ -3253,7 +3827,8 @@ export function createServer(portOverride?: number) {
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
-    log.info(`WS connection from ${req.socket.remoteAddress} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
+    const requestClientIp = getRequestClientIp(req) || req.socket.remoteAddress || "unknown"
+    log.info(`WS connection from ${requestClientIp} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
 
     // Push CLI update notification to app
     if (updateInfo) {
@@ -3261,13 +3836,11 @@ export function createServer(portOverride?: number) {
     }
 
     // Auth check for WebSocket
-    // Session tokens are persisted to disk, so they survive daemon restarts.
-    // If a token is truly expired (>24h), issue a fresh one instead of
-    // rejecting — this prevents reconnect loops while keeping auth valid.
+    // Localhost connections bypass auth (consistent with HTTP requireAuth middleware).
+    // Remote connections require a valid session token.
     const url = new URL(req.url || "/", "http://localhost")
     const token = url.searchParams.get("token") || ""
-    const isLocal = url.searchParams.get("local") === "1" &&
-      (req.socket.remoteAddress === "127.0.0.1" || req.socket.remoteAddress === "::1" || req.socket.remoteAddress === "::ffff:127.0.0.1")
+    const isLocal = isTrustedLocalRequest(req)
     if (!isLocal) {
       // Reject connections with no token or invalid token
       if (!token) {
@@ -3275,7 +3848,7 @@ export function createServer(portOverride?: number) {
         ws.close()
         return
       }
-      const wsClientIp = getClientIp(req)
+      const wsClientIp = getRequestClientIp(req)
       // Check local cache with IP binding
       const wsBoundIp = sessionTokens.get(token)
       if (wsBoundIp !== undefined) {
@@ -3308,6 +3881,10 @@ export function createServer(portOverride?: number) {
     const pendingGates = automationManager.listPendingPhaseGates()
     for (const gate of pendingGates) {
       ws.send(JSON.stringify({ type: "phase_gate_waiting", gate }))
+    }
+    const pendingReauths = automationManager.listPendingReauths()
+    for (const reauth of pendingReauths) {
+      ws.send(JSON.stringify({ type: "reauth_required", ...reauth }))
     }
 
     ws.on("message", (raw) => {
@@ -3346,8 +3923,9 @@ export function createServer(portOverride?: number) {
         }
         case "attach": {
           const projectId = msg.projectId as string
+          const initialCommand = (msg.initialCommand as string) || ""
           const project = projects.find((p) => p.id === projectId)
-          log.info(`[attach] projectId=${projectId} found=${!!project} agentId=${msg.agentId} sessionId=${msg.sessionId || "new"}`)
+          log.info(`[attach] projectId=${projectId} found=${!!project} agentId=${msg.agentId} sessionId=${msg.sessionId || "new"}${initialCommand ? ` initialCommand="${initialCommand.slice(0, 60)}..."` : ""}`)
           if (!project) {
             ws.send(JSON.stringify({ type: "error", message: "Project not found" }))
             return
@@ -3372,8 +3950,16 @@ export function createServer(portOverride?: number) {
           // Falls back to project cwd if git worktree creation fails (e.g. not a git repo)
           let sessionProject = project
           let worktreeBranch: string | null = null
-          if (!requestedSessionId) {
+          const isNewSession = !requestedSessionId || !sessions.get(requestedSessionId)
+          log.info(`[attach] isNewSession=${isNewSession} requestedSessionId=${requestedSessionId || "none"} existsInSessions=${!!sessions.get(requestedSessionId || "")}`)
+          if (isNewSession) {
+            // New session (no prior PTY) — create worktree for isolation
             try {
+              ensureProjectMemoryReady(project.cwd, {
+                projectId: project.id,
+                projectName: project.name,
+                port: PORT,
+              })
               let wtm = worktreeManagers.get(project.id)
               if (!wtm) {
                 wtm = new WorktreeManager(project.cwd)
@@ -3386,7 +3972,7 @@ export function createServer(portOverride?: number) {
             } catch (err) {
               log.warn(`Worktree creation failed, using project cwd: ${err instanceof Error ? err.message : "unknown"}`)
             }
-          } else {
+          } else if (requestedSessionId) {
             // Resumed session — check if worktree exists and restore CWD
             const wtm = worktreeManagers.get(project.id)
             const existingWt = wtm?.get(requestedSessionId)
@@ -3410,102 +3996,23 @@ export function createServer(portOverride?: number) {
             : {}
           const session = sessions.create(sessionProject, agentId, newSessionId, vaultKeys)
           clientSessions.set(ws, session.id)
+          // Track for multi-session desktop support
+          if (!clientAttachedSessions.has(ws)) clientAttachedSessions.set(ws, new Set())
+          clientAttachedSessions.get(ws)!.add(session.id)
           progressInterceptor.trackSession(session.id)
 
           // Reuse ParseEngine per PTY session (survives WS reconnects)
           // ParseEngine now only used for TUI detection (resume menu)
           let engine = sessionEngines.get(session.id)
           if (!engine) {
-            engine = new ParseEngine(agentId, projectId, sessionProject.cwd)
+            const sessionLocale = normalizedSettings?.locale || ""
+            engine = new ParseEngine(agentId, projectId, sessionProject.cwd, sessionLocale)
             sessionEngines.set(session.id, engine)
             sessionRecentEvents.set(session.id, [])
           }
           clientEngines.set(ws, engine)
 
           // --- Structured session watchers (replace ANSI parsing for supported agents) ---
-          // Common callback: store events, send to clients, broadcast activity
-          const makeWatcherCallback = (sid: string) => (events: AgentEvent[]) => {
-            // Filter out user_message events — APP client creates its own usr_* events
-            // (keeping them in storage would cause duplicates on replay)
-            const filtered = events.filter(e => e.type !== "user_message")
-            if (filtered.length === 0) return
-
-            log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
-            // Mark agent as alive
-            lastJsonlActivity.set(sid, Date.now())
-            // Track pending commands — if a command_run is in_progress, agent is running a tool
-            for (const e of filtered) {
-              if (e.type === "command_run" && e.status === "in_progress") {
-                pendingToolUse.set(sid, Date.now())
-              } else if (e.type === "command_run" && (e.status === "completed" || e.status === "failed")) {
-                pendingToolUse.delete(sid)
-              } else if (e.type !== "command_run") {
-                // Any non-command event means agent is processing (response, file_edit, etc.)
-                pendingToolUse.delete(sid)
-              }
-            }
-            // Agent is alive — clear all crash state
-            if (crashedSessions.has(sid)) {
-              log.info(`[watcher-cb] Agent alive — clearing crash state for ${sid.slice(0, 8)}`)
-              crashedSessions.delete(sid)
-            }
-            crashPending.delete(sid)
-            crashRestartCount.delete(sid)
-            crashPushCooldown.delete(sid)
-            // Keep restartGrace active (will expire naturally)
-
-            const list = sessionRecentEvents.get(sid)
-            if (list) {
-              list.push(...filtered)
-              if (list.length > 200) list.splice(0, list.length - 200)
-              persistEvents(sid, list)
-            }
-            // Pre-serialize events once for all clients
-            const serializedEvents = filtered.map(event => JSON.stringify({ type: "event", event }))
-            let sentCount = 0
-            for (const [client, csid] of clientSessions) {
-              if (csid === sid && client.readyState === WebSocket.OPEN) {
-                sentCount++
-                for (const msg of serializedEvents) {
-                  client.send(msg)
-                }
-                const eventSessionId = clientEventSessions.get(client)
-                if (eventSessionId) {
-                  for (const event of filtered) {
-                    eventStore.addEvent(eventSessionId, event)
-                  }
-                }
-              }
-            }
-            log.info(`[watcher-cb] sent to ${sentCount} clients (total clientSessions=${clientSessions.size})`)
-            if (filtered.length > 0) {
-              const lastEvent = filtered[filtered.length - 1]
-              // Scan entire batch for last meaningful title (not just final event)
-              for (let i = filtered.length - 1; i >= 0; i--) {
-                if (filtered[i].title && isMeaningfulTitle(filtered[i].title)) {
-                  sessionLastTitle.set(sid, filtered[i].title)
-                  // Update session map title for recovery
-                  const existing = sessionClaudeMap.get(sid)
-                  if (existing) { existing.lastTitle = filtered[i].title; saveSessionMap() }
-                  break
-                }
-              }
-              const activityMsg = JSON.stringify(buildSessionActivityPayload(sid, lastEvent))
-              // Only broadcast activity to clients that are connected (scoped)
-              for (const [client, csid] of clientSessions) {
-                if (client.readyState === WebSocket.OPEN) {
-                  client.send(activityMsg)
-                }
-              }
-            }
-
-            // Track activity for progress interception
-            const hasToolEvents = filtered.some(e =>
-              e.type === "file_edit" || e.type === "file_create" || e.type === "command_run"
-            )
-            progressInterceptor.onData(sid, hasToolEvents)
-          }
-
           // Each session gets its own watcher. claimedJsonlFiles prevents two watchers
           // from watching the same file. No need to kill other sessions' watchers.
 
@@ -3519,9 +4026,10 @@ export function createServer(portOverride?: number) {
               // Try to extract Claude session ID from watcher's JSONL path
               if (agentId === "claude" && watcher && (watcher as any).jsonlPath) {
                 const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
-                if (jsonlFile && !sessionClaudeMap.has(sid)) {
-                  updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid))
-                  log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile}`)
+                const existingMapping = sessionClaudeMap.get(sid)
+                if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
+                  updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid), sessionProject.cwd)
+                  log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile} cwd=${sessionProject.cwd}`)
                 }
               }
             }
@@ -3530,11 +4038,14 @@ export function createServer(portOverride?: number) {
             // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
             const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              // Skip JSONL replay for recoverable/resumed sessions — persisted events
-              // will be replayed separately (avoids sending events twice + faster attach).
-              const skipReplay = !!requestedSessionId
-              watcher = new JsonlWatcher(sessionProject.cwd, cb, claudeSessionId, skipReplay)
-              log.info(`[attach] JsonlWatcher created for cwd=${sessionProject.cwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
+              // For resumed sessions: don't skip replay — watcher needs to find and lock onto the JSONL file
+              // For new sessions with requestedSessionId (WS reconnect): skip replay to avoid duplicates
+              const skipReplay = !!requestedSessionId && alreadyExisted
+              // Use persisted CWD first (survives daemon restart), fallback to session project CWD
+              const persistedCwd = sessionClaudeMap.get(session.id)?.cwd
+              const watcherCwd = persistedCwd || sessionProject.cwd
+              watcher = new JsonlWatcher(watcherCwd, cb, claudeSessionId, skipReplay)
+              log.info(`[attach] JsonlWatcher created for cwd=${watcherCwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
               watcher = new CodexWatcher(sessionProject.cwd, cb)
             } else if (agentId === "gemini") {
@@ -3574,7 +4085,7 @@ export function createServer(portOverride?: number) {
           // Send capped scrollback (~80KB) instead of full history
           const scrollback = sessions.getRecentScrollback(session.id)
           if (scrollback) {
-            ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
+            ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id, data: scrollback }))
           }
 
           // Replay stored events for any session the user is opening (live or recoverable).
@@ -3602,7 +4113,7 @@ export function createServer(portOverride?: number) {
                 return i > lastToolIdx
               })
               if (replayEvents.length > 0) {
-                ws.send(JSON.stringify({ type: "events_replay", events: replayEvents }))
+                ws.send(JSON.stringify({ type: "events_replay", sessionId: session.id, events: replayEvents }))
               }
             } else {
               // Fallback: no persisted events found (daemon restart + debounce didn't flush).
@@ -3621,6 +4132,17 @@ export function createServer(portOverride?: number) {
           ws.send(JSON.stringify({ type: "attached", sessionId: session.id, projectName: project.name, agentId, resumed: alreadyExisted, worktreeBranch }))
           captureCliEvent("cli_session_created", { agentId, projectId, resumed: alreadyExisted })
 
+          // Broadcast session lifecycle to ALL clients (desktop + mobile sync)
+          if (!alreadyExisted) {
+            broadcastAll({
+              type: "session_created",
+              sessionId: session.id,
+              projectId,
+              agentId,
+              worktreeBranch,
+            })
+          }
+
           // For recoverable sessions (daemon restarted, PTY gone but events persisted):
           // auto-resume only when the client marks this attach as a real session resume.
           // The app flips this on after the first successful attach so reconnects can
@@ -3629,16 +4151,27 @@ export function createServer(portOverride?: number) {
           // Store launch settings for crash recovery (recoverable sessions too)
           if (agentId !== "terminal") {
             sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
+            saveSessionAgentType(session.id, agentId)
+            // Persist CWD so JSONL watcher can find the right file after daemon restart
+            const existingMapping = sessionClaudeMap.get(session.id)
+            if (existingMapping) {
+              existingMapping.cwd = sessionProject.cwd
+              saveSessionMap()
+            } else {
+              sessionClaudeMap.set(session.id, { claudeSessionId: "", projectId: sessionProject.id, lastTitle: "", cwd: sessionProject.cwd })
+              saveSessionMap()
+            }
           }
 
           const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
           if (isRecoverable) {
             const now = Date.now()
             const RESUME_COOLDOWN_MS = 5_000
+            const lastResumeTime = lastResumeTimeBySession.get(session.id) || 0
             if (now - lastResumeTime < RESUME_COOLDOWN_MS) {
               log.warn(`[attach] Resume cooldown: skipped ${session.id} (${Math.round((RESUME_COOLDOWN_MS - (now - lastResumeTime)) / 1000)}s remaining)`)
             } else {
-              lastResumeTime = now
+              lastResumeTimeBySession.set(session.id, now)
               // Suppress crash detection while agent boots after resume
               restartGrace.set(session.id, now)
               crashPending.delete(session.id)
@@ -3666,8 +4199,9 @@ export function createServer(portOverride?: number) {
           if (alreadyExisted && crashedSessions.has(session.id) && agentId !== "terminal" && !restartGrace.has(session.id)) {
             const now = Date.now()
             const RESUME_COOLDOWN_MS = 5_000
+            const lastResumeTime = lastResumeTimeBySession.get(session.id) || 0
             if (now - lastResumeTime >= RESUME_COOLDOWN_MS) {
-              lastResumeTime = now
+              lastResumeTimeBySession.set(session.id, now)
               crashedSessions.delete(session.id)
               crashPending.delete(session.id)
               restartGrace.set(session.id, now)
@@ -3700,17 +4234,20 @@ export function createServer(portOverride?: number) {
                   status: "in_progress",
                   title: ct("crash.autoResuming", autoLoc, { agent: restartAgentId }),
                 }
-                ws.send(JSON.stringify({ type: "event", event: restartEvent }))
+                ws.send(JSON.stringify({ type: "event", sessionId: session.id, event: restartEvent }))
               }
             } else {
               log.warn(`[CRASH-AUTO-RESUME] Cooldown: skipped ${session.id.slice(0, 8)}`)
             }
           }
 
+          // Determine if this is a resumed session (affects auto-start, init injection, etc.)
+          const isResumedSession = !!(requestedSessionId && !alreadyExisted && (agentId as string) !== "terminal" && msg.isAgentResume)
+
           // For new sessions: auto-install agent if not found, then inject rules prompt.
           // Skip injection when resuming (requestedSessionId means user chose to resume an existing session —
           // the agent already has context from the previous conversation).
-          if (!alreadyExisted && !requestedSessionId && agentId !== "terminal") {
+          if (isNewSession && agentId !== "terminal") {
             // --- Auto-install agent binary if missing ---
             const installInfo = AGENT_INSTALL_INFO[agentId]
             if (installInfo) {
@@ -3736,21 +4273,67 @@ export function createServer(portOverride?: number) {
             }
 
             // --- Auto-start agent with settings from frontend ---
-            // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
-            // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
-            // Store launch settings for crash recovery / restart
-            sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
-            const launch = buildAgentLaunch(agentId, normalizedSettings, { projectId: sessionProject.id, port: PORT })
-            if (launch.command) {
-              setTimeout(() => {
-                sessions.write(session.id, `${launch.command}\r`)
-                log.info(`[attach] Agent auto-start: ${launch.command}`)
-              }, 1500)
+            // Skip if this is a resume (isRecoverable already launched the agent with --continue/--resume)
+            if (!isResumedSession) {
+              // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
+              // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
+              // Store launch settings for crash recovery / restart
+              sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
+              saveSessionAgentType(session.id, agentId)
+              const launch = buildAgentLaunch(agentId, normalizedSettings, { projectId: sessionProject.id, port: PORT })
+              if (launch.command) {
+                setTimeout(() => {
+                  sessions.write(session.id, `${launch.command}\r`)
+                  log.info(`[attach] Agent auto-start: ${launch.command}`)
+                }, 1500)
+              }
             }
 
-            // --- Ensure rules.md exists (+ PRD API section if needed), then inject ---
-            ensureRulesFile(sessionProject.cwd)
-            ensurePrdApiSection(sessionProject.cwd, PORT, sessionProject.id)
+            // --- Global sandbox: attach SkillMonitor if sandboxLevel is not "none" ---
+            {
+              const globalSandbox = (normalizedSettings as any).sandboxLevel as SandboxLevel | undefined
+              if (globalSandbox && globalSandbox !== "none") {
+                const manifest = createManifestForLevel(`session_${session.id}`, globalSandbox)
+                const authorityMap = createFromTrustProfile({
+                  sessionId: session.id,
+                  sandboxLevel: globalSandbox,
+                  requirePlanReview: (normalizedSettings as any).requirePlanReview === true,
+                  requireMergeApproval: (normalizedSettings as any).requireMergeApproval === true,
+                })
+                const monitor = new SkillMonitor({
+                  manifest,
+                  projectCwd: sessionProject.cwd,
+                  autoHalt: globalSandbox === "strict", // Auto-halt in strict mode, notify-only otherwise
+                  authorityMap,
+                  onViolation: (violation) => {
+                    log.warn(`[sandbox] Session ${session.id}: ${violation.type} violation — ${violation.description}`)
+                  },
+                  onReauthRequired: (violation, permissionKey) => {
+                    log.warn(`[sandbox] Session ${session.id}: reauth required for ${permissionKey}`)
+                    // Notify all connected clients
+                    for (const [client, csid] of clientSessions) {
+                      if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                          type: "sandbox_violation",
+                          sessionId: session.id,
+                          violation: { type: violation.type, description: violation.description },
+                          permissionKey,
+                        }))
+                      }
+                    }
+                  },
+                })
+                sessionSandboxMonitors.set(session.id, monitor)
+                log.info(`[sandbox] Monitor attached to session ${session.id} (level: ${globalSandbox})`)
+              }
+            }
+
+            // --- Ensure rules.md + agentlore context structure exists ---
+            ensureProjectMemoryReady(sessionProject.cwd, {
+              projectId: sessionProject.id,
+              projectName: sessionProject.name,
+              port: PORT,
+            })
             const rulesPath = getRulesPath(sessionProject.cwd)
             const memoryPath = getMemoryPath(sessionProject.cwd)
             const hasRules = existsSync(rulesPath)
@@ -3759,7 +4342,8 @@ export function createServer(portOverride?: number) {
             // Standards injection is opt-in — users can run validation manually from the Standards page.
             // Standards prompt file can be generated via POST /api/standards/generate-prompt if needed.
 
-            {
+            // Skip rules/memory injection for resumed sessions — agent already has full context
+            if (!isResumedSession) {
               let attempts = 0
               const pollAgent = setInterval(() => {
                 attempts++
@@ -3781,7 +4365,8 @@ export function createServer(portOverride?: number) {
                   return
                 }
 
-                // Build short instruction pointing agent to rules + memory files
+                // Build short instruction pointing agent to rules + memory files.
+                /*
                 const parts: string[] = []
                 if (hasRules) parts.push("讀取 .agentrune/rules.md（行為規範）")
                 if (hasMemory) {
@@ -3789,7 +4374,7 @@ export function createServer(portOverride?: number) {
                 } else {
                   parts.push("建立 .agentrune/agentlore.md（專案記憶），先 mkdir -p .agentrune，再掃描專案產生初始內容")
                 }
-                const instruction = `請先${parts.join("，然後")}，完成後再開始工作。`
+                const instruction = `請先${parts.join("，然後")}，完成後直接等待用戶指令，不要主動提問、不要展示選單或選項。`
 
                 // Notify APP: initialization started (lock input)
                 const initEvent: AgentEvent = {
@@ -3802,9 +4387,31 @@ export function createServer(portOverride?: number) {
                     ? `正在載入 ${[hasRules && "rules.md", hasMemory && "agentlore.md"].filter(Boolean).join(", ")}`
                     : "正在建立 agentlore.md…",
                 }
+                */
+                const instructionParts: string[] = []
+                if (hasRules) instructionParts.push("Read .agentrune/rules.md first and follow it.")
+                if (hasMemory) {
+                  instructionParts.push("Then read .agentrune/agentlore.md as the project memory index.")
+                } else {
+                  instructionParts.push("Create .agentrune/agentlore.md as a short project memory index if it is missing.")
+                }
+                instructionParts.push("Do not read every memory section by default. Use the index to open only the sections relevant to this task.")
+                instructionParts.push("If the right section is unclear, search the structured memory sections and read the best matches.")
+                instructionParts.push("When you learn something stable, update the matching memory section instead of bloating the index.")
+                const instruction = instructionParts.join(" ")
+
+                const initTargets = [hasRules && "rules.md", hasMemory && "agentlore.md"].filter(Boolean).join(", ")
+                const initEvent: AgentEvent = {
+                  id: `init_${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: "info",
+                  status: "in_progress",
+                  title: "Initializing project memory",
+                  detail: initTargets ? `Preparing ${initTargets}` : "Creating agentlore.md",
+                }
                 for (const [client, csid] of clientSessions) {
                   if (csid === session.id && client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({ type: "event", event: initEvent }))
+                    client.send(JSON.stringify({ type: "event", sessionId: session.id, event: initEvent }))
                     client.send(JSON.stringify({ type: "init_status", phase: "injecting" }))
                   }
                 }
@@ -3818,16 +4425,31 @@ export function createServer(portOverride?: number) {
                 }, 150)
                 log.info(`Rules instruction injected for session ${session.id} (rules: ${hasRules}, memory: ${hasMemory})`)
 
-                // Poll for agent to finish processing injection (prompt reappears)
+                // Poll for agent to finish processing injection
+                // Strategy: detect when scrollback stops growing (agent returned to prompt)
                 let doneAttempts = 0
+                let lastScrollbackLen = 0
+                let stableCount = 0  // consecutive polls with no scrollback growth
+                const STABLE_THRESHOLD = 4  // 4 consecutive stable polls (2 seconds) = done
                 const pollDone = setInterval(() => {
                   doneAttempts++
                   const sb2 = sessions.getScrollback(session.id) || ""
-                  // Check if agent returned to prompt after injection
-                  const lines = sb2.split("\n").filter(l => l.trim())
+                  const currentLen = sb2.length
+                  if (currentLen > lastScrollbackLen) {
+                    // Scrollback is still growing — agent is working
+                    lastScrollbackLen = currentLen
+                    stableCount = 0
+                  } else {
+                    stableCount++
+                  }
+                  // Also check for prompt as a fast-path
+                  const stripped = sb2.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+                  const lines = stripped.split("\n").filter(l => l.trim())
                   const lastLine = lines[lines.length - 1] || ""
                   const backToPrompt = /[\u276f\u203a>$%#]\s*$/.test(lastLine)
-                  if (!backToPrompt && doneAttempts < 300) return // poll every 500ms, max 2.5min
+                  // Done when: prompt detected OR output stabilized for STABLE_THRESHOLD polls
+                  const isDone = backToPrompt || (stableCount >= STABLE_THRESHOLD && doneAttempts > 10)
+                  if (!isDone && doneAttempts < 300) return // poll every 500ms, max 2.5min
                   clearInterval(pollDone)
 
                   // Send init_done event
@@ -3840,7 +4462,7 @@ export function createServer(portOverride?: number) {
                   }
                   for (const [client, csid] of clientSessions) {
                     if (csid === session.id && client.readyState === WebSocket.OPEN) {
-                      client.send(JSON.stringify({ type: "event", event: doneEvent }))
+                      client.send(JSON.stringify({ type: "event", sessionId: session.id, event: doneEvent }))
                       client.send(JSON.stringify({ type: "init_status", phase: "done" }))
                     }
                   }
@@ -3852,8 +4474,42 @@ export function createServer(portOverride?: number) {
                     list2.push(doneEvent)
                   }
                   log.info(`Init done for session ${session.id} (after ${doneAttempts * 500}ms)`)
+
+                  // Forward initial command if one was queued (from desktop "no session" flow)
+                  if (initialCommand) {
+                    // Extract short task title from command for session card display
+                    const chainMatch = initialCommand.match(/\[AgentLore Skill Chain:\s*(\S+)/i)
+                    const taskTitle = chainMatch
+                      ? `/${chainMatch[1]}`
+                      : initialCommand.replace(/\n.*/s, "").slice(0, 40).trim()
+                    if (taskTitle) {
+                      sessionTaskTitle.set(session.id, taskTitle)
+                      // Broadcast to clients so SessionCard updates
+                      for (const [client, csid] of clientSessions) {
+                        if (csid === session.id && client.readyState === WebSocket.OPEN) {
+                          client.send(JSON.stringify({ type: "session_task_title", sessionId: session.id, taskTitle }))
+                        }
+                      }
+                    }
+                    setTimeout(() => {
+                      // Use bracket paste mode so Claude Code treats multi-line text as a single paste
+                      sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
+                      setTimeout(() => sessions.write(session.id, "\r"), 300)
+                      log.info(`[attach] Forwarded initialCommand to session ${session.id}: "${initialCommand.slice(0, 80)}"`)
+                    }, 500)
+                  }
                 }, 500)
               }, 200)
+            } else {
+              log.info(`[attach] Skipping rules/memory injection for resumed session ${session.id}`)
+              // For resumed sessions, still forward initialCommand if present
+              if (initialCommand) {
+                setTimeout(() => {
+                  sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
+                  setTimeout(() => sessions.write(session.id, "\r"), 300)
+                  log.info(`[attach] Forwarded initialCommand to resumed session ${session.id}: "${initialCommand.slice(0, 80)}"`)
+                }, 2000)
+              }
             }
           }
           break
@@ -3901,7 +4557,7 @@ export function createServer(portOverride?: number) {
                     status: "in_progress",
                     title: ct("crash.restarting", restartLoc, { agent: agentId }),
                   }
-                  ws.send(JSON.stringify({ type: "event", event: restartEvent }))
+                  ws.send(JSON.stringify({ type: "event", sessionId, event: restartEvent }))
                 } else {
                   log.warn(`[CRASH-RESTART] Unknown agent "${agentId}" for session ${sessionId.slice(0, 8)}`)
                   ws.send(JSON.stringify({ type: "session_error", sessionId, error: `Unknown agent: ${agentId}. Please start a new session.` }))
@@ -3938,7 +4594,7 @@ export function createServer(portOverride?: number) {
                     options: buildCrashRestartOptions(loc),
                   },
                 }
-                ws.send(JSON.stringify({ type: "event", event: blockEvent }))
+                ws.send(JSON.stringify({ type: "event", sessionId, event: blockEvent }))
               }
               break
             }
@@ -4004,29 +4660,79 @@ export function createServer(portOverride?: number) {
           break
         }
 
-        // Send input to a specific session by ID (for batch operations)
+        // Send input to a specific session by ID (for batch operations + desktop CommandCenter)
         case "session_input": {
           const targetId = msg.sessionId as string
-          const inputStr = msg.data as string
+          let inputStr = msg.data as string
+          const sessionImages = msg.images as string[] | undefined
           // Security: verify the requesting client owns this session (prevent cross-session injection)
           const clientOwnedSid = clientSessions.get(ws)
-          if (targetId && inputStr && sessions.get(targetId) && (clientOwnedSid === targetId || isLocal)) {
-            if (/\/resume\b/i.test(inputStr)) {
-              resumeDecisionDone.delete(targetId)
-              resumeTimers.delete(targetId + "_scrolled")
-              resumeCursorOffset.delete(targetId)
-            }
-            const cmdMatch = inputStr.trim().replace(/\r?\n$/, "").match(/^(\/\w+)$/)
-            if (cmdMatch) {
-              const commandPrompt = getCommandPrompt(cmdMatch[1])
-              if (commandPrompt) {
-                sessions.write(targetId, `${commandPrompt}\n`)
-                log.info(`Batch: injected /${cmdMatch[1]} for session ${targetId}`)
-                break
+          const sessionExists = !!sessions.get(targetId)
+          if (!sessionExists && targetId) {
+            ws.send(JSON.stringify({ type: "error", message: `Session ${targetId.slice(0, 20)} no longer exists` }))
+            break
+          }
+          if (targetId && sessionExists && (clientOwnedSid === targetId || isLocal)) {
+            // Handle inline images (same logic as "input" handler)
+            if (sessionImages && sessionImages.length > 0) {
+              const targetSession = sessions.get(targetId)
+              const cwd = targetSession?.project?.cwd || homedir()
+              const uploadDir = join(cwd, ".agentrune", "uploads")
+              mkdirSync(uploadDir, { recursive: true })
+              const savedPaths: string[] = []
+              for (const imgData of sessionImages) {
+                try {
+                  const base64Data = imgData.replace(/^data:image\/\w+;base64,/, "")
+                  const ext = imgData.match(/^data:image\/(\w+)/)?.[1] || "png"
+                  const filePath = join(uploadDir, `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`)
+                  writeFileSync(filePath, Buffer.from(base64Data, "base64"))
+                  savedPaths.push(filePath)
+                  log.info(`[session_input] saved inline image: ${filePath}`)
+                } catch (err) {
+                  log.error(`[session_input] failed to save inline image: ${err}`)
+                }
+              }
+              if (savedPaths.length > 0) {
+                const hasTrailingR = inputStr.endsWith("\r")
+                const hasTrailingN = inputStr.endsWith("\n")
+                const baseText = (hasTrailingR || hasTrailingN) ? inputStr.slice(0, -1) : inputStr
+                const imagePaths = savedPaths.join(" ")
+                const withImages = baseText.trim()
+                  ? `${baseText} [Attached images — please read these files:] ${imagePaths}`
+                  : `[Attached images — please read these files:] ${imagePaths}`
+                inputStr = hasTrailingR ? withImages + "\r" : hasTrailingN ? withImages + "\n" : withImages
               }
             }
-            sessions.write(targetId, inputStr)
-            log.info(`Batch input sent to session ${targetId.slice(0, 8)}`)
+            if (inputStr) {
+              if (/\/resume\b/i.test(inputStr)) {
+                resumeDecisionDone.delete(targetId)
+                resumeTimers.delete(targetId + "_scrolled")
+                resumeCursorOffset.delete(targetId)
+              }
+              const cmdMatch = inputStr.trim().replace(/\r?\n$/, "").match(/^(\/\w+)$/)
+              if (cmdMatch) {
+                const commandPrompt = getCommandPrompt(cmdMatch[1])
+                if (commandPrompt) {
+                  sessions.write(targetId, `${commandPrompt}\n`)
+                  log.info(`Batch: injected /${cmdMatch[1]} for session ${targetId}`)
+                  break
+                }
+              }
+              // Extract task title from first real user message (skip control chars)
+              if (!sessionTaskTitle.has(targetId) && inputStr.length > 3 && !/^[\x03\x1b\r\n]/.test(inputStr)) {
+                const title = inputStr.replace(/\r?\n.*/s, "").trim().slice(0, 40)
+                if (title.length > 2) {
+                  sessionTaskTitle.set(targetId, title)
+                  for (const [c, sid] of clientSessions) {
+                    if (sid === targetId && c.readyState === WebSocket.OPEN) {
+                      c.send(JSON.stringify({ type: "session_task_title", sessionId: targetId, taskTitle: title }))
+                    }
+                  }
+                }
+              }
+              sessions.write(targetId, inputStr)
+              log.info(`Batch input sent to session ${targetId.slice(0, 8)}`)
+            }
           }
           break
         }
@@ -4054,12 +4760,38 @@ export function createServer(portOverride?: number) {
           break
         }
 
+        // Sandbox violation resolve for regular sessions (not automations)
+        case "sandbox_resolve": {
+          const sessionId = msg.sessionId as string
+          const action = (msg.action as "approve" | "deny") || "deny"
+          const permKey = msg.permissionKey as string
+          if (!sessionId) break
+          const monitor = sessionSandboxMonitors.get(sessionId)
+          if (action === "approve") {
+            // Grant permission in authority map so future operations pass
+            if (monitor && (monitor as any).config?.authorityMap && permKey) {
+              grantPermission((monitor as any).config.authorityMap, permKey, {
+                noExpiry: msg.noExpiry === true,
+                reason: "User approved via sandbox widget",
+              })
+            }
+            log.info(`[sandbox] Approved ${permKey} for session ${sessionId}`)
+          } else {
+            // Deny → kill session
+            sessions.kill(sessionId)
+            log.info(`[sandbox] Denied ${permKey} for session ${sessionId} — session killed`)
+          }
+          ws.send(JSON.stringify({ type: "sandbox_resolve_ack", sessionId, action, permissionKey: permKey }))
+          break
+        }
+
         case "reauth_resolve": {
           const automationId = msg.automationId as string
           const action = (msg.action as "approve" | "deny") || "deny"
           const noExpiry = msg.noExpiry === true
+          const reviewNote = typeof msg.reviewNote === "string" ? msg.reviewNote : undefined
           if (automationId) {
-            automationManager.resolveReauth(automationId, action, { noExpiry }).then(result => {
+            automationManager.resolveReauth(automationId, action, { noExpiry, reviewNote }).then(result => {
               ws.send(JSON.stringify({ type: "reauth_ack", automationId, ...result }))
             }).catch(() => {
               ws.send(JSON.stringify({ type: "reauth_ack", automationId, success: false, message: "Reauth resolution failed" }))
@@ -4078,6 +4810,7 @@ export function createServer(portOverride?: number) {
               automationId,
               action: action as any,
               instructions: (msg.instructions as string) || undefined,
+              reviewNote: typeof msg.reviewNote === "string" ? msg.reviewNote : undefined,
             })
             log.info(`[WS] phase_gate_response: automationId=${automationId} action=${action} resolved=${resolved}`)
             ws.send(JSON.stringify({ type: "phase_gate_ack", automationId, resolved }))
@@ -4185,12 +4918,12 @@ export function createServer(portOverride?: number) {
         }
 
         case "scrollback_request": {
-          const sid = clientSessions.get(ws)
+          const sid = (msg.sessionId as string) || clientSessions.get(ws)
           if (sid) {
             const reparseLimit = msg.reparse ? 500_000 : 80_000
             const scrollback = sessions.getRecentScrollback(sid, reparseLimit)
             if (scrollback) {
-              ws.send(JSON.stringify({ type: "scrollback", data: scrollback }))
+              ws.send(JSON.stringify({ type: "scrollback", sessionId: sid, data: scrollback }))
             }
             // After resume: scan scrollback for tool calls and create individual events.
             // Skip if JSONL watcher is active — it already provides better events with diff data.
@@ -4274,7 +5007,7 @@ export function createServer(portOverride?: number) {
                   persistEvents(sid, list)
                 }
                 for (const event of allEvents) {
-                  ws.send(JSON.stringify({ type: "event", event }))
+                  ws.send(JSON.stringify({ type: "event", sessionId: sid, event }))
                 }
               }
             }
@@ -4431,6 +5164,8 @@ export function createServer(portOverride?: number) {
                 })
                 const newSession = sessions.create(project, agentId, undefined, vaultKeys)
                 clientSessions.set(ws, newSession.id)
+                if (!clientAttachedSessions.has(ws)) clientAttachedSessions.set(ws, new Set())
+                clientAttachedSessions.get(ws)!.add(newSession.id)
                 progressInterceptor.trackSession(newSession.id)
                 ws.send(JSON.stringify({ type: "api_key_result", success: true, restarted: true, newSessionId: newSession.id }))
                 log.info(`Session restarted with API key ${envVar} for ${agentId}`)
@@ -4477,7 +5212,7 @@ export function createServer(portOverride?: number) {
           const currentSession = sessions.get(currentSid)
           if (!currentSession) break
           const restartProject = currentSession.project
-          const restartAgentId = currentSession.agentId
+          const restartAgentId = currentSession.agentId as import("./agent-launch.js").LaunchAgentId
           // Kill old session
           sessions.kill(currentSid)
           // Clean up watchers
@@ -4495,21 +5230,167 @@ export function createServer(portOverride?: number) {
           const newSid = `${restartProject.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
           const newSession = sessions.create(restartProject, restartAgentId, newSid, restartVaultKeys)
           clientSessions.set(ws, newSession.id)
+          if (!clientAttachedSessions.has(ws)) clientAttachedSessions.set(ws, new Set())
+          clientAttachedSessions.get(ws)!.add(newSession.id)
           progressInterceptor.trackSession(newSession.id)
           const newEngine = new ParseEngine(restartAgentId, restartProject.id, restartProject.cwd)
           sessionEngines.set(newSession.id, newEngine)
           sessionRecentEvents.set(newSession.id, [])
           clientEngines.set(ws, newEngine)
+
+          // Resume Claude Code conversation if possible
+          const claudeId = sessionClaudeMap.get(currentSid)?.claudeSessionId
+          const settings = msg.settings ? normalizeAgentSettings(msg.settings as Record<string, unknown>) : sessionLaunchSettings.get(currentSid)?.settings
+          if (settings) {
+            sessionLaunchSettings.set(newSession.id, { agentId: restartAgentId, settings, projectId: restartProject.id })
+            const launch = buildAgentLaunch(restartAgentId, settings, {
+              projectId: restartProject.id,
+              port: PORT,
+              continueSession: restartAgentId === "claude",
+              resumeSessionId: restartAgentId === "claude" ? claudeId : undefined,
+            })
+            if (launch.command) {
+              setTimeout(() => {
+                sessions.write(newSession.id, `${launch.command}\r`)
+                log.info(`[restart] Agent resumed: ${launch.command}`)
+              }, 1500)
+            }
+          }
+
           ws.send(JSON.stringify({
             type: "session_restarted",
             sessionId: newSession.id,
             agentId: restartAgentId,
           }))
-          log.info(`Session restarted: ${currentSid} → ${newSession.id} (${restartAgentId})`)
+          log.info(`Session restarted: ${currentSid} → ${newSession.id} (${restartAgentId})${claudeId ? ` (resuming Claude ${claudeId.slice(0,8)})` : ""}`)
           break
         }
         case "detach": {
           clientSessions.delete(ws)
+          clientAttachedSessions.delete(ws)
+          break
+        }
+        case "request_events": {
+          // Lightweight event replay — no PTY attach, just sends stored events
+          // and subscribes the client to future live events for this session.
+          const reqSid = msg.sessionId as string
+          if (!reqSid) break
+          // Subscribe to future live events
+          if (!clientAttachedSessions.has(ws)) clientAttachedSessions.set(ws, new Set())
+          clientAttachedSessions.get(ws)!.add(reqSid)
+
+          // Resolve agent type: prefer msg.agentId from frontend, then server-side sources
+          const msgAgentId = msg.agentId as string | undefined
+          const ptySession = sessions.get(reqSid)
+          const launchInfo = sessionLaunchSettings.get(reqSid)
+          const claudeMapping = sessionClaudeMap.get(reqSid)
+          const resolvedAgentType: string | undefined =
+            msgAgentId
+            || ptySession?.agentId
+            || launchInfo?.agentId
+            || sessionAgentTypes.get(reqSid)
+            || (claudeMapping ? "claude" : undefined)
+          // Persist resolved agent type for future daemon restarts
+          if (resolvedAgentType) saveSessionAgentType(reqSid, resolvedAgentType)
+
+          // Resolve project
+          let resolvedProj: typeof projects[number] | undefined
+          let resolvedProjectId: string | undefined
+          if (claudeMapping) {
+            resolvedProj = projects.find(p => p.id === claudeMapping.projectId)
+            resolvedProjectId = claudeMapping.projectId
+          }
+          if (!resolvedProj) {
+            const derivedProjectId = reqSid.replace(/_\d+$/, "")
+            if (derivedProjectId && derivedProjectId !== reqSid) {
+              resolvedProj = projects.find(p => p.id === derivedProjectId)
+              resolvedProjectId = derivedProjectId
+            }
+          }
+
+          // Ensure watcher exists for this session's agent type
+          const existingWatcher = sessionJsonlWatchers.get(reqSid)
+          if (existingWatcher) {
+            // Only rescan for resumed sessions (existing PTY). New sessions should NOT
+            // rescan as it clears existingFileMtimes and picks up old JSONL files.
+            const isResumedSession = sessions.get(reqSid) !== undefined && existingWatcher.jsonlPath
+            if (isResumedSession && existingWatcher.rescan) {
+              existingWatcher.rescan()
+              log.info(`[request_events] Rescanned watcher for ${reqSid}`)
+            }
+          } else if (resolvedProj && resolvedProjectId && resolvedAgentType) {
+            // Only create watcher for RESUMED sessions (PTY already existed).
+            // For brand new sessions, the attach handler creates the watcher with proper isolation.
+            // Creating a watcher here for new sessions causes it to replay old JSONL events.
+            const isResumed = sessions.get(reqSid) !== undefined
+            if (isResumed) {
+              const sid = reqSid
+              const projId = resolvedProjectId
+              // Use persisted CWD (worktree-safe), fallback to project CWD.
+              // Define this before the callback so Claude mapping updates can reuse it.
+              const persistedCwd2 = sessionClaudeMap.get(sid)?.cwd
+              const watcherCwd2 = persistedCwd2 || resolvedProj.cwd
+
+              const baseCb = makeWatcherCallback(sid)
+              const cb = (events: AgentEvent[]) => {
+                baseCb(events)
+                if (resolvedAgentType === "claude" && watcher && (watcher as any).jsonlPath) {
+                  const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
+                  const existingMapping = sessionClaudeMap.get(sid)
+                  if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
+                    updateSessionMapping(sid, jsonlFile, projId, sessionLastTitle.get(sid), watcherCwd2)
+                  }
+                }
+              }
+              let watcher: { stop(): void; rescan?(): void; [key: string]: any } | null = null
+              if (resolvedAgentType === "claude") {
+                const claudeId2 = sessionClaudeMap.get(sid)?.claudeSessionId
+                watcher = new JsonlWatcher(watcherCwd2, cb, claudeId2 || undefined, true)
+              } else if (resolvedAgentType === "codex") {
+                watcher = new CodexWatcher(watcherCwd2, cb)
+              } else if (resolvedAgentType === "gemini") {
+                watcher = new GeminiWatcher(watcherCwd2, cb)
+              }
+              if (watcher) {
+                if (!sessionRecentEvents.has(sid)) sessionRecentEvents.set(sid, [])
+                sessionJsonlWatchers.set(sid, watcher)
+                ;(watcher as any).start()
+                if ((watcher as any).rescan) (watcher as any).rescan()
+                log.info(`[request_events] Created ${resolvedAgentType} watcher for ${sid} cwd=${watcherCwd2}`)
+              }
+            } else {
+              log.info(`[request_events] Skipped watcher creation for new session ${reqSid} — attach handler will create it`)
+            }
+          } else {
+            log.info(`[request_events] No watcher: agent=${resolvedAgentType || "unknown"} project=${resolvedProjectId || "unknown"} for ${reqSid}`)
+          }
+
+          // Load and replay stored events — strictly per-session, NO cross-session fallback.
+          // loadProjectEvents was removed: it loaded events from OTHER sessions in the same project,
+          // causing Codex to show Claude events and Claude to show stale events from old sessions.
+          let storedEvents = sessionRecentEvents.get(reqSid) || []
+          if (storedEvents.length === 0) {
+            storedEvents = loadPersistedEvents(reqSid)
+            if (storedEvents.length > 0) {
+              sessionRecentEvents.set(reqSid, storedEvents)
+            }
+          }
+          if (storedEvents.length > 0) {
+            const lastToolIdx = storedEvents.reduce((max, e, i) =>
+              (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") ? i : max, -1)
+            const replayEvents = storedEvents.filter((e, i) => {
+              if (e.type === "token_usage") return false
+              if (e.type !== "decision_request" || e.status !== "waiting") return true
+              return i > lastToolIdx
+            })
+            if (replayEvents.length > 0) {
+              ws.send(JSON.stringify({ type: "events_replay", sessionId: reqSid, events: replayEvents }))
+            }
+          }
+          // NOTE: Do NOT auto-replay JSONL here — it can cause cross-session event contamination
+          // (replaying the wrong session's JSONL into this session's event list).
+          // Stored events from disk are the authoritative source for historical events.
+          // JSONL watchers are only created during attach (when we know the correct CWD/session).
           break
         }
       }
@@ -4520,12 +5401,17 @@ export function createServer(portOverride?: number) {
       if (esId) eventStore.endSession(esId)
       clientEventSessions.delete(ws)
       clientSessions.delete(ws)
+      clientAttachedSessions.delete(ws)
       clientEngines.delete(ws)
     })
   })
 
   // PTY data -> parse engine -> events -> clients
   sessions.on("data", (sessionId: string, data: string) => {
+    // Feed sandbox monitor (if attached)
+    const sandboxMonitor = sessionSandboxMonitors.get(sessionId)
+    if (sandboxMonitor) sandboxMonitor.processOutput(data)
+
     const engine = sessionEngines.get(sessionId)
     if (engine) {
       const scrollback = sessions.getRecentScrollback(sessionId, 40_000)
@@ -4539,10 +5425,11 @@ export function createServer(portOverride?: number) {
       log.info(`[PTY-EVENTS] decision_request found! count=${decisionEvents.length} titles=${decisionEvents.map(e=>e.title).join(",")}`)
     }
 
-    // When structured watcher is active, parse engine only provides decision_request events
-    // (approval prompts). All tool calls and response text come from JSONL watcher.
+    // Only filter parse engine events when JSONL watcher is ACTIVELY reading a file.
+    // If watcher exists but hasn't found its file yet, let parse engine events through.
     const jsonlWatcher = sessionJsonlWatchers.get(sessionId)
-    if (jsonlWatcher) {
+    const jsonlActive = jsonlWatcher && typeof (jsonlWatcher as any).isActive === "function" && (jsonlWatcher as any).isActive()
+    if (jsonlActive) {
       // Filter out events that JSONL watcher already provides (tool calls, response text).
       // Keep: decision_request, test_result, compaction, token usage, and other non-tool events.
       events = events.filter(e => {
@@ -4553,9 +5440,9 @@ export function createServer(portOverride?: number) {
           const opts = e.decision?.options || []
           const hasArrowKeys = opts.some((o: any) => /\x1b\[/.test(o.input || ""))
           const onlyNumberHotkeys = opts.length > 0 && opts.every((o: any) => isPlainNumberDecisionInput(o.input))
-          // Keep yes/no/a prompts from Codex/Cursor, but still block plain numeric menus that
-          // come from output heuristics instead of real approval UIs.
-          if (!hasArrowKeys && onlyNumberHotkeys) return false
+          // Keep permission requests (even with number-key inputs) — only block generic numeric menus
+          const isPermission = /permission|approval|proceed/i.test(e.title || "")
+          if (!hasArrowKeys && onlyNumberHotkeys && !isPermission) return false
           // Dedup: don't re-emit if same title exists within last 5 seconds
           const recent = sessionRecentEvents.get(sessionId) || []
           const hasSame = recent.some(r =>
@@ -4565,12 +5452,14 @@ export function createServer(portOverride?: number) {
           return !hasSame
         }
         if (e.type === "test_result") return true
-        // Skip tool call events (JSONL watcher handles these better with diff data)
-        if (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") return false
+        // Keep command_run from parse engine (desktop needs these for event display)
+        if (e.type === "command_run") return true
+        // Skip file edit/create (JSONL watcher provides these with diff data)
+        if (e.type === "file_edit" || e.type === "file_create") return false
         // Skip parse engine's response text (JSONL watcher has full text)
         if (e.type === "info" && /^Claude responded/i.test(e.title || "")) return false
-        // Skip parse engine's tool detection noise
-        if (e.type === "info" && /^(Reading|Editing|Creating|Glob|Grep|Agent|WebFetch|WebSearch|NotebookEdit)\b/i.test(e.title || "")) return false
+        // Keep tool activity info (Reading, Bash, etc.) — desktop needs these
+        // Only skip noisy repeated ones
         // Keep everything else (compaction, token usage, thinking, etc.)
         return true
       })
@@ -4658,9 +5547,9 @@ export function createServer(portOverride?: number) {
               if (list.length > 200) list.splice(0, list.length - 200)
               persistEvents(sessionId, list)
             }
-            for (const [client, sid] of clientSessions) {
-              if (sid === sessionId && client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ type: "event", event: resumeEvent }))
+            for (const [client, attachedSet] of clientAttachedSessions) {
+              if (attachedSet.has(sessionId) && client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: "event", sessionId, event: resumeEvent }))
               }
             }
           }
@@ -4711,10 +5600,10 @@ export function createServer(portOverride?: number) {
               if (list.length > 200) list.splice(0, list.length - 200)
               persistEvents(sessionId, list)
             }
-            for (const [client, sid] of clientSessions) {
-              if (sid === sessionId && client.readyState === WebSocket.OPEN) {
+            for (const [client, attachedSet] of clientAttachedSessions) {
+              if (attachedSet.has(sessionId) && client.readyState === WebSocket.OPEN) {
                 for (const event of delayedEvents) {
-                  client.send(JSON.stringify({ type: "event", event }))
+                  client.send(JSON.stringify({ type: "event", sessionId, event }))
                 }
               }
             }
@@ -4874,12 +5763,12 @@ export function createServer(portOverride?: number) {
       }
     }
 
-    // Send to connected clients
-    for (const [client, sid] of clientSessions) {
-      if (sid === sessionId && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "output", data }))
+    // Send to connected clients (use multi-session set for desktop support)
+    for (const [client, attachedSet] of clientAttachedSessions) {
+      if (attachedSet.has(sessionId) && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: "output", sessionId, data }))
         for (const event of events) {
-          client.send(JSON.stringify({ type: "event", event }))
+          client.send(JSON.stringify({ type: "event", sessionId, event }))
         }
         const eventSessionId = clientEventSessions.get(client)
         if (eventSessionId) {
@@ -4948,12 +5837,31 @@ export function createServer(portOverride?: number) {
     closedSessionIds.add(sessionId)
     persistClosedSessions()
 
-    for (const [client, sid] of clientSessions) {
-      if (sid === sessionId && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "exit", sessionId }))
+    // Notify attached clients
+    for (const [client, attachedSet] of clientAttachedSessions) {
+      if (attachedSet.has(sessionId)) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: "exit", sessionId }))
+        }
+        attachedSet.delete(sessionId)
       }
     }
+    // Broadcast to ALL clients (desktop + mobile sync)
+    broadcastAll({ type: "session_ended", sessionId })
   })
+
+  // SPA fallback — non-API routes fall through to React app's index.html (Electron mode)
+  if (appDistPath && existsSync(appDistPath)) {
+    const spaIndexPath = join(appDistPath, "index.html")
+    if (existsSync(spaIndexPath)) {
+      const spaHtml = readFileSync(spaIndexPath, "utf-8")
+      app.get("/{*splat}", (req, res) => {
+        // Don't intercept API, WebSocket upgrade, or asset requests
+        if (req.path.startsWith("/api/") || req.path.startsWith("/ws")) return res.status(404).end()
+        res.type("html").send(spaHtml)
+      })
+    }
+  }
 
   // --- Start listening ---
 
@@ -4964,12 +5872,15 @@ export function createServer(portOverride?: number) {
       log.info(`LAN: http://${localIp}:${PORT}`)
     }
 
-    // Start Cloudflare Tunnel for remote access
+    // Start Cloudflare Tunnel for remote access (skip in Electron desktop mode)
     // Use object so heartbeat closure always reads latest URL
     const tunnelState = { url: undefined as string | undefined }
     // Expose tunnel URL globally for /api/daemon-info endpoint
     const updateGlobalTunnelUrl = (url?: string) => { (globalThis as any).__agentrune_tunnel_url__ = url || null }
-    try {
+    const skipTunnel = process.env.AGENTRUNE_SKIP_TUNNEL === "1"
+    if (skipTunnel) {
+      log.dim("Tunnel skipped (AGENTRUNE_SKIP_TUNNEL=1)")
+    } else try {
       const { startTunnel } = await import("./tunnel.js")
       const tunnel = await startTunnel(PORT)
       tunnelState.url = tunnel.url

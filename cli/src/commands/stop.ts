@@ -13,7 +13,7 @@ export function getStopMarker(port: number): string {
 
 export async function stopCommand(opts?: { port?: string }) {
   const port = opts?.port ? parseInt(opts.port) : undefined
-  const resolvedPort = port || 3456
+  const resolvedPort = port || 3457
   const pidFile = getPidFile(port)
 
   // Write stop marker so sibling daemon won't auto-restart

@@ -16,11 +16,11 @@ const claimedJsonlFiles = new Set<string>()
 
 /** Convert project CWD to Claude's project directory name */
 function cwdToClaudeDir(cwd: string): string {
-  // Claude Code encodes path: C:\Users\agres\Documents\Test\AgentWiki
-  // → C--Users-agres-Documents-Test-AgentWiki
-  // Steps: normalize to forward slash, replace "X:" with "X-", then "/" with "-"
+  // Claude Code encodes path: C:\Users\me\Projects\MyApp
+  // → C--Users-me-Projects-MyApp
+  // Claude also converts dots to dashes: .worktrees → -worktrees
   const normalized = cwd.replace(/\\/g, "/")
-  return normalized.replace(/^([A-Za-z]):/, "$1-").replace(/\//g, "-")
+  return normalized.replace(/^([A-Za-z]):/, "$1-").replace(/[/.]/g, "-")
 }
 
 /** Find the most recently modified .jsonl in a Claude project dir.
@@ -136,8 +136,8 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
         })
       } else if (name === "Read") {
         const filePath = input.file_path || "unknown"
-        // Skip injection reads (rules.md, agentlore.md)
-        if (/\.agentrune[/\\](rules|agentlore)\.md$/.test(filePath)) continue
+        // Skip memory injection reads (rules.md, agentlore.md, context sections)
+        if (/\.agentrune[/\\](rules|agentlore)\.md$/.test(filePath) || /\.agentrune[/\\]context[/\\].+\.md$/.test(filePath)) continue
         events.push({
           id: makeId(),
           timestamp: ts,
@@ -214,7 +214,7 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
           type: "info",
           status: "in_progress",
           title: name,
-          detail: JSON.stringify(input).slice(0, 120),
+          detail: JSON.stringify(input).slice(0, 500),
         })
       }
     }
@@ -223,17 +223,17 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
     if (block.type === "text" && block.text) {
       const text = block.text.trim()
       if (text.length < 5) continue
-      // Filter injection prompt responses (agent reading rules.md/agentlore.md on startup)
-      if (/已讀完.*(?:rules\.md|agentlore\.md)|讀取.*(?:rules\.md|agentlore\.md)|Read.*\.agentrune\/(rules|agentlore)\.md/i.test(text.split("\n")[0])) continue
+      // Filter memory injection prompt responses (agent reading rules.md / agentlore.md / context sections)
+      if (/已讀完.*(?:rules\.md|agentlore\.md|context)|讀取.*(?:rules\.md|agentlore\.md|context)|Read.*\.agentrune\/(?:rules|agentlore)\.md|Read.*\.agentrune\/context\/.+\.md/i.test(text.split("\n")[0])) continue
       // Short text: title only. Long text: first line as title, full text as detail
-      const firstLine = text.split("\n")[0].slice(0, 200)
-      const isLong = text.length > 200 || text.includes("\n")
+      const firstLine = text.split("\n")[0]
+      const isLong = text.length > firstLine.length + 1 || text.includes("\n")
       events.push({
         id: makeId(),
         timestamp: ts,
         type: "response",
         status: "completed",
-        title: isLong ? (firstLine.length < text.split("\n")[0].length ? firstLine + "..." : firstLine) : text,
+        title: isLong ? firstLine : text,
         detail: isLong ? text : undefined,
       })
 
@@ -314,7 +314,7 @@ function userToEvents(line: JsonlLine): AgentEvent[] {
 
   // Filter out non-user content:
   // 1. AgentRune injected prompts (rules instruction, install checks)
-  if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md)/.test(text)) return []
+  if (/請先讀取\s*\.agentrune\/(rules\.md|agentlore\.md|context\/.+\.md)/.test(text)) return []
   if (/Get-Command.*ErrorAction.*SilentlyContinue/.test(text)) return []
   if (/command -v .* >\/dev\/null 2>&1 \|\|/.test(text)) return []
   // 2. Claude Code system/internal XML tags (system-reminder, command-name, local-command-*, etc.)
@@ -386,6 +386,9 @@ export class JsonlWatcher {
       }, 2000)
     }
   }
+
+  /** Whether the watcher has found and is actively reading a JSONL file */
+  isActive(): boolean { return !!this.jsonlPath }
 
   stop(): void {
     if (this.jsonlPath) { claimedJsonlFiles.delete(this.jsonlPath) }

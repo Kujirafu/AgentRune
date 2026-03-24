@@ -1,7 +1,7 @@
 // server/worktree-manager.ts
 // Manages git worktrees for session isolation
 import { execFileSync } from "node:child_process"
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs"
+import { copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { log } from "../shared/logger.js"
 
@@ -14,9 +14,43 @@ export interface Worktree {
   createdAt: number
 }
 
-/** Sanitize slug to prevent command injection — allow only alphanumeric, hyphens, underscores */
+/** Sanitize slug to prevent command injection; allow only alphanumeric, hyphens, and underscores. */
 function sanitizeSlug(input: string): string {
   return input.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64)
+}
+
+export function syncProjectMemoryToWorktree(projectAgentruneDir: string, worktreeAgentruneDir: string): void {
+  if (!existsSync(projectAgentruneDir)) return
+
+  mkdirSync(worktreeAgentruneDir, { recursive: true })
+
+  const linkFileOrCopy = (src: string, dst: string): void => {
+    if (!existsSync(src) || existsSync(dst)) return
+    try {
+      linkSync(src, dst)
+    } catch {
+      copyFileSync(src, dst)
+    }
+  }
+
+  for (const file of ["agentlore.md", "rules.md"]) {
+    const src = join(projectAgentruneDir, file)
+    const dst = join(worktreeAgentruneDir, file)
+    linkFileOrCopy(src, dst)
+  }
+
+  const srcContextDir = join(projectAgentruneDir, "context")
+  if (!existsSync(srcContextDir)) return
+
+  const dstContextDir = join(worktreeAgentruneDir, "context")
+  mkdirSync(dstContextDir, { recursive: true })
+
+  for (const entry of readdirSync(srcContextDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue
+    const src = join(srcContextDir, entry.name)
+    const dst = join(dstContextDir, entry.name)
+    linkFileOrCopy(src, dst)
+  }
 }
 
 export class WorktreeManager {
@@ -28,25 +62,23 @@ export class WorktreeManager {
     this.restoreFromDisk()
   }
 
-  /** Scan .worktrees/ directory and rebuild in-memory map from persisted session metadata */
+  /** Scan .worktrees/ and rebuild in-memory map from persisted session metadata. */
   private restoreFromDisk(): void {
     const worktreesDir = join(this.projectCwd, ".worktrees")
     if (!existsSync(worktreesDir)) return
 
     try {
-      const dirs = readdirSync(worktreesDir, { withFileTypes: true })
-        .filter(d => d.isDirectory())
+      const dirs = readdirSync(worktreesDir, { withFileTypes: true }).filter((dirent) => dirent.isDirectory())
 
-      for (const dir of dirs) {
-        const metaPath = join(worktreesDir, dir.name, SESSION_META_FILE)
+      for (const dirent of dirs) {
+        const metaPath = join(worktreesDir, dirent.name, SESSION_META_FILE)
         if (!existsSync(metaPath)) continue
 
         try {
           const meta = JSON.parse(readFileSync(metaPath, "utf-8"))
           if (!meta.sessionId || !meta.branch) continue
 
-          // Verify the worktree is still valid (git knows about it)
-          const wtPath = join(worktreesDir, dir.name)
+          const wtPath = join(worktreesDir, dirent.name)
           const wt: Worktree = {
             path: wtPath,
             branch: meta.branch,
@@ -54,9 +86,9 @@ export class WorktreeManager {
             createdAt: meta.createdAt || 0,
           }
           this.worktrees.set(meta.sessionId, wt)
-          log.dim(`[Worktree] Restored: ${meta.sessionId} → ${dir.name}`)
+          log.dim(`[Worktree] Restored: ${meta.sessionId} -> ${dirent.name}`)
         } catch {
-          // Corrupted meta file — skip
+          // Ignore corrupted metadata and continue restoring the rest.
         }
       }
 
@@ -64,11 +96,11 @@ export class WorktreeManager {
         log.info(`[Worktree] Restored ${this.worktrees.size} worktree(s) from disk`)
       }
     } catch {
-      // .worktrees dir unreadable — skip
+      // Ignore unreadable .worktrees directory.
     }
   }
 
-  /** Persist session metadata into the worktree directory */
+  /** Persist session metadata into the worktree directory. */
   private persistMeta(wt: Worktree): void {
     try {
       writeFileSync(
@@ -81,17 +113,18 @@ export class WorktreeManager {
         "utf-8",
       )
     } catch {
-      // Non-critical — worktree still works without persisted meta
+      // Non-critical; the worktree still works without persisted metadata.
     }
   }
 
-  /** Create a new worktree for a session */
+  /** Create a new worktree for a session. */
   create(sessionId: string, taskSlug?: string): Worktree {
     const existing = this.worktrees.get(sessionId)
     if (existing) return existing
 
     const date = new Date().toISOString().slice(0, 10)
-    const slug = sanitizeSlug(taskSlug || sessionId.slice(0, 8))
+    const rand = Math.random().toString(36).slice(2, 6)
+    const slug = sanitizeSlug(taskSlug || sessionId.slice(0, 8)) + `-${rand}`
     const branch = `agentrune/${date}-${slug}`
     const worktreeDir = join(this.projectCwd, ".worktrees", `${date}-${slug}`)
 
@@ -104,12 +137,23 @@ export class WorktreeManager {
         stdio: "pipe",
       })
     } catch {
-      // Branch might already exist — try without -b
+      // Branch might already exist; try without -b.
       execFileSync("git", ["worktree", "add", worktreeDir, branch], {
         cwd: this.projectCwd,
         encoding: "utf-8",
         stdio: "pipe",
       })
+    }
+
+    const agentruneDir = join(this.projectCwd, ".agentrune")
+    const worktreeAgentruneDir = join(worktreeDir, ".agentrune")
+    if (existsSync(agentruneDir)) {
+      try {
+        syncProjectMemoryToWorktree(agentruneDir, worktreeAgentruneDir)
+        log.dim(`[Worktree] Synced project memory -> ${worktreeDir}`)
+      } catch (error) {
+        log.warn(`[Worktree] Failed to sync project memory: ${error instanceof Error ? error.message : "unknown"}`)
+      }
     }
 
     const wt: Worktree = {
@@ -123,17 +167,17 @@ export class WorktreeManager {
     return wt
   }
 
-  /** Get worktree for a session */
+  /** Get worktree for a session. */
   get(sessionId: string): Worktree | undefined {
     return this.worktrees.get(sessionId)
   }
 
-  /** List all managed worktrees */
+  /** List all managed worktrees. */
   list(): Worktree[] {
     return [...this.worktrees.values()]
   }
 
-  /** Merge worktree branch back to main and clean up */
+  /** Merge worktree branch back to main and clean up. */
   merge(sessionId: string, targetBranch: string = "main"): { success: boolean; message: string } {
     const wt = this.worktrees.get(sessionId)
     if (!wt) return { success: false, message: "Worktree not found" }
@@ -146,13 +190,13 @@ export class WorktreeManager {
       })
       this.cleanup(sessionId)
       return { success: true, message: `Merged ${wt.branch} into ${targetBranch}` }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Merge failed"
-      return { success: false, message: msg }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Merge failed"
+      return { success: false, message }
     }
   }
 
-  /** Remove worktree and branch */
+  /** Remove worktree and branch. */
   cleanup(sessionId: string): void {
     const wt = this.worktrees.get(sessionId)
     if (!wt) return
@@ -163,7 +207,9 @@ export class WorktreeManager {
         encoding: "utf-8",
         stdio: "pipe",
       })
-    } catch { /* worktree may already be removed */ }
+    } catch {
+      // Worktree may already be removed.
+    }
 
     try {
       execFileSync("git", ["branch", "-D", wt.branch], {
@@ -171,7 +217,9 @@ export class WorktreeManager {
         encoding: "utf-8",
         stdio: "pipe",
       })
-    } catch { /* branch may already be removed */ }
+    } catch {
+      // Branch may already be removed.
+    }
 
     this.worktrees.delete(sessionId)
   }

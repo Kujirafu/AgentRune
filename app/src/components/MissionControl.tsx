@@ -860,6 +860,13 @@ export function MissionControl({
           setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
         }
       }
+      // Sandbox level change → restart to apply new SkillMonitor
+      if (newSettings.sandboxLevel !== prev.sandboxLevel && sessionId) {
+        showToast(locale.startsWith("zh") ? "沙盒等級已變更，重啟中..." : "Sandbox changed — restarting...", 3000)
+        onKillSession(sessionId)
+        setEvents([])
+        setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+      }
     }
 
     if (agentId === "codex") {
@@ -984,9 +991,18 @@ export function MissionControl({
     }
   }, [project.id, sendInput, t, setEvents])
 
+  // Queue for commands sent during initialization — forwarded after init completes
+  const pendingCommandRef = useRef<{ text: string; flags?: SendFlags; images?: string[] } | null>(null)
+
   const handleSendCommand = useCallback((text: string, flags?: SendFlags, images?: string[]) => {
     if (text === "\x03") { sendInput(text); return }
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
+
+    // If still initializing, queue the command and send after init completes
+    if (initializing && text.trim()) {
+      pendingCommandRef.current = { text, flags, images }
+      return
+    }
 
     // Interrupt mode: Ctrl+C to stop, then send structured instruction
     // Agent should: 1) stop current work  2) save unfinished work as task  3) handle new message
@@ -1130,7 +1146,7 @@ export function MissionControl({
     promptReadyRef.current = false  // Reset so idle timer doesn't fire until next prompt
 
     addRecentCommand(project.id, text)
-  }, [sendInput, project.id])
+  }, [sendInput, project.id, initializing])
 
   const handleDecision = useCallback((eventId: string, input: string) => {
     // Special actions: open URL in phone browser or copy URL
@@ -1233,11 +1249,16 @@ export function MissionControl({
     return p
   })())
   useEffect(() => {
-    if (!initializing && sessionPrefillRef.current) {
-      const prompt = sessionPrefillRef.current
+    if (initializing) return
+    // Forward queued command (user typed during init) or prefill (from "Run Now")
+    const pending = pendingCommandRef.current
+    const prefill = sessionPrefillRef.current
+    if (pending) {
+      pendingCommandRef.current = null
+      setTimeout(() => handleSendCommand(pending.text, pending.flags, pending.images), 500)
+    } else if (prefill) {
       sessionPrefillRef.current = null
-      // Delay to ensure WS is ready after init
-      setTimeout(() => handleSendCommand(prompt), 500)
+      setTimeout(() => handleSendCommand(prefill), 500)
     }
   }, [initializing, handleSendCommand])
 
@@ -1683,11 +1704,28 @@ export function MissionControl({
     return true
   }), [events])
 
+  // Pending permission request — desktop only: show above InputBar instead of in timeline
+  const pendingPermission = useMemo(() => {
+    if (isMobile) return null  // mobile: keep in event timeline
+    for (let i = mainEvents.length - 1; i >= 0; i--) {
+      const e = mainEvents[i]
+      if (e.type === "decision_request" && e.status === "waiting") return e
+    }
+    return null
+  }, [mainEvents])
+
+  // Filtered main events: desktop hides waiting decision_requests (shown in banner instead)
+  // Mobile: show all events including waiting decision_requests in timeline
+  const timelineEvents = useMemo(() => {
+    if (isMobile) return mainEvents
+    return mainEvents.filter(e => !(e.type === "decision_request" && e.status === "waiting"))
+  }, [mainEvents])
+
     // L1 events: important actions only (memoized, used in render + empty check)
     const L1_TYPES = new Set(["progress_report", "decision_request", "response", "error", "file_edit", "file_create", "file_delete", "command_run"])
-    const l1Events = useMemo(() => mainEvents.filter(
+    const l1Events = useMemo(() => timelineEvents.filter(
       e => L1_TYPES.has(e.type) || e.id.startsWith("usr_") || e.id.startsWith("init_")
-    ), [mainEvents])
+    ), [timelineEvents])
 return (
     <>
       {/* Status indicator overlay ??only when working/waiting */}
@@ -1700,7 +1738,7 @@ return (
           animation: theme === "dark" ? "borderGlowBlue 2s ease-in-out infinite" : "borderGlowTealLight 2s ease-in-out infinite",
           boxShadow: theme === "dark"
             ? "inset 0 0 30px 4px rgba(96,165,250,0.25), inset 0 0 8px 2px rgba(96,165,250,0.4)"
-            : "inset 0 0 20px 4px rgba(55,172,192,0.25), inset 0 0 6px 2px rgba(55,172,192,0.4)",
+            : "inset 0 0 20px 4px var(--accent-primary-bg), inset 0 0 6px 2px var(--accent-primary-bg)",
         }} />
       )}
       <div
@@ -1787,7 +1825,7 @@ return (
                 })()}
               </button>
               {showDangerBadge && (
-                <button onClick={() => { /* toggle in settings */ setShowSettings(true) }} onTouchStart={(e) => e.stopPropagation()} style={{ ...glassBtn, background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.25)", color: "#f59e0b" }}>
+                <button onClick={() => { /* toggle in settings */ setShowSettings(true) }} onTouchStart={(e) => e.stopPropagation()} style={{ ...glassBtn, background: "var(--warning-bg)", border: "1px solid var(--warning-bg)", color: "var(--warning)" }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
                     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
@@ -1818,12 +1856,12 @@ return (
               <div style={{
                 padding: "8px 16px",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                background: "rgba(55, 172, 192, 0.06)",
-                borderBottom: "1px solid rgba(55, 172, 192, 0.15)",
+                background: "var(--accent-primary-bg)",
+                borderBottom: "1px solid var(--accent-primary-bg)",
                 flexShrink: 0,
               }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#37ACC0", animation: "pulse 1s ease-in-out infinite" }} />
-                <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 600, opacity: 0.9 }}>{t("mc.connecting")}</span>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent-primary)", animation: "pulse 1s ease-in-out infinite" }} />
+                <span style={{ fontSize: 11, color: "var(--accent-primary)", fontWeight: 600, opacity: 0.9 }}>{t("mc.connecting")}</span>
               </div>
             )}
             {/* Daemon role badge — shown when connected to release (fallback) daemon */}
@@ -1835,8 +1873,8 @@ return (
                 borderBottom: "1px solid rgba(251, 129, 132, 0.15)",
                 flexShrink: 0,
               }}>
-                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#FB8184" }} />
-                <span style={{ fontSize: 10, color: "#FB8184", fontWeight: 600, letterSpacing: "0.5px" }}>RELEASE DAEMON</span>
+                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--danger)" }} />
+                <span style={{ fontSize: 10, color: "var(--danger)", fontWeight: 600, letterSpacing: "0.5px" }}>RELEASE DAEMON</span>
               </div>
             )}
 
@@ -1852,7 +1890,7 @@ return (
                   padding: "6px 16px", borderRadius: 14,
                   background: "var(--glass-bg)",
                   backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
-                  border: `1px solid ${agentStatus === "waiting" ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
+                  border: `1px solid ${agentStatus === "waiting" ? "var(--accent-primary-bg)" : "var(--glass-border)"}`,
                   boxShadow: "var(--glass-shadow)",
                   animation: agentStatus === "waiting" ? "breathe 2s ease-in-out infinite" : "none",
                 }}>
@@ -1860,11 +1898,11 @@ return (
                     <>
                       <div style={{
                         width: 6, height: 6, borderRadius: "50%",
-                        background: "#37ACC0",
-                        boxShadow: "0 0 8px #37ACC0",
+                        background: "var(--accent-primary)",
+                        boxShadow: "0 0 8px var(--accent-primary)",
                         animation: "pulse 2s ease-in-out infinite",
                       }} />
-                      <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 600 }}>
+                      <span style={{ fontSize: 11, color: "var(--accent-primary)", fontWeight: 600 }}>
                         {t("status.waiting")}
                       </span>
                     </>
@@ -1966,8 +2004,8 @@ return (
                       width: 8,
                       height: 8,
                       borderRadius: "50%",
-                      background: "#37ACC0",
-                      boxShadow: "0 0 8px rgba(55,172,192,0.5)",
+                      background: "var(--accent-primary)",
+                      boxShadow: "0 0 8px var(--accent-primary-bg)",
                       animation: `typingDot 1.4s ease-in-out ${i * 0.2}s infinite`,
                     }} />
                   ))}
@@ -1987,6 +2025,97 @@ return (
                 </div>
               )}
             </div>
+
+            {/* Permission Banner — shown above input when agent needs approval */}
+            {pendingPermission && pendingPermission.decision && (
+              <div style={{
+                margin: "0 8px 6px",
+                padding: "12px 14px",
+                borderRadius: 16,
+                background: "var(--glass-bg)",
+                backdropFilter: "blur(24px)",
+                WebkitBackdropFilter: "blur(24px)",
+                border: "1px solid var(--accent-primary-bg)",
+                boxShadow: "0 -2px 12px rgba(0,0,0,0.08)",
+                animation: "fadeSlideUp 0.3s ease-out",
+              }}>
+                {/* Header */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-primary)" }}>
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                    {t("perm.title")}
+                  </span>
+                </div>
+                {/* Detail — tool call signature */}
+                {pendingPermission.detail && (
+                  <div style={{
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    marginBottom: 8,
+                    lineHeight: 1.4,
+                    wordBreak: "break-word",
+                    fontFamily: "monospace",
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                    background: "rgba(0,0,0,0.06)",
+                  }}>
+                    {pendingPermission.detail}
+                  </div>
+                )}
+                {/* Purpose & Scope */}
+                {(pendingPermission.decision.purpose || pendingPermission.decision.scope) && (
+                  <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 8, color: "var(--text-secondary)" }}>
+                    {pendingPermission.decision.purpose && (
+                      <div style={{ marginBottom: 2 }}>
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{t("perm.purpose")}:</span>{" "}
+                        {pendingPermission.decision.purpose}
+                      </div>
+                    )}
+                    {pendingPermission.decision.scope && (
+                      <div>
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{t("perm.scope")}:</span>{" "}
+                        {pendingPermission.decision.scope}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Action buttons */}
+                <div style={{ display: "flex", gap: 8 }}>
+                  {pendingPermission.decision.options.map((opt) => {
+                    const isDeny = /deny|拒絕/i.test(opt.label)
+                    const isAlways = /always|永久/i.test(opt.label)
+                    return (
+                      <button
+                        key={opt.label}
+                        onClick={() => handleDecision(pendingPermission.id, opt.input)}
+                        style={{
+                          flex: 1,
+                          padding: "8px 0",
+                          borderRadius: 10,
+                          border: isDeny
+                            ? "1px solid var(--danger-bg)"
+                            : "1px solid var(--accent-primary-bg)",
+                          background: isDeny
+                            ? "var(--danger-bg)"
+                            : isAlways
+                            ? "var(--accent-primary-bg)"
+                            : "var(--accent-primary-bg)",
+                          color: isDeny ? "var(--danger)" : "var(--accent-primary)",
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          transition: "all 0.15s ease",
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Input area ??padded above keyboard */}
             {/* QuickActions removed — toolbar integrated into InputBar */}
@@ -2481,7 +2610,7 @@ return (
                     icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>,
                     label: t("mc.discardWorktree"),
                     desc: t("mc.discardWorktreeDesc"),
-                    color: "#f59e0b",
+                    color: "var(--warning)",
                     onClick: () => { send({ type: "discard_worktree", sessionId: s.id }); setContextSession(null) },
                   })}
                   <div style={{ height: 1, margin: "2px 20px", background: "var(--glass-border)" }} />
@@ -2674,8 +2803,8 @@ return (
             <div style={{
               position: "absolute", top: "max(env(safe-area-inset-top), 16px)", left: 16,
               padding: "6px 12px", borderRadius: 10,
-              background: "rgba(55,172,192,0.2)", border: "1px solid rgba(55,172,192,0.4)",
-              color: "#37ACC0", fontSize: 12, fontWeight: 600, fontFamily: "monospace",
+              background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
+              color: "var(--accent-primary)", fontSize: 12, fontWeight: 600, fontFamily: "monospace",
               backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
             }}>
               {voiceContextLabel}
@@ -2689,8 +2818,8 @@ return (
             }}>
               <div className="voice-preparing-pulse" style={{
                 width: 100, height: 100, borderRadius: "50%",
-                background: "rgba(55,172,192,0.15)",
-                border: "2px solid rgba(55,172,192,0.4)",
+                background: "var(--accent-primary-bg)",
+                border: "2px solid var(--accent-primary-bg)",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2736,7 +2865,7 @@ return (
                   background: "rgba(255,255,255,0.15)",
                   color: "#fff", cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  boxShadow: "0 0 40px rgba(55,172,192,0.3), 0 0 80px rgba(251,129,132,0.15)",
+                  boxShadow: "0 0 40px var(--accent-primary-bg), 0 0 80px var(--danger-bg)",
                   position: "relative", zIndex: 10,
                   WebkitTapHighlightColor: "transparent",
                 }}>
@@ -2760,7 +2889,7 @@ return (
             }}>
               <span className="voice-spin" style={{
                 width: 40, height: 40, border: "3px solid rgba(255,255,255,0.2)",
-                borderTopColor: "#37ACC0", borderRadius: "50%", display: "inline-block",
+                borderTopColor: "var(--accent-primary)", borderRadius: "50%", display: "inline-block",
               }} />
               <div style={{ marginTop: 16, color: "rgba(255,255,255,0.8)", fontSize: 14, fontWeight: 500 }}>
                 {t("voice.cleaning")}
@@ -2812,7 +2941,7 @@ return (
                   <button onClick={mcStartVoiceEdit} style={{
                     padding: "12px 16px", borderRadius: 14,
                     border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
-                    color: "#37ACC0", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    color: "var(--accent-primary)", fontSize: 13, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                   }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2834,7 +2963,7 @@ return (
                     flex: 1, padding: "12px", borderRadius: 14,
                     border: "1px solid rgba(251,129,132,0.4)",
                     background: "linear-gradient(135deg, rgba(251,129,132,0.18), rgba(208,152,153,0.14))",
-                    color: "#FB8184", fontSize: 13, fontWeight: 700, cursor: "pointer",
+                    color: "var(--danger)", fontSize: 13, fontWeight: 700, cursor: "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                   }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2848,8 +2977,8 @@ return (
           )}
           <style>{`
             .voice-orb { position: absolute; width: 160px; height: 160px; border-radius: 50%; filter: blur(40px); will-change: transform, opacity; opacity: 0.8; }
-            .voice-orb-teal { background: radial-gradient(circle, #37ACC0, rgba(52,119,146,0.4) 60%, transparent 80%); box-shadow: 0 0 60px rgba(55,172,192,0.5); animation: orbWander1 8s ease-in-out infinite, orbPulse 3s ease-in-out infinite; }
-            .voice-orb-coral { background: radial-gradient(circle, #FB8184, rgba(208,152,153,0.4) 60%, transparent 80%); box-shadow: 0 0 60px rgba(251,129,132,0.5); animation: orbWander2 9s ease-in-out infinite, orbPulse 3.5s ease-in-out infinite 0.8s; }
+            .voice-orb-teal { background: radial-gradient(circle, var(--accent-primary), var(--accent-primary-bg) 60%, transparent 80%); box-shadow: 0 0 60px var(--accent-primary-bg); animation: orbWander1 8s ease-in-out infinite, orbPulse 3s ease-in-out infinite; }
+            .voice-orb-coral { background: radial-gradient(circle, var(--danger), var(--danger-bg) 60%, transparent 80%); box-shadow: 0 0 60px var(--danger-bg); animation: orbWander2 9s ease-in-out infinite, orbPulse 3.5s ease-in-out infinite 0.8s; }
             .voice-orb-purple { background: radial-gradient(circle, #a78bfa, rgba(139,92,246,0.3) 60%, transparent 80%); box-shadow: 0 0 50px rgba(139,92,246,0.4); width: 120px; height: 120px; animation: orbWander3 7s ease-in-out infinite, orbPulse 2.8s ease-in-out infinite 1.5s; }
             @keyframes orbPulse { 0%, 100% { transform: scale(1); filter: blur(40px); opacity: 0.7; } 30% { transform: scale(1.3); filter: blur(30px); opacity: 1; } 70% { transform: scale(0.85); filter: blur(50px); opacity: 0.5; } }
             @keyframes orbWander1 { 0% { top: 15%; left: 10%; } 20% { top: 60%; left: 65%; } 40% { top: 30%; left: 75%; } 60% { top: 70%; left: 20%; } 80% { top: 10%; left: 50%; } 100% { top: 15%; left: 10%; } }
@@ -2858,7 +2987,7 @@ return (
             .voice-preparing-pulse { animation: preparePulse 1.5s ease-in-out infinite; }
             @keyframes preparePulse { 0%, 100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.1); opacity: 1; } }
             .voice-stop-btn { animation: stopBtnGlow 2s ease-in-out infinite; }
-            @keyframes stopBtnGlow { 0%, 100% { box-shadow: 0 0 40px rgba(55,172,192,0.3), 0 0 80px rgba(251,129,132,0.15); } 50% { box-shadow: 0 0 60px rgba(55,172,192,0.5), 0 0 100px rgba(251,129,132,0.25); } }
+            @keyframes stopBtnGlow { 0%, 100% { box-shadow: 0 0 40px var(--accent-primary-bg), 0 0 80px var(--danger-bg); } 50% { box-shadow: 0 0 60px var(--accent-primary-bg), 0 0 100px var(--danger-bg); } }
             @keyframes voiceSpin { to { transform: rotate(360deg); } }
             .voice-spin { animation: voiceSpin 0.8s linear infinite; }
           `}</style>
@@ -2902,13 +3031,13 @@ return (
             }}>
               {/* Header */}
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" /></svg>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-primary)" }}><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" /></svg>
                 <span style={{ fontSize: 17, fontWeight: 700, color: "var(--text-primary)" }}>{t("mc.enterApiKey")}</span>
               </div>
 
               {/* Agent + env var */}
               <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                {apiKeyModal.agentId.charAt(0).toUpperCase() + apiKeyModal.agentId.slice(1)} — <code style={{ background: "rgba(55,172,192,0.15)", padding: "2px 6px", borderRadius: 6, fontSize: 12, color: "#37ACC0" }}>{info.envVar}</code>
+                {apiKeyModal.agentId.charAt(0).toUpperCase() + apiKeyModal.agentId.slice(1)} — <code style={{ background: "var(--accent-primary-bg)", padding: "2px 6px", borderRadius: 6, fontSize: 12, color: "var(--accent-primary)" }}>{info.envVar}</code>
               </div>
 
               {/* Get key link */}
@@ -2920,9 +3049,9 @@ return (
                 }} style={{
                   display: "flex", alignItems: "center", gap: 8,
                   padding: "10px 14px", borderRadius: 12,
-                  background: "rgba(55,172,192,0.1)",
-                  border: "1px solid rgba(55,172,192,0.25)",
-                  color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                  background: "var(--accent-primary-bg)",
+                  border: "1px solid var(--accent-primary-bg)",
+                  color: "var(--accent-primary)", fontSize: 13, fontWeight: 600,
                   cursor: "pointer", textAlign: "left",
                 }}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
@@ -2959,7 +3088,7 @@ return (
                 <button onClick={handleSave} disabled={!apiKeyInput.trim() || apiKeySaving} style={{
                   flex: 1, padding: "12px 0", borderRadius: 12,
                   border: "none",
-                  background: apiKeyInput.trim() ? "#37ACC0" : "rgba(55,172,192,0.3)",
+                  background: apiKeyInput.trim() ? "var(--accent-primary)" : "var(--accent-primary-bg)",
                   color: "#fff",
                   fontSize: 14, fontWeight: 600, cursor: apiKeyInput.trim() ? "pointer" : "default",
                   opacity: apiKeySaving ? 0.6 : 1,
@@ -2976,15 +3105,15 @@ return (
           padding: "12px 14px", borderRadius: 14,
           background: "var(--glass-bg)", backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
-          border: `1px solid ${evt.type === "plan_review_required" ? "rgba(55,172,192,0.4)" : evt.type === "daily_limit_reached" ? "rgba(245,158,11,0.4)" : "rgba(148,163,184,0.3)"}`,
+          border: `1px solid ${evt.type === "plan_review_required" ? "var(--accent-primary-bg)" : evt.type === "daily_limit_reached" ? "var(--warning-bg)" : "rgba(148,163,184,0.3)"}`,
           boxShadow: "0 4px 24px rgba(0,0,0,0.2)",
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             {/* Icon */}
             {evt.type === "plan_review_required" ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-primary)" }}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
             ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--warning)" }}><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             )}
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
@@ -3004,7 +3133,7 @@ return (
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => handleTrustAction(evt.automationId, "approve", i)} style={{
                 flex: 1, padding: "8px 12px", borderRadius: 10, border: "none",
-                background: "#37ACC0", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                background: "var(--accent-primary)", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer",
               }}>
                 {t("trust.planReviewApproved")?.replace("已", "") || "Approve"}
               </button>

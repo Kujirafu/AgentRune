@@ -17,6 +17,10 @@ export interface AutomationReport {
   fullLog: string
 }
 
+type AutomationReportInput =
+  Pick<AutomationResult, "summary" | "output">
+  & Partial<Pick<AutomationResult, "behaviorStateHash" | "promptStateHash" | "launchStateHash" | "behaviorStateIssues">>
+
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
 const FE_RE = /\x1b[@-Z\\-_]/g
@@ -224,6 +228,18 @@ const SYSTEM_FIELDS = [
   {
     aliases: ["materials error", "素材庫錯誤"],
     label: { en: "Materials Error", "zh-TW": "素材庫錯誤" },
+  },
+  {
+    aliases: ["config hash"],
+    label: { en: "Config Hash", "zh-TW": "設定雜湊" },
+  },
+  {
+    aliases: ["prompt hash"],
+    label: { en: "Prompt Hash", "zh-TW": "Prompt 雜湊" },
+  },
+  {
+    aliases: ["launch hash"],
+    label: { en: "Launch Hash", "zh-TW": "啟動雜湊" },
   },
 ] as const
 
@@ -541,6 +557,34 @@ function extractSummary(markdown: string): string | null {
   return summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
 }
 
+function buildBehaviorStateMarkdown(result: AutomationReportInput, locale: AutomationReportLocale): string {
+  const issues = result.behaviorStateIssues?.filter(Boolean) || []
+  if (issues.length === 0 && !result.behaviorStateHash && !result.promptStateHash && !result.launchStateHash) {
+    return ""
+  }
+
+  const lines: string[] = []
+
+  if (issues.length > 0) {
+    lines.push(locale === "zh-TW" ? "偵測到 runtime 設定漂移：" : "Runtime configuration drift was detected:")
+    for (const issue of issues) {
+      lines.push(`- ${issue}`)
+    }
+  }
+
+  if (result.behaviorStateHash) {
+    lines.push(`- ${localizeSystemLine(`Config Hash: ${result.behaviorStateHash}`, locale)}`)
+  }
+  if (result.promptStateHash) {
+    lines.push(`- ${localizeSystemLine(`Prompt Hash: ${result.promptStateHash}`, locale)}`)
+  }
+  if (result.launchStateHash) {
+    lines.push(`- ${localizeSystemLine(`Launch Hash: ${result.launchStateHash}`, locale)}`)
+  }
+
+  return renderMarkdown(lines, locale)
+}
+
 function toSections(
   map: Map<AutomationReportSectionKey, string>,
   locale: AutomationReportLocale,
@@ -560,7 +604,7 @@ function toSections(
 }
 
 export function buildAutomationReport(
-  result: Pick<AutomationResult, "summary" | "output">,
+  result: AutomationReportInput,
   locale: AutomationReportLocale = "en",
 ): AutomationReport {
   const cleanedSummary = sanitizeText(result.summary)
@@ -579,6 +623,12 @@ export function buildAutomationReport(
   const publishMarkdown = extractInternalPublishSection(cleanedOutput, locale)
   if (publishMarkdown) {
     mergedSections.set("results", mergeMarkdown(mergedSections.get("results") || "", publishMarkdown))
+  }
+
+  const behaviorStateMarkdown = buildBehaviorStateMarkdown(result, locale)
+  if (behaviorStateMarkdown) {
+    const targetKey: AutomationReportSectionKey = result.behaviorStateIssues?.length ? "issues" : "notes"
+    mergedSections.set(targetKey, mergeMarkdown(mergedSections.get(targetKey) || "", behaviorStateMarkdown))
   }
 
   let leadMarkdown = summaryParsed.leadMarkdown || outputParsed.leadMarkdown

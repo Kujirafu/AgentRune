@@ -1,1 +1,1 @@
-export type SocialPlatform = "threads" | "moltbook"
+export type SocialPlatform = "threads" | "moltbook" | "x"

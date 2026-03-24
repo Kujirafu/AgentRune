@@ -338,9 +338,9 @@ function highlightInput(text: string) {
 
   const STYLES: Record<string, React.CSSProperties> = {
     plain: { color: "var(--text-primary)" },
-    url: { color: "#37ACC0", textDecoration: "underline", textDecorationColor: "rgba(55,172,192,0.3)" },
+    url: { color: "var(--accent-primary)", textDecoration: "underline", textDecorationColor: "var(--accent-primary-bg)" },
     command: { color: "#a78bfa", fontWeight: 600 },
-    path: { color: "#f59e0b", background: "rgba(245,158,11,0.08)", borderRadius: 3, padding: "0 2px" },
+    path: { color: "var(--warning)", background: "var(--warning-bg)", borderRadius: 3, padding: "0 2px" },
   }
 
   return parts.map((p, i) => (
@@ -1186,7 +1186,7 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
                             </div>
                           ))}
                           {skill.gotchas.length > 0 && (
-                            <div style={{ marginTop: 6, color: "#f59e0b", fontSize: 11 }}>
+                            <div style={{ marginTop: 6, color: "var(--warning)", fontSize: 11 }}>
                               {skill.gotchas.map((g, i) => (
                                 <div key={i}>⚠ {g}</div>
                               ))}
@@ -1323,15 +1323,15 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
                 }} style={{
                   display: "flex", alignItems: "center", gap: 6,
                   padding: "6px 10px", borderRadius: 10, flexShrink: 0,
-                  background: "rgba(245,158,11,0.08)",
-                  border: "1px solid rgba(245,158,11,0.2)",
+                  background: "var(--warning-bg)",
+                  border: "1px solid var(--warning-bg)",
                   cursor: "pointer", maxWidth: 160,
                 }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--warning)" }}>
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <polyline points="14 2 14 8 20 8" />
                   </svg>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--warning)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {name}
                   </span>
                   <button onClick={(e) => {

@@ -1,4 +1,6 @@
+import crypto from "node:crypto"
 import { loadConfig } from "../shared/config.js"
+import { log } from "../shared/logger.js"
 import { loadNamedVaultSecrets } from "./vault-keys.js"
 import type { SocialPlatform } from "./social-types.js"
 
@@ -26,6 +28,9 @@ export interface SocialPublishResult {
 
 const THREADS_MAX_LENGTH = 500
 const MOLTBOOK_BASE_URL = "https://www.moltbook.com"
+const X_API_URL = "https://api.twitter.com/2/tweets"
+const X_THREAD_DELAY_MS = 3000
+const X_CTA_DELAY_MS = 10000
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000
 const DEFAULT_TEMP_FAILURE_COOLDOWN_MS = 10 * 60 * 1000
 
@@ -43,9 +48,12 @@ const SINGLE_NUMBER_CONTEXT_KEYWORDS = new Set([
   "sum",
   "plus",
   "minus",
+  "subtract",
   "times",
   "multiply",
   "multiplied",
+  "divide",
+  "divided",
   "double",
   "doubles",
   "doubling",
@@ -60,6 +68,10 @@ const SINGLE_NUMBER_CONTEXT_KEYWORDS = new Set([
   "halved",
   "halving",
 ])
+const PLUS_KEYWORDS = new Set(["plus", "add", "added", "sum"])
+const MINUS_KEYWORDS = new Set(["minus", "subtract", "subtracted", "less", "from"])
+const TIMES_KEYWORDS = new Set(["times", "multiply", "multiplied", "product"])
+const DIVIDE_KEYWORDS = new Set(["divide", "divided", "over"])
 const WORD_TO_NUM: Record<string, number> = {
   zero: 0,
   one: 1,
@@ -106,6 +118,10 @@ export async function publishSocialPost(request: SocialPublishRequest): Promise<
 
   if (request.platform === "moltbook") {
     return publishMoltbookPost(request)
+  }
+
+  if (request.platform === "x") {
+    return publishXPost(request)
   }
 
   return {
@@ -245,7 +261,10 @@ async function publishMoltbookPost(request: SocialPublishRequest): Promise<Socia
   const challengeText = readString(verification.challenge_text) || readString(verification.challenge)
   const answer = solveMoltbookChallenge(challengeText)
 
+  log.info(`[Moltbook] verification challenge: "${challengeText}" → answer: "${answer}"`)
+
   if (!verificationCode || !answer) {
+    log.warn(`[Moltbook] could not solve challenge: code=${!!verificationCode} answer=${!!answer}`)
     return { success: false, platform: "moltbook", error: "Moltbook verification challenge could not be solved" }
   }
 
@@ -264,10 +283,244 @@ async function publishMoltbookPost(request: SocialPublishRequest): Promise<Socia
   const verifyData = await safeJson(verifyRes)
   const verified = verifyRes.ok && verifyData?.success === true
   if (!verified) {
+    log.warn(`[Moltbook] verification failed: status=${verifyRes.status} data=${JSON.stringify(verifyData)}`)
     return buildApiFailure("moltbook", verifyRes.status, verifyData, verifyRes.headers)
   }
 
   return { success: true, platform: "moltbook", postId }
+}
+
+// ── Moltbook CTA self-reply ──
+
+export interface MoltbookCommentResult {
+  success: boolean
+  commentId?: string
+  error?: string
+}
+
+const CTA_VARIANTS = [
+  "If you want to explore these ideas hands-on: AgentLore is our AI-verified knowledge base with 23 MCP tools — https://agentlore.vercel.app/en/get-started\n\nAgentRune is the open-source mobile controller for AI coding agents — https://github.com/Kujirafu/AgentRune",
+  "Want to try this? AgentLore gives your agents a verified knowledge base via MCP — https://agentlore.vercel.app/en/get-started\n\nAgentRune lets you control coding agents from your phone (open source) — https://github.com/Kujirafu/AgentRune",
+  "Curious to try it yourself? AgentLore is the knowledge layer — 23 MCP tools, confidence-scored entries: https://agentlore.vercel.app/en/get-started\n\nAgentRune is the control layer — run and manage agents from your phone: https://github.com/Kujirafu/AgentRune",
+  "If this resonates, you can try the tools behind it: AgentLore (AI-verified knowledge base, MCP server) — https://agentlore.vercel.app/en/get-started\n\nAgentRune (open-source agent controller for mobile) — https://github.com/Kujirafu/AgentRune",
+  "For anyone who wants to dig deeper: AgentLore is our MCP-powered knowledge base for agents — https://agentlore.vercel.app/en/get-started\n\nAgentRune is the open-source mobile app for controlling AI coding agents — https://github.com/Kujirafu/AgentRune",
+]
+
+export function pickCtaVariant(): string {
+  return CTA_VARIANTS[Math.floor(Math.random() * CTA_VARIANTS.length)]
+}
+
+export async function postMoltbookComment(postId: string, content: string): Promise<MoltbookCommentResult> {
+  const cfg = loadConfig()
+  const secrets = loadNamedVaultSecrets({
+    vaultPath: cfg.vaultPath,
+    keyVaultPath: cfg.keyVaultPath,
+  }, ["MOLTBOOK_API_KEY"])
+
+  const apiKey = secrets.MOLTBOOK_API_KEY?.trim()
+  if (!apiKey) {
+    return { success: false, error: "Moltbook credentials not available" }
+  }
+
+  const res = await fetch(`${MOLTBOOK_BASE_URL}/api/v1/posts/${postId}/comments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content: content.trim() }),
+  })
+
+  const data = await safeJson(res)
+  if (!res.ok || !data.success) {
+    return { success: false, error: formatApiError(res.status, data) }
+  }
+
+  const commentId = data.comment?.id
+  return { success: true, ...(commentId ? { commentId } : {}) }
+}
+
+// ── X/Twitter OAuth 1.0a ──
+
+function percentEncodeOAuth(str: string): string {
+  return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+function generateXOAuthSignature(
+  method: string,
+  url: string,
+  params: Record<string, string>,
+  consumerSecret: string,
+  accessSecret: string,
+): string {
+  const sortedKeys = Object.keys(params).sort()
+  const paramString = sortedKeys.map((k) => `${percentEncodeOAuth(k)}=${percentEncodeOAuth(params[k])}`).join("&")
+  const baseString = `${method}&${percentEncodeOAuth(url)}&${percentEncodeOAuth(paramString)}`
+  const signingKey = `${percentEncodeOAuth(consumerSecret)}&${percentEncodeOAuth(accessSecret)}`
+  return crypto.createHmac("sha1", signingKey).update(baseString).digest("base64")
+}
+
+function buildXAuthHeader(
+  method: string,
+  url: string,
+  consumerKey: string,
+  consumerSecret: string,
+  accessToken: string,
+  accessSecret: string,
+): string {
+  const oauthParams: Record<string, string> = {
+    oauth_consumer_key: consumerKey,
+    oauth_nonce: crypto.randomBytes(16).toString("hex"),
+    oauth_signature_method: "HMAC-SHA1",
+    oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
+    oauth_token: accessToken,
+    oauth_version: "1.0",
+  }
+  oauthParams.oauth_signature = generateXOAuthSignature(method, url, oauthParams, consumerSecret, accessSecret)
+  const header = Object.keys(oauthParams)
+    .sort()
+    .map((k) => `${percentEncodeOAuth(k)}="${percentEncodeOAuth(oauthParams[k])}"`)
+    .join(", ")
+  return `OAuth ${header}`
+}
+
+// ── X/Twitter publishing ──
+
+async function publishXPost(request: SocialPublishRequest): Promise<SocialPublishResult> {
+  const cfg = loadConfig()
+  const secrets = loadNamedVaultSecrets({
+    vaultPath: cfg.vaultPath,
+    keyVaultPath: cfg.keyVaultPath,
+  }, ["X_CONSUMER_KEY", "X_CONSUMER_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET"])
+
+  const consumerKey = secrets.X_CONSUMER_KEY?.trim()
+  const consumerSecret = secrets.X_CONSUMER_SECRET?.trim()
+  const accessToken = secrets.X_ACCESS_TOKEN?.trim()
+  const accessSecret = secrets.X_ACCESS_SECRET?.trim()
+  if (!consumerKey || !consumerSecret || !accessToken || !accessSecret) {
+    return { success: false, platform: "x", error: "X/Twitter credentials not available in key vault" }
+  }
+
+  const segments = request.text.split("\n---\n").map((s) => s.trim()).filter(Boolean)
+  if (segments.length === 0) {
+    return { success: false, platform: "x", error: "Post text is empty" }
+  }
+
+  const tooLong = segments.findIndex((s) => s.length > 280)
+  if (tooLong >= 0) {
+    return { success: false, platform: "x", error: `Tweet segment ${tooLong + 1} exceeds 280 characters (${segments[tooLong].length})` }
+  }
+
+  // Post first tweet
+  const firstRes = await fetch(X_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: buildXAuthHeader("POST", X_API_URL, consumerKey, consumerSecret, accessToken, accessSecret),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text: segments[0] }),
+  })
+
+  const firstData = await safeJson(firstRes)
+  if (!firstRes.ok) {
+    return buildApiFailure("x", firstRes.status, firstData, firstRes.headers)
+  }
+
+  const firstTweetId = firstData?.data?.id
+  if (!firstTweetId) {
+    return { success: false, platform: "x", error: "X/Twitter publish response missing tweet id" }
+  }
+
+  // If single tweet, return immediately
+  if (segments.length === 1) {
+    return { success: true, platform: "x", postId: firstTweetId }
+  }
+
+  // Post thread — reply each segment to the previous one
+  let previousId = firstTweetId
+  for (let i = 1; i < segments.length; i++) {
+    await new Promise((resolve) => setTimeout(resolve, X_THREAD_DELAY_MS))
+
+    const replyRes = await fetch(X_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: buildXAuthHeader("POST", X_API_URL, consumerKey, consumerSecret, accessToken, accessSecret),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: segments[i],
+        reply: { in_reply_to_tweet_id: previousId },
+      }),
+    })
+
+    const replyData = await safeJson(replyRes)
+    if (!replyRes.ok) {
+      log.warn(`[X] Thread segment ${i + 1} failed: ${replyRes.status} ${JSON.stringify(replyData)}`)
+      return {
+        success: true,
+        platform: "x",
+        postId: firstTweetId,
+        error: `Thread partially posted (${i}/${segments.length} segments). Segment ${i + 1} failed: ${replyRes.status}`,
+      }
+    }
+
+    previousId = replyData?.data?.id || previousId
+  }
+
+  return { success: true, platform: "x", postId: firstTweetId }
+}
+
+export async function postXSelfReply(
+  tweetId: string,
+  text: string,
+): Promise<{ success: boolean; tweetId?: string; error?: string }> {
+  const cfg = loadConfig()
+  const secrets = loadNamedVaultSecrets({
+    vaultPath: cfg.vaultPath,
+    keyVaultPath: cfg.keyVaultPath,
+  }, ["X_CONSUMER_KEY", "X_CONSUMER_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET"])
+
+  const consumerKey = secrets.X_CONSUMER_KEY?.trim()
+  const consumerSecret = secrets.X_CONSUMER_SECRET?.trim()
+  const accessToken = secrets.X_ACCESS_TOKEN?.trim()
+  const accessSecret = secrets.X_ACCESS_SECRET?.trim()
+  if (!consumerKey || !consumerSecret || !accessToken || !accessSecret) {
+    return { success: false, error: "X/Twitter credentials not available" }
+  }
+
+  const res = await fetch(X_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: buildXAuthHeader("POST", X_API_URL, consumerKey, consumerSecret, accessToken, accessSecret),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: text.trim(),
+      reply: { in_reply_to_tweet_id: tweetId },
+    }),
+  })
+
+  const data = await safeJson(res)
+  if (!res.ok) {
+    return { success: false, error: formatApiError(res.status, data) }
+  }
+
+  const replyTweetId = data?.data?.id
+  return { success: true, ...(replyTweetId ? { tweetId: replyTweetId } : {}) }
+}
+
+// ── X CTA variants ──
+
+const X_CTA_VARIANTS = [
+  "We built the tools behind these ideas:\n\nAgentLore — AI knowledge base, 23 MCP tools\nhttps://agentlore.vercel.app/en/get-started\n\nAgentRune — open-source agent controller\nhttps://github.com/Kujirafu/AgentRune",
+  "If you want to try this yourself:\n\nAgentLore (MCP knowledge base): https://agentlore.vercel.app/en/get-started\nAgentRune (mobile agent control): https://github.com/Kujirafu/AgentRune",
+  "Tools we built for this:\n\nAgentLore — verified knowledge base for AI agents\nhttps://agentlore.vercel.app/en/get-started\n\nAgentRune — control coding agents from your phone\nhttps://github.com/Kujirafu/AgentRune",
+  "Want to dig deeper?\n\nAgentLore: https://agentlore.vercel.app/en/get-started\n(AI-verified knowledge, MCP server)\n\nAgentRune: https://github.com/Kujirafu/AgentRune\n(open-source, manage agents from mobile)",
+  "Built with:\n\nAgentLore — knowledge layer for AI agents (23 MCP tools)\nhttps://agentlore.vercel.app/en/get-started\n\nAgentRune — agent controller for mobile (AGPL-3.0)\nhttps://github.com/Kujirafu/AgentRune",
+]
+
+export function pickXCtaVariant(): string {
+  return X_CTA_VARIANTS[Math.floor(Math.random() * X_CTA_VARIANTS.length)]
 }
 
 async function safeJson(res: Response): Promise<any> {
@@ -422,7 +675,18 @@ export function solveMoltbookChallenge(text: string | null | undefined): string 
   if (uniqueNumbers.length === 0) return null
   if (uniqueNumbers.length === 1 && shouldRejectSingleNumber(tokens)) return null
   if (uniqueNumbers.length === 1) return formatSolvedNumber(uniqueNumbers[0])
-  if (uniqueNumbers.length === 2) return formatSolvedNumber(uniqueNumbers[0] + uniqueNumbers[1])
+
+  if (uniqueNumbers.length === 2) {
+    const op = detectOperator(tokens)
+    const [a, b] = uniqueNumbers
+    switch (op) {
+      case "subtract": return formatSolvedNumber(a - b)
+      case "multiply": return formatSolvedNumber(a * b)
+      case "divide": return b !== 0 ? formatSolvedNumber(a / b) : null
+      default: return formatSolvedNumber(a + b)
+    }
+  }
+
   return formatSolvedNumber(uniqueNumbers.reduce((sum, value) => sum + value, 0))
 }
 
@@ -430,6 +694,18 @@ function tokenizeChallenge(text: string): string[] {
   const cleaned = smartClean(text)
   const tokens = cleaned.split(" ").filter(Boolean)
   return mergeSplitNumberTokens(tokens)
+}
+
+type MathOperator = "add" | "subtract" | "multiply" | "divide"
+
+function detectOperator(tokens: string[]): MathOperator {
+  for (const token of tokens) {
+    if (MINUS_KEYWORDS.has(token)) return "subtract"
+    if (TIMES_KEYWORDS.has(token)) return "multiply"
+    if (DIVIDE_KEYWORDS.has(token)) return "divide"
+    if (PLUS_KEYWORDS.has(token)) return "add"
+  }
+  return "add"
 }
 
 function smartClean(text: string): string {

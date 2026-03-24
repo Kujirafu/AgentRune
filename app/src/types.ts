@@ -66,6 +66,12 @@ export interface ProjectSettings {
   cursorMode: CursorMode
   cursorModel: string
   cursorSandbox: CursorSandbox
+  // Routing
+  routingRules?: RoutingRule[]
+  // Global sandbox (overridden by feature-specific: automation trustProfile, skill chain config)
+  sandboxLevel: "strict" | "moderate" | "permissive" | "none"
+  requirePlanReview: boolean
+  requireMergeApproval: boolean
   // Injected at launch time (not persisted)
   locale?: string
 }
@@ -77,6 +83,7 @@ export interface AppSession {
   worktreeBranch?: string | null
   status?: "active" | "recoverable"
   claudeSessionId?: string
+  taskTitle?: string
 }
 
 export interface SmartAction {
@@ -119,6 +126,8 @@ export interface AgentEvent {
   }
   decision?: {
     options: DecisionOption[]
+    purpose?: string    // 目的 — why the agent needs this permission
+    scope?: string      // 影響範圍 — what files/systems will be affected
   }
   progress?: ProgressReport
   _images?: string[]  // base64 image thumbnails for user messages
@@ -220,6 +229,29 @@ export interface ProgressReport {
   details?: string
 }
 
+// ── Routing Rules ──
+
+export interface RoutingRule {
+  id: string
+  keywords: string[]
+  agentId: string
+  enabled: boolean
+}
+
+export const DEFAULT_ROUTING_RULES: RoutingRule[] = [
+  { id: "default-1", keywords: ["test", "spec", "coverage", "unit"], agentId: "codex", enabled: true },
+  { id: "default-2", keywords: ["fix", "bug", "error", "debug", "crash"], agentId: "claude", enabled: true },
+  { id: "default-3", keywords: ["refactor", "clean", "rename", "move"], agentId: "gemini", enabled: true },
+]
+
+export interface DetectedAgent {
+  id: string
+  name: string
+  installed: boolean
+  version?: string
+  path?: string
+}
+
 export const DEFAULT_SETTINGS: ProjectSettings = {
   model: "sonnet",
   bypass: false,
@@ -244,6 +276,9 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   cursorMode: "default",
   cursorModel: "",
   cursorSandbox: "default",
+  sandboxLevel: "none",
+  requirePlanReview: false,
+  requireMergeApproval: false,
 }
 
 // AgentRune Protocol — injected into every agent's system/initial prompt.
@@ -456,3 +491,6 @@ export const AGENTS: AgentDef[] = [
     command: () => null,
   },
 ]
+
+export const KNOWN_AGENT_IDS = AGENTS.map(a => a.id)
+export const MODEL_NAMES = ["opus", "sonnet", "haiku", "flash", "gpt-4o", "o3-mini", "deepseek"] as const

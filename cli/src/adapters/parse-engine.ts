@@ -9,7 +9,7 @@ export class ParseEngine {
   private ctx: ParseContext
   private adapter
 
-  constructor(agentId: string, projectId: string, projectCwd?: string) {
+  constructor(agentId: string, projectId: string, projectCwd?: string, locale?: string) {
     this.adapter = getAdapter(agentId)
     this.ctx = {
       buffer: "",
@@ -17,6 +17,7 @@ export class ParseEngine {
       projectId,
       projectCwd,
       isIdle: false,
+      locale,
     }
   }
 

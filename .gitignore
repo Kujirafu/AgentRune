@@ -32,8 +32,18 @@ app/android/capacitor-cordova-android-plugins/build/
 app/android/.gradle/
 app/android/local.properties
 
-# Internal context
+# Internal context (keep rules.md tracked for public repo)
 .agentrune/
+!.agentrune/rules.md
+
+# Agent session state
+.agentrune-session.json
+
+# Claude Code project instructions (contains private paths)
+CLAUDE.md
+
+# Design plans (contain local paths)
+docs/plans/
 
 # Claude Code settings (may contain tokens)
 .claude/
@@ -43,6 +53,11 @@ app/android/local.properties
 *.iml
 .vscode/
 
+# Coverage reports
+coverage/
+app/coverage/
+desktop/coverage/
+
 # Local QA / scratch outputs
 .superpowers/
 docs/superpowers/
@@ -51,3 +66,4 @@ tmp-*.json
 tmp-*.png
 app/test-results/
 cli/coverage/
+.worktrees/

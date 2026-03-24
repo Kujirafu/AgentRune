@@ -31,16 +31,25 @@ DAEMON_PID_FILE="$(daemon_pid_file_for_port "$PORT")"
 
 ensure_watchdog_state_dir
 
-echo "[safe-restart] Step 1/3: Building CLI..."
+echo "[safe-restart] Step 1/4: Building App..."
+cd "$CLI_DIR/.."
+if ! APP_BUILD=$(cd app && npx vite build 2>&1); then
+  echo "[safe-restart] APP BUILD FAILED -- daemon NOT restarted"
+  echo "$APP_BUILD"
+  exit 1
+fi
+echo "[safe-restart] App build OK"
+
+echo "[safe-restart] Step 2/4: Building CLI..."
 cd "$CLI_DIR"
 if ! BUILD_OUTPUT=$(npm run build 2>&1); then
-  echo "[safe-restart] BUILD FAILED -- daemon NOT restarted"
+  echo "[safe-restart] CLI BUILD FAILED -- daemon NOT restarted"
   echo "$BUILD_OUTPUT"
   exit 1
 fi
-echo "[safe-restart] Build OK"
+echo "[safe-restart] CLI build OK"
 
-echo "[safe-restart] Step 2/3: Stopping old daemon (keeping tunnel alive)..."
+echo "[safe-restart] Step 3/4: Stopping old daemon (keeping tunnel alive)..."
 
 OLD_WD_PID=$(read_pid_file_value "$WATCHDOG_PID_FILE" 2>/dev/null || true)
 if [ -n "$OLD_WD_PID" ]; then
@@ -72,7 +81,7 @@ if ! wait_for_port_free "$PORT" 10 1; then
 fi
 echo "[safe-restart] Port $PORT is free"
 
-echo "[safe-restart] Step 3/3: Starting daemon via watchdog..."
+echo "[safe-restart] Step 4/4: Starting daemon via watchdog..."
 
 truncate_state_file "$LOG_FILE" "$WATCHDOG_LABEL"
 

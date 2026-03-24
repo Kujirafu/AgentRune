@@ -36,7 +36,20 @@ test.describe("PRD Flow", () => {
   })
 
   test("tasks API returns PRD data", async ({ request }) => {
-    const res = await request.get("/api/tasks/agentrune")
+    const projectId = "e2e-prd-compat-project"
+    const seedRes = await request.post(`/api/prd/${projectId}`, {
+      data: {
+        title: "Compat PRD",
+        goal: "Verify legacy tasks endpoint reads PRD data",
+        decisions: [{ question: "Compat?", answer: "Yes" }],
+        approaches: [],
+        scope: { included: ["compat"], excluded: [] },
+        tasks: [{ id: 1, title: "Backfill tasks API", status: "pending", description: "compat", dependsOn: [] }],
+      },
+    })
+    expect(seedRes.ok()).toBeTruthy()
+
+    const res = await request.get(`/api/tasks/${projectId}`)
     expect(res.ok()).toBeTruthy()
     const data = await res.json()
     expect(data.prd).toBeDefined()

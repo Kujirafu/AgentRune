@@ -1,0 +1,38 @@
+appId: app.agentrune.desktop
+productName: AgentRune
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - assets/**/*
+  - package.json
+
+extraResources:
+  - from: ../cli/dist
+    to: cli-dist
+    filter: ["**/*"]
+  - from: ../cli/node_modules/node-pty
+    to: cli-dist/node_modules/node-pty
+    filter: ["**/*"]
+  - from: ../app/dist
+    to: app-dist
+    filter: ["**/*"]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: assets/icon.ico
+
+nsis:
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+
+publish:
+  provider: github
+  owner: Kujirafu
+  repo: AgentRune

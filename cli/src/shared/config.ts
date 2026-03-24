@@ -3,10 +3,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 
+export interface RoutingRule {
+  id: string
+  keywords: string[]
+  agentId: string
+  enabled: boolean
+}
+
 export interface Config {
   port: number
   vaultPath?: string  // Obsidian vault path for shared memory (e.g. "C:/Users/me/Obsidian/MyVault")
   keyVaultPath?: string  // Path to key vault directory containing markdown files with API keys
+  routingRules?: RoutingRule[]  // Global routing rules (keyword → agent)
   agentlore?: {
     token: string
     deviceId: string
@@ -14,7 +22,7 @@ export interface Config {
 }
 
 const DEFAULT_CONFIG: Config = {
-  port: 3456,
+  port: 3457,
 }
 
 const KEY_VAULT_DIRNAME = "金鑰庫"
@@ -69,7 +77,7 @@ export function saveConfig(config: Config): void {
 }
 
 export function getPidFile(port?: number): string {
-  const suffix = port && port !== 3456 ? `-${port}` : ""
+  const suffix = port && port !== 3457 ? `-${port}` : ""
   return join(getConfigDir(), `daemon${suffix}.pid`)
 }
 

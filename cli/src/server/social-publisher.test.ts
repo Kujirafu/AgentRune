@@ -184,6 +184,29 @@ describe("social-publisher", () => {
     expect(solveMoltbookChallenge("halves 8")).toBe("4")
   })
 
+  it("solves subtraction challenges", () => {
+    expect(solveMoltbookChallenge("what is 10 minus 3")).toBe("7")
+    expect(solveMoltbookChallenge("what is fifteen subtract five")).toBe("10")
+    expect(solveMoltbookChallenge("20 less 8")).toBe("12")
+  })
+
+  it("solves multiplication challenges", () => {
+    expect(solveMoltbookChallenge("what is 5 times 3")).toBe("15")
+    expect(solveMoltbookChallenge("what is seven multiplied by four")).toBe("28")
+    expect(solveMoltbookChallenge("multiply 6 and 9")).toBe("54")
+  })
+
+  it("solves division challenges", () => {
+    expect(solveMoltbookChallenge("what is 20 divided by 4")).toBe("5")
+    expect(solveMoltbookChallenge("divide 15 by 3")).toBe("5")
+    expect(solveMoltbookChallenge("what is twelve over six")).toBe("2")
+  })
+
+  it("still defaults to addition when no operator keyword", () => {
+    expect(solveMoltbookChallenge("what is seven plus five")).toBe("12")
+    expect(solveMoltbookChallenge("what is 3 and 4")).toBe("7")
+  })
+
   it("rejects fuzzy and contextual false positives", () => {
     expect(solveMoltbookChallenge("fight")).toBeNull()
     expect(solveMoltbookChallenge("one claw")).toBeNull()

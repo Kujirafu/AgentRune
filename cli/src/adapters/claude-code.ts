@@ -450,6 +450,55 @@ export const claudeCodeAdapter: AgentAdapter = {
           : "Agent is requesting permission"
         dbg(`[PERM-DETAIL] detail="${detail.slice(0,80)}" bufTail(last200)="${bufTail.slice(-200).replace(/\n/g, "\\n")}"`)
 
+        // Auto-generate purpose/scope from tool call (adapter-only, i18n via ctx.locale)
+        const zh = !ctx.locale || ctx.locale.startsWith("zh")
+        const d = (detail || "").toLowerCase()
+        const toolMatch = (detail || "").match(/^(Bash|Edit|Write|Read|Glob|Grep|Agent)\s*[\s(]/i)
+        const tool = toolMatch?.[1]?.toLowerCase() || ""
+        let purpose: string
+        if (tool === "bash" || /bash\s+command/i.test(detail || "")) {
+          if (/\b(head|cat|tail|less)\b/.test(d)) purpose = zh ? "查看檔案內容" : "View file contents"
+          else if (/\b(find|ls|dir)\b/.test(d)) purpose = zh ? "搜尋或列出檔案" : "Search or list files"
+          else if (/\bgrep\b/.test(d)) purpose = zh ? "搜尋文字內容" : "Search text content"
+          else if (/\bnpm\b/.test(d)) purpose = zh ? "執行 npm 指令" : "Run npm command"
+          else if (/\bgit\b/.test(d)) purpose = zh ? "執行 git 操作" : "Run git operation"
+          else if (/\brm\b/.test(d)) purpose = zh ? "刪除檔案" : "Delete files"
+          else if (/\bmkdir\b/.test(d)) purpose = zh ? "建立目錄" : "Create directory"
+          else if (/\b(node|npx|tsx|python)\b/.test(d)) purpose = zh ? "執行程式" : "Run program"
+          else if (/\b(curl|wget|fetch)\b/.test(d)) purpose = zh ? "發送網路請求" : "Send network request"
+          else purpose = zh ? "執行 shell 指令" : "Run shell command"
+        } else if (tool === "read") purpose = zh ? "讀取檔案" : "Read file"
+        else if (tool === "edit") purpose = zh ? "修改檔案" : "Modify file"
+        else if (tool === "write") purpose = zh ? "建立或覆寫檔案" : "Create/overwrite file"
+        else if (tool === "glob") purpose = zh ? "搜尋檔案" : "Search files"
+        else if (tool === "grep") purpose = zh ? "搜尋文字內容" : "Search text"
+        else if (tool === "agent") purpose = zh ? "啟動子任務" : "Launch subtask"
+        else purpose = zh ? "需要你的許可才能繼續" : "Needs your permission to continue"
+        // Impact scope: risk + functional area
+        const pathStr = (detail || "").replace(/\\/g, "/")
+        const isReadOnly = /\b(head|cat|tail|less|read|glob|grep|find|ls|dir|wc)\b/.test(d)
+        const isDelete = /\brm\b/.test(d)
+        const isInstall = /\b(npm|yarn|pip|apt)\s+(install|add|update|upgrade)\b/.test(d)
+        const isGitPush = /\bgit\s+(push|reset|rebase|force)\b/.test(d)
+        let area = ""
+        if (/app\/src\/components|\.tsx/.test(pathStr)) area = zh ? "前端 UI" : "Frontend UI"
+        else if (/app\/src\/lib|app\/src\/hooks/.test(pathStr)) area = zh ? "前端邏輯" : "Frontend logic"
+        else if (/cli\/src\/server/.test(pathStr)) area = zh ? "後端 Server" : "Backend server"
+        else if (/cli\/src\/adapters/.test(pathStr)) area = zh ? "Agent 連接層" : "Agent adapter layer"
+        else if (/desktop\//.test(pathStr)) area = zh ? "桌面版" : "Desktop app"
+        else if (/\.test\.|\.spec\./.test(pathStr)) area = zh ? "測試" : "Tests"
+        else if (/package\.json|package-lock/.test(pathStr)) area = zh ? "專案依賴" : "Project dependencies"
+        else if (/\.config|tsconfig|vite\.config/.test(pathStr)) area = zh ? "建置設定" : "Build config"
+        else if (/\.md$/.test(pathStr)) area = zh ? "文件" : "Documentation"
+        let scope: string
+        if (isReadOnly) scope = zh ? "唯讀，無風險" : "Read-only, no risk"
+        else if (isDelete) scope = area ? (zh ? `高風險 — 刪除${area}相關檔案` : `High risk — deleting ${area} files`) : (zh ? "高風險 — 刪除操作" : "High risk — delete operation")
+        else if (isGitPush) scope = zh ? "高風險 — 影響 git 歷史" : "High risk — affects git history"
+        else if (isInstall) scope = zh ? "中風險 — 修改依賴，可能影響所有功能" : "Medium risk — modifies dependencies"
+        else if (tool === "edit" || tool === "write") scope = area ? (zh ? `會修改${area}` : `Modifies ${area}`) : (zh ? "會修改檔案" : "Modifies files")
+        else if (tool === "bash") scope = area ? (zh ? `可能影響${area}` : `May affect ${area}`) : (zh ? "執行 shell 指令" : "Runs shell command")
+        else scope = area || (zh ? "一般操作" : "General operation")
+        dbg(`[PERM-CONTEXT] purpose="${purpose?.slice(0,60) || "none"}" scope="${scope?.slice(0,60) || "none"}"`)
 
         if (maxNum >= 2 && !hasLegacy) {
           const labels = maxNum >= 3
@@ -457,7 +506,8 @@ export const claudeCodeAdapter: AgentAdapter = {
             : ["Allow", "Deny"]
           for (let i = 0; i < Math.min(maxNum, labels.length); i++) {
             const isDeny = /deny/i.test(labels[i])
-            options.push({ label: labels[i], input: "\x1b[B".repeat(i) + "\r", style: isDeny ? "danger" as const : "primary" as const })
+            // Claude Code v2.1+ uses number keys (1/2/3) for TUI selection, not arrow keys
+            options.push({ label: labels[i], input: `${i + 1}\r`, style: isDeny ? "danger" as const : "primary" as const })
           }
         } else {
           options.push(
@@ -475,9 +525,9 @@ export const claudeCodeAdapter: AgentAdapter = {
             id: makeEventId(), timestamp: now,
             type: "decision_request", status: "waiting",
             title, detail, raw: chunk,
-            decision: { options },
+            decision: { options, purpose, scope },
           })
-          dbg(`[MENU-EMIT] title=${title} detail=${detail.slice(0,60)} opts=${options.length} maxNum=${maxNum}`)
+          dbg(`[MENU-EMIT] title=${title} detail=${detail.slice(0,60)} opts=${options.length} maxNum=${maxNum} purpose=${purpose?.slice(0,40) || "none"}`)
         }
       }
 

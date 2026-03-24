@@ -30,6 +30,8 @@ export interface AgentEvent {
   }
   decision?: {
     options: DecisionOption[]
+    purpose?: string    // 目的 — why the agent needs this permission
+    scope?: string      // 影響範圍 — what files/systems will be affected
   }
   progress?: ProgressReport
 }
@@ -99,11 +101,18 @@ export interface PrdItem {
 }
 
 /** @deprecated Use PrdItem instead — kept for migration */
+export interface Prd {
+  goal: string
+  decisions: PrdDecision[]
+  approaches: PrdApproach[]
+  scope: { included: string[]; excluded: string[] }
+}
+
 export interface TaskStore {
   projectId: string
   requirement: string
   tasks: Task[]
-  prd?: string
+  prd?: Prd
   createdAt: number
   updatedAt: number
 }
@@ -118,6 +127,7 @@ export interface ParseContext {
   isIdle: boolean
   resumeCursorOffset?: number  // net cursor position after server auto-scroll in /resume TUI
   resumeTuiActive?: boolean    // signal from parse engine: resume TUI is on screen (trigger only, no decision event)
+  locale?: string              // user locale for i18n (e.g. "zh-TW", "en")
 }
 
 export interface Project {

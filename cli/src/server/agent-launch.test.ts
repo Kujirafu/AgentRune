@@ -30,12 +30,11 @@ describe("agent-launch", () => {
       "--effort",
       "high",
       "--dangerously-skip-permissions",
-      "--append-system-prompt",
-      launch.args[launch.args.length - 1],
     ])
     expect(launch.command).toContain("--resume")
     expect(launch.command).toContain("session_123")
-    expect(launch.command).toContain("--append-system-prompt")
+    expect(launch.args).not.toContain("--append-system-prompt")
+    expect(launch.command).not.toContain("--append-system-prompt")
   })
 
   it("sanitizes Codex settings and keeps dangerous text inside a quoted argument", () => {
@@ -77,6 +76,19 @@ describe("agent-launch", () => {
       "--read",
       ".agentrune/agentlore.md",
     ])
+  })
+
+  it("tells fresh sessions to use the memory index and read only relevant sections", () => {
+    const launch = buildAgentLaunch("codex", {
+      locale: "zh-TW",
+    }, {
+      projectId: "demo",
+    })
+
+    const protocolArg = launch.args.at(-1) || ""
+    expect(protocolArg).toContain("project memory index")
+    expect(protocolArg).toContain("Do not read every section by default")
+    expect(protocolArg).toContain("Search the structured memory sections")
   })
 
   it("quotes shell arguments safely for POSIX shells", () => {

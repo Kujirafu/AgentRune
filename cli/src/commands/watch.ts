@@ -145,7 +145,7 @@ export async function watchCommand(opts: {
   session?: string
   raw?: boolean
 }) {
-  const port = parseInt(opts.port || "3456")
+  const port = parseInt(opts.port || "3457")
   const url = `ws://localhost:${port}`
 
   // Fetch projects and active sessions

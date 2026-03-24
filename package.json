@@ -1,5 +1,8 @@
 {
   "name": "agentrune-monorepo",
   "private": true,
-  "workspaces": ["cli", "app"]
+  "workspaces": ["cli", "app", "desktop"],
+  "scripts": {
+    "build:desktop": "npm run build -w app && npm run build -w cli && npm run build -w desktop && npm run package -w desktop"
+  }
 }

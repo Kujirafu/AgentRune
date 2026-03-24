@@ -29,6 +29,7 @@ interface NewSessionSheetProps {
 }
 
 export function NewSessionSheet({ open, projects, selectedProject, onClose, onLaunch, onNewProject, onDeleteProject }: NewSessionSheetProps) {
+  const desktop = typeof window !== "undefined" && (window.innerWidth >= 900 || !!(window as any).electronAPI)
   const [projectId, setProjectId] = useState(selectedProject || "")
   const [agentId, setAgentId] = useState("claude")
   const [showAddProject, setShowAddProject] = useState(false)
@@ -167,25 +168,42 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
       {/* Sheet */}
       <motion.div
         key="nss-sheet"
-        initial={{ y: "100%" }}
-        animate={{ y: 0 }}
-        exit={{ y: "100%", transition: { duration: 0.2, ease: "easeIn" } }}
-        transition={{ type: "spring", stiffness: 200, damping: 20 }}
+        initial={desktop ? { opacity: 0, scale: 0.95 } : { y: "100%" }}
+        animate={desktop ? { opacity: 1, scale: 1 } : { y: 0 }}
+        exit={desktop
+          ? { opacity: 0, scale: 0.95, transition: { duration: 0.15 } }
+          : { y: "100%", transition: { duration: 0.2, ease: "easeIn" } }
+        }
+        transition={desktop
+          ? { duration: 0.2, ease: "easeOut" }
+          : { type: "spring", stiffness: 200, damping: 20 }
+        }
         ref={sheetRef}
-        {...swipeHandlers}
+        {...(desktop ? {} : swipeHandlers)}
         style={{
         position: "fixed",
-        bottom: 0, left: 0, right: 0,
         zIndex: 201,
         backgroundImage: "var(--sheet-bg)",
         backdropFilter: "blur(40px) saturate(1.5)",
         WebkitBackdropFilter: "blur(40px) saturate(1.5)",
-        borderTop: "1px solid var(--glass-border)",
-        borderRadius: "24px 24px 0 0",
-        padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
-        maxHeight: "80dvh",
         overflowX: "hidden",
         overflowY: "auto",
+        ...(desktop ? {
+          top: "50%", left: "50%", right: "auto", bottom: "auto",
+          transform: "translate(-50%, -50%)",
+          width: "min(560px, 90vw)",
+          maxHeight: "80vh",
+          borderRadius: 16,
+          border: "1px solid var(--glass-border)",
+          boxShadow: "0 8px 40px rgba(0,0,0,0.25)",
+          padding: "20px",
+        } : {
+          bottom: 0, left: 0, right: 0,
+          borderTop: "1px solid var(--glass-border)",
+          borderRadius: "24px 24px 0 0",
+          padding: "20px 20px calc(20px + env(safe-area-inset-bottom, 0px))",
+          maxHeight: "80dvh",
+        }),
       }}>
         {/* Decorative glow — matches LaunchPad radial accent */}
         <div style={{
@@ -198,13 +216,15 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
           background: "radial-gradient(ellipse at 70% 80%, var(--sheet-glow-2) 0%, transparent 60%)",
           pointerEvents: "none",
         }} />
-        {/* Handle */}
+        {/* Handle — hidden on desktop */}
+        {!desktop && (
         <div style={{
           width: 36, height: 4, borderRadius: 2,
           background: "var(--text-secondary)", opacity: 0.3,
           margin: "0 auto 20px",
           position: "relative", zIndex: 1,
         }} />
+        )}
 
         <div style={{
           fontSize: 18, fontWeight: 700,

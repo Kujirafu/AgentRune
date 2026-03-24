@@ -20,6 +20,14 @@
       --glass-shadow: 0 4px 24px rgba(52, 119, 146, 0.06);
       --accent-primary: #37ACC0;
       --accent-primary-bg: rgba(55, 172, 192, 0.1);
+      --accent-secondary: #347792;
+      --danger: #FB8184;
+      --danger-bg: rgba(251, 129, 132, 0.1);
+      --success: #BDD1C6;
+      --success-bg: rgba(189, 209, 198, 0.1);
+      --warning: #D09899;
+      --warning-bg: rgba(208, 152, 153, 0.1);
+      --muted: #94a3b8;
       --card-bg: rgba(255, 255, 255, 0.42);
       --icon-bg: rgba(255, 255, 255, 0.5);
       --sheet-bg: linear-gradient(180deg, rgba(189,209,198,0.93) 0%, rgba(245,218,197,0.96) 100%);
@@ -37,13 +45,32 @@
       --glass-border: rgba(255, 255, 255, 0.08);
       --glass-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
       --accent-primary: #38bdf8;
-      --accent-primary-bg: rgba(30, 41, 59, 0.8);
+      --accent-primary-bg: rgba(56, 189, 248, 0.12);
+      --accent-secondary: #0ea5e9;
+      --danger: #f87171;
+      --danger-bg: rgba(248, 113, 113, 0.12);
+      --success: #86efac;
+      --success-bg: rgba(134, 239, 172, 0.1);
+      --warning: #fbbf24;
+      --warning-bg: rgba(251, 191, 36, 0.1);
+      --muted: #64748b;
       --card-bg: rgba(15, 23, 42, 0.3);
       --icon-bg: rgba(255, 255, 255, 0.03);
       --sheet-bg: linear-gradient(180deg, rgba(30,41,59,0.88) 0%, rgba(15,23,42,0.95) 100%);
       --sheet-glow-1: rgba(59,130,246,0.12);
       --sheet-glow-2: rgba(139,92,246,0.08);
     }
+
+    /* Scrollbar — light mode */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.4); }
+    ::-webkit-scrollbar-corner { background: transparent; }
+
+    /* Scrollbar — dark mode */
+    html.dark ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.15); }
+    html.dark ::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.3); }
 
     html, body, #root {
       height: 100dvh;
