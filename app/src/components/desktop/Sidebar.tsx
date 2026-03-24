@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react"
+import React, { useState, useEffect, useCallback, useRef } from "react"
 import type { Project, AppSession, AgentEvent } from "../../types"
 import type { SessionCompletionNotice } from "../../lib/session-completion"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
@@ -127,6 +127,7 @@ export function Sidebar({
   const [resolvedFeedback, setResolvedFeedback] = useState<Map<string, string>>(new Map())
   const [completionNotices, setCompletionNotices] = useState<CompletionNotice[]>([])
   const [unreadCompletionIds, setUnreadCompletionIds] = useState<Set<string>>(new Set())
+  const msgBtnRef = useRef<HTMLButtonElement>(null)
 
   const totalPending = pendingPermissions.length + (pendingPhaseGate ? 1 : 0) + pendingReauthQueue.length
   const unreadCompletionCount = unreadCompletionIds.size
@@ -553,6 +554,7 @@ export function Sidebar({
       }}>
         {/* Message center button */}
         <button
+          ref={msgBtnRef}
           onClick={() => {
             if (!permPanel) {
               trackDesktopPermissionWidgetOpen()
@@ -604,16 +606,23 @@ export function Sidebar({
           )}
         </button>
 
-        {/* Permission panel — expands upward */}
-        {permPanel && (
+        {/* Permission panel — fixed position to escape sidebar overflow */}
+        {permPanel && (() => {
+          const rect = msgBtnRef.current?.getBoundingClientRect()
+          const panelW = 300
+          const panelMaxH = Math.min(440, (rect?.top ?? 440) - 8)
+          return (
           <div style={{
-            position: "absolute", bottom: 48, left: 0, width: 300,
+            position: "fixed",
+            bottom: rect ? window.innerHeight - rect.top + 4 : 48,
+            left: rect ? rect.left : 0,
+            width: panelW,
             background: dark ? "rgba(15,23,42,0.97)" : "rgba(255,255,255,0.97)",
             backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
             border: `1px solid ${dividerColor}`,
             borderRadius: 12, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
-            zIndex: 100, overflow: "hidden",
-            maxHeight: 440,
+            zIndex: 10000, overflow: "hidden",
+            maxHeight: panelMaxH,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderBottom: `1px solid ${dividerColor}` }}>
               <div style={{
@@ -654,7 +663,7 @@ export function Sidebar({
               }}>{t("desktop.recent")}{unreadCompletionCount > 0 ? ` (${unreadCompletionCount})` : ""}</button>
             </div>
             {/* Content */}
-            <div style={{ overflowY: "auto", maxHeight: 360, padding: "8px 0" }}>
+            <div style={{ overflowY: "auto", maxHeight: panelMaxH - 80, padding: "8px 0" }}>
               {permTab === "inbox" && (<>
                 {/* Phase gate */}
                 {pendingPhaseGate && (
@@ -862,7 +871,8 @@ export function Sidebar({
               )}
             </div>
           </div>
-        )}
+          )
+        })()}
       </div>
 
       <ConfirmDialog
