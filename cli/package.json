@@ -1,6 +1,6 @@
 {
   "name": "agentrune",
-  "version": "0.1.38",
+  "version": "0.3.0",
   "description": "AgentRune CLI — AI agent mission control + AgentLore MCP server",
   "type": "module",
   "bin": {
