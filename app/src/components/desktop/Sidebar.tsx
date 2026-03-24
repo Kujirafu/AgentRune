@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react"
 import type { Project, AppSession, AgentEvent } from "../../types"
+import type { SessionCompletionNotice } from "../../lib/session-completion"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
 import type { AutomationConfig } from "../../data/automation-types"
 import type { ToolView } from "./CommandCenter"
@@ -20,6 +21,7 @@ interface SidebarProps {
   selectedProjectId: string | null
   onSelectProject: (id: string | null) => void
   sessions: AppSession[]
+  sessionOrdinals: Map<string, number>
   digests: Map<string, SessionDecisionDigest>
   automations: AutomationConfig[]
   activeView: ToolView
@@ -105,19 +107,11 @@ interface SidebarTask {
   prdTitle?: string
 }
 
-interface CompletionNotice {
-  id: string
-  sessionId: string
-  sessionIdx: number
-  label: string
-  summary: string
-  nextAction: string
-  updatedAt: number
-}
+type CompletionNotice = SessionCompletionNotice
 
 export function Sidebar({
   projects, selectedProjectId, onSelectProject,
-  sessions, digests, automations,
+  sessions, sessionOrdinals, digests, automations,
   activeView, onChangeView, onExpandSession,
   theme, wsConnected, toggleTheme, t,
   onNewProject, onDeleteProject,
@@ -149,13 +143,19 @@ export function Sidebar({
       if (!digest) return
       const updatedAt = digest.updatedAt || Date.now()
       const previous = completionSnapshotRef.current.get(session.id)
+      const sessionIdx = sessionOrdinals.get(session.id) ?? (index + 1)
 
-      if (previous && previous.status !== "done" && digest.status === "done") {
+      if (
+        previous
+        && previous.status === "working"
+        && (digest.status === "idle" || digest.status === "done")
+        && (digest.summary || digest.nextAction)
+      ) {
         additions.push({
           id: `${session.id}:${updatedAt}`,
           sessionId: session.id,
-          sessionIdx: index + 1,
-          label: digest.displayLabel || session.taskTitle || `Session ${index + 1}`,
+          sessionIdx,
+          label: digest.displayLabel || session.taskTitle || `Session ${sessionIdx}`,
           summary: digest.summary || t("desktop.sessionCompleted"),
           nextAction: digest.nextAction,
           updatedAt,
@@ -181,7 +181,30 @@ export function Sidebar({
       for (const item of additions) next.add(item.id)
       return next
     })
-  }, [sessions, digests, t])
+  }, [sessions, digests, sessionOrdinals, t])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<SessionCompletionNotice | null>).detail
+      if (!detail?.id) return
+
+      setCompletionNotices((prev) => {
+        const merged = new Map<string, CompletionNotice>()
+        for (const item of [detail, ...prev]) merged.set(item.id, item)
+        return [...merged.values()]
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, 10)
+      })
+      setUnreadCompletionIds((prev) => {
+        const next = new Set(prev)
+        next.add(detail.id)
+        return next
+      })
+    }
+
+    window.addEventListener("agentrune_session_completed", handler)
+    return () => window.removeEventListener("agentrune_session_completed", handler)
+  }, [])
 
   // Auto-open panel when new approvals or completions arrive
   const prevInboxCounts = React.useRef({ pending: 0, completions: 0 })

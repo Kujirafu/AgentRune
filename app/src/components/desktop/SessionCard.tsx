@@ -17,7 +17,7 @@ interface SessionCardProps {
   session: AppSession
   digest: SessionDecisionDigest | undefined
   events?: AgentEvent[]
-  index: number
+  sessionNumber?: number | null
   theme: "light" | "dark"
   expanded: boolean
   onToggleExpand: (sessionId: string) => void
@@ -32,7 +32,7 @@ const statusLabel: Record<string, string> = {
   blocked: "Blocked", working: "Working", idle: "Idle", done: "Done",
 }
 
-export function SessionCard({ session, digest, events, index, theme, expanded, onToggleExpand, onKill }: SessionCardProps) {
+export function SessionCard({ session, digest, events, sessionNumber, theme, expanded, onToggleExpand, onKill }: SessionCardProps) {
   const dark = theme === "dark"
   const [hovered, setHovered] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -102,7 +102,7 @@ export function SessionCard({ session, digest, events, index, theme, expanded, o
           display: "flex", alignItems: "center", justifyContent: "center",
           fontSize: 11, fontWeight: 700, color: textSecondary, flexShrink: 0,
         }}>
-          {index + 1}
+          {sessionNumber ?? "?"}
         </span>
         {/* Status dot */}
         <span style={{

@@ -22,6 +22,7 @@ import { isMobile } from "../lib/detect"
 import { AnsiParser, type OutputBlock } from "../lib/ansi-parser"
 import { useLocale } from "../lib/i18n/index.js"
 import { trackSessionStart, trackSettingsChange, trackSlashCommand, trackMessageSend, trackDecision, trackVoiceInput, trackTabSwitch } from "../lib/analytics"
+import { getSessionActivityNotificationKey } from "../lib/session-activity"
 import { buildSessionAttachMessage } from "../lib/session-attach"
 
 // iOS-like spring curve
@@ -119,6 +120,7 @@ export function MissionControl({
   // Multi-session activity tracking
   const [sessionActivity, setSessionActivity] = useState<Record<string, { title: string; status: string; unread: number }>>({})
   const [sessionProgress, setSessionProgress] = useState<Record<string, AgentEvent>>({})
+  const seenSessionActivityRef = useRef<Map<string, number>>(new Map())
   const [contextSession, setContextSession] = useState<string | null>(null)
   const [renamingSession, setRenamingSession] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -1560,6 +1562,26 @@ export function MissionControl({
     unsubs.push(on("session_activity", (msg) => {
       const sid = msg.sessionId as string
       if (sid === sessionId) return // ignore current session
+      const activityKey = getSessionActivityNotificationKey({
+        sessionId: sid,
+        eventId: msg.eventId as string | undefined,
+        eventType: msg.eventType as string | undefined,
+        eventTitle: msg.eventTitle as string | undefined,
+        agentStatus: msg.agentStatus as string | undefined,
+      })
+      if (activityKey) {
+        if (seenSessionActivityRef.current.has(activityKey)) return
+        const now = Date.now()
+        seenSessionActivityRef.current.set(activityKey, now)
+        if (seenSessionActivityRef.current.size > 200) {
+          const cutoff = now - 12 * 60 * 60 * 1000
+          for (const [key, seenAt] of seenSessionActivityRef.current) {
+            if (seenAt < cutoff || seenSessionActivityRef.current.size > 160) {
+              seenSessionActivityRef.current.delete(key)
+            }
+          }
+        }
+      }
       setSessionActivity((prev) => ({
         ...prev,
         [sid]: {

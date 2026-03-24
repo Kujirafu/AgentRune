@@ -15,6 +15,9 @@ import { WorkflowsTool } from "./tools/WorkflowsTool"
 import { GitTool } from "./tools/GitTool"
 import { SettingsTool } from "./tools/SettingsTool"
 import type { AutomationTemplate } from "../../data/automation-types"
+import { resolveDesktopLaunchAgentId } from "../../lib/desktop-session-launch"
+import { resolveDesktopSessionTarget } from "../../lib/desktop-session-routing"
+import { buildSessionOrdinalMap, sortSessionsByOrdinal } from "../../lib/session-ordinals"
 import { getSettings, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../../lib/storage"
 import { trackDesktopSessionCreate, trackDesktopCommandSend, trackDesktopToolView, trackDesktopSessionExpand, trackDesktopSessionRestart, trackDesktopBypassToggle, trackDesktopSessionKill, trackDesktopNewProject } from "../../lib/analytics"
 
@@ -91,6 +94,8 @@ export function CommandCenter(props: CommandCenterProps) {
     }
   }, [targetSessionId, activeSessions])
   const [showNewProject, setShowNewProject] = useState(false)
+  const sessionOrdinals = useMemo(() => buildSessionOrdinalMap(activeSessions), [activeSessions])
+  const ordinalSessions = useMemo(() => sortSessionsByOrdinal(activeSessions), [activeSessions])
 
   // Track locally resolved permission IDs (cleared when server updates event status)
   const [resolvedPermIds, setResolvedPermIds] = useState<Set<string>>(new Set())
@@ -100,8 +105,8 @@ export function CommandCenter(props: CommandCenterProps) {
     const results: { event: AgentEvent; sessionId: string; sessionIdx: number }[] = []
     const seen = new Set<string>()
     for (const [sid, events] of props.sessionEvents) {
-      const idx = activeSessions.findIndex(s => s.id === sid)
-      if (idx === -1) continue // skip closed/removed sessions
+      const sessionIdx = sessionOrdinals.get(sid)
+      if (!sessionIdx) continue // skip closed/removed sessions
       // Skip sessions that are idle/done — they can't have real pending permissions
       const d = digests.get(sid)
       if (d && (d.status === "idle" || d.status === "done")) continue
@@ -111,65 +116,55 @@ export function CommandCenter(props: CommandCenterProps) {
           const key = `${sid}:${e.detail || e.title}`
           if (seen.has(key)) continue
           seen.add(key)
-          results.push({ event: e, sessionId: sid, sessionIdx: idx + 1 })
+          results.push({ event: e, sessionId: sid, sessionIdx })
         }
       }
     }
     return results
-  }, [props.sessionEvents, activeSessions, resolvedPermIds])
+  }, [props.sessionEvents, digests, resolvedPermIds, sessionOrdinals])
 
   // Track permission history (last 10 resolved)
   const permissionHistory = useMemo(() => {
     const results: { event: AgentEvent; sessionId: string; sessionIdx: number }[] = []
     for (const [sid, events] of props.sessionEvents) {
-      const idx = activeSessions.findIndex(s => s.id === sid)
-      if (idx === -1) continue // skip closed/removed sessions
+      const sessionIdx = sessionOrdinals.get(sid)
+      if (!sessionIdx) continue // skip closed/removed sessions
       for (const e of events) {
         if (e.type === "decision_request" && e.status === "completed") {
-          results.push({ event: e, sessionId: sid, sessionIdx: idx + 1 })
+          results.push({ event: e, sessionId: sid, sessionIdx })
         }
       }
     }
     return results.slice(-10)
-  }, [props.sessionEvents, activeSessions])
+  }, [props.sessionEvents, sessionOrdinals])
 
   // Handle send from input bar (with optional images)
   const handleSend = useCallback((text: string, images?: string[]) => {
-    const resolveTarget = () => {
-      // Explicit target always wins
-      if (targetSessionId) return targetSessionId
-      const confirmed = activeSessions.filter(s =>
-        s.status !== "recoverable" && digests.has(s.id)
-      )
-      if (confirmed.length === 0) return null
-      // Smart dispatch: if an idle session's taskTitle is related to new text, prefer it
-      const keywords = text.toLowerCase().split(/\s+/).filter(w => w.length > 2).slice(0, 5)
-      const idleSessions = confirmed.filter(s => digests.get(s.id)?.status === "idle")
-      if (idleSessions.length > 0 && keywords.length > 0) {
-        const scored = idleSessions.map(s => {
-          const title = (s.taskTitle || "").toLowerCase()
-          const matches = keywords.filter(k => title.includes(k)).length
-          return { session: s, score: matches }
-        }).sort((a, b) => b.score - a.score)
-        if (scored[0].score > 0) return scored[0].session.id
-      }
-      // Any idle session
-      if (idleSessions.length > 0) return idleSessions[0].id
-      // All sessions busy → create new session
-      return null
-    }
-    const sid = resolveTarget()
-    if (!sid) trackDesktopSessionCreate(selectedProjectId || "", "claude", !!text)
+    const sid = resolveDesktopSessionTarget({
+      text,
+      targetSessionId,
+      expandedSessionIds: expandedSessions,
+      sessions: activeSessions,
+      digests,
+      sessionEvents: props.sessionEvents,
+    })
+    const launchAgentId = resolveDesktopLaunchAgentId({
+      targetSessionId,
+      expandedSessionIds: expandedSessions,
+      sessions: activeSessions,
+      selectedProjectId,
+    })
+    if (!sid) trackDesktopSessionCreate(selectedProjectId || "", launchAgentId, !!text)
     else trackDesktopCommandSend(sid, text.startsWith("/"), !!text.match(/\[AgentLore Skill Chain/))
     if (!sid) {
       const pid = selectedProjectId || projects[0]?.id
       if (pid) {
         const newId = `${pid}_${Date.now()}`
         const userSettings = getSettings(pid)
-        const ok = send({
+        send({
           type: "attach",
           projectId: pid,
-          agentId: "claude",
+          agentId: launchAgentId,
           sessionId: newId,
           settings: userSettings,
           autoSaveKeys: getAutoSaveKeysEnabled(),
@@ -196,7 +191,7 @@ export function CommandCenter(props: CommandCenterProps) {
     send({ type: "store_event", sessionId: sid, event: userEvent })
     // Immediately show in events view (don't wait for server roundtrip)
     window.dispatchEvent(new CustomEvent("local_user_event", { detail: { sessionId: sid, event: userEvent } }))
-  }, [targetSessionId, send, activeSessions, digests, selectedProjectId, projects, props.onLaunch])
+  }, [targetSessionId, expandedSessions, send, activeSessions, digests, props.sessionEvents, selectedProjectId, projects])
 
   // Handle raw send (e.g. interrupt \x03) to specific session
   const handleRawSend = useCallback((sessionId: string, data: string) => {
@@ -328,9 +323,9 @@ export function CommandCenter(props: CommandCenterProps) {
     return [...activeSessions].sort((a, b) => {
       const sa = order[digests.get(a.id)?.status || "idle"] ?? 2
       const sb = order[digests.get(b.id)?.status || "idle"] ?? 2
-      return sa - sb
+      return sa - sb || (sessionOrdinals.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sessionOrdinals.get(b.id) ?? Number.MAX_SAFE_INTEGER)
     })
-  }, [activeSessions, digests])
+  }, [activeSessions, digests, sessionOrdinals])
 
   const bg = dark ? "#0f172a" : "#f8fafc"
   const sidebarBg = dark ? "rgba(15,23,42,0.95)" : "rgba(255,255,255,0.95)"
@@ -364,6 +359,7 @@ export function CommandCenter(props: CommandCenterProps) {
             selectedProjectId={selectedProjectId}
             onSelectProject={onSelectProject}
             sessions={activeSessions}
+            sessionOrdinals={sessionOrdinals}
             digests={digests}
             automations={automations}
             activeView={activeView}
@@ -481,13 +477,13 @@ export function CommandCenter(props: CommandCenterProps) {
                 </div>
               ) : expandedSessions.size === 0 ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-                  {sortedSessions.map((session, i) => (
+                  {sortedSessions.map((session) => (
                     <SessionCard
                       key={session.id}
                       session={session}
                       digest={digests.get(session.id)}
                       events={props.sessionEvents.get(session.id)}
-                      index={i}
+                      sessionNumber={sessionOrdinals.get(session.id)}
                       theme={theme}
                       expanded={false}
                       onToggleExpand={handleExpandSession}
@@ -506,7 +502,6 @@ export function CommandCenter(props: CommandCenterProps) {
                     overflow: "hidden",
                   }}>
                     {sortedSessions.filter(s => expandedSessions.has(s.id)).map((session) => {
-                      const sessionIdx = sortedSessions.indexOf(session)
                       return (
                       <div key={session.id} style={{
                         borderRadius: 10,
@@ -520,7 +515,7 @@ export function CommandCenter(props: CommandCenterProps) {
                           session={session}
                           digest={digests.get(session.id)}
                           events={props.sessionEvents.get(session.id) || []}
-                          index={sessionIdx}
+                          sessionNumber={sessionOrdinals.get(session.id)}
                           send={send}
                           on={on}
                           sessionToken={sessionToken}
@@ -535,13 +530,13 @@ export function CommandCenter(props: CommandCenterProps) {
                   {/* Other sessions — shown as cards below */}
                   {sortedSessions.some(s => !expandedSessions.has(s.id)) && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 10, flexShrink: 0 }}>
-                      {sortedSessions.filter(s => !expandedSessions.has(s.id)).map((session, i) => (
+                      {sortedSessions.filter(s => !expandedSessions.has(s.id)).map((session) => (
                         <SessionCard
                           key={session.id}
                           session={session}
                           digest={digests.get(session.id)}
                           events={props.sessionEvents.get(session.id)}
-                          index={sortedSessions.indexOf(session)}
+                          sessionNumber={sessionOrdinals.get(session.id)}
                           theme={theme}
                           expanded={false}
                           onToggleExpand={handleExpandSession}
@@ -692,31 +687,32 @@ export function CommandCenter(props: CommandCenterProps) {
           <DesktopInputBar
             onSend={handleSend}
             onRawSend={handleRawSend}
-            sessions={sortedSessions}
+            sessions={ordinalSessions}
+            sessionOrdinals={sessionOrdinals}
             digests={digests}
             targetSessionId={targetSessionId}
             onChangeTarget={setTargetSessionId}
             onNewSession={onNewSession}
             onCycleSession={() => {
-              if (sortedSessions.length === 0) return
+              if (ordinalSessions.length === 0) return
               setActiveView("sessions")
               // Cycle: all(Auto) → #1 → #2 → ... → all(Auto)
               // Find where we are in the cycle
               const currentTarget = targetSessionId
               if (!currentTarget) {
                 // Auto → go to #1
-                const first = sortedSessions[0]
+                const first = ordinalSessions[0]
                 setExpandedSessions(new Set([first.id]))
                 setTargetSessionId(first.id)
               } else {
-                const currentIdx = sortedSessions.findIndex(s => s.id === currentTarget)
+                const currentIdx = ordinalSessions.findIndex(s => s.id === currentTarget)
                 const nextIdx = currentIdx >= 0 ? currentIdx + 1 : 0
-                if (nextIdx >= sortedSessions.length) {
+                if (nextIdx >= ordinalSessions.length) {
                   // Past last → back to All (card view + Auto)
                   setExpandedSessions(new Set())
                   setTargetSessionId(null)
                 } else {
-                  const next = sortedSessions[nextIdx]
+                  const next = ordinalSessions[nextIdx]
                   setExpandedSessions(new Set([next.id]))
                   setTargetSessionId(next.id)
                 }

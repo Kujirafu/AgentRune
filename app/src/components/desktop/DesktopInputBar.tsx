@@ -10,6 +10,7 @@ export interface DesktopInputBarProps {
   /** Send raw data (e.g. \x03 for interrupt) to a specific session */
   onRawSend: (sessionId: string, data: string) => void
   sessions: AppSession[]
+  sessionOrdinals: Map<string, number>
   digests: Map<string, SessionDecisionDigest>
   targetSessionId: string | null
   onChangeTarget: (sessionId: string | null) => void
@@ -61,7 +62,7 @@ const XIcon = ({ size = 10 }: { size?: number }) => (
 )
 
 export function DesktopInputBar({
-  onSend, onRawSend, sessions, digests, targetSessionId,
+  onSend, onRawSend, sessions, sessionOrdinals, digests, targetSessionId,
   onChangeTarget, onNewSession, onCycleSession, theme, t, locale,
   apiBase, projects, selectedProjectId,
 }: DesktopInputBarProps) {
@@ -110,8 +111,9 @@ export function DesktopInputBar({
   }, [projects, selectedProjectId])
 
   // ── Target session ──
-  const targetIdx = targetSessionId ? sessions.findIndex(s => s.id === targetSessionId) : -1
-  const targetLabel = targetIdx >= 0 ? `#${targetIdx + 1}` : "Auto"
+  const targetLabel = targetSessionId
+    ? `#${sessionOrdinals.get(targetSessionId) ?? "?"}`
+    : "Auto"
 
   // ── Skill Chains ──
   const chainMatches = useMemo((): ChainMatch[] => {
@@ -626,9 +628,10 @@ export function DesktopInputBar({
               >
                 Auto
               </button>
-              {sessions.map((s, i) => {
+              {sessions.map((s) => {
                 const d = digests.get(s.id)
                 const isTarget = s.id === targetSessionId
+                const sessionNumber = sessionOrdinals.get(s.id)
                 return (
                   <button
                     key={s.id}
@@ -641,7 +644,7 @@ export function DesktopInputBar({
                       fontFamily: "inherit", display: "block",
                     }}
                   >
-                    #{i + 1} {d?.displayLabel || s.agentId}
+                    #{sessionNumber ?? "?"} {d?.displayLabel || s.agentId}
                   </button>
                 )
               })}

@@ -172,7 +172,7 @@ export interface DesktopSessionPanelProps {
   locale: string
   onKill?: () => void
   onCollapse?: () => void
-  index?: number
+  sessionNumber?: number | null
 }
 
 const statusColor: Record<string, string> = {
@@ -183,7 +183,7 @@ const statusLabel: Record<string, string> = {
 }
 
 export function DesktopSessionPanel({
-  session, digest, events, send, on, sessionToken, theme, locale, onKill, onCollapse, index,
+  session, digest, events, send, on, sessionToken, theme, locale, onKill, onCollapse, sessionNumber,
 }: DesktopSessionPanelProps) {
   const dark = theme === "dark"
   const [mode, setMode] = useState<"events" | "terminal">("events")
@@ -199,14 +199,25 @@ export function DesktopSessionPanel({
   const [planDetail, setPlanDetail] = useState<string | null>(null)
 
   const digestStatus = digest?.status || "idle"
-  // Working indicator: use digest status OR check if recent events are fresh (< 30s)
-  const lastEventTime = events.length > 0 ? events[events.length - 1].timestamp : 0
+  const lastEvent = events.length > 0 ? events[events.length - 1] : null
+  // Trust explicit session_activity state first; only fall back to recent in-progress events
+  // while a brand-new session has not yet published an idle/working signal.
+  const lastEventTime = lastEvent?.timestamp || 0
+  const lastEventStatus = lastEvent?.status
   const hasRecentActivity = Date.now() - lastEventTime < 30000
-  const isWorking = digestStatus === "working" || (session.status === "active" && hasRecentActivity && digestStatus !== "done")
-  const status = isWorking ? "working" : digestStatus
-  const sessionNumber = index != null ? `#${index + 1}` : ""
+  let status = digestStatus
+  if (session.lastAgentStatus === "waiting") {
+    status = "blocked"
+  } else if (session.lastAgentStatus === "working") {
+    status = "working"
+  } else if (session.lastAgentStatus === "idle" && digestStatus === "working") {
+    status = "idle"
+  } else if (!session.lastAgentStatus && session.status === "active" && hasRecentActivity && lastEventStatus === "in_progress") {
+    status = "working"
+  }
+  const sessionNumberLabel = sessionNumber != null ? `#${sessionNumber}` : ""
   const taskName = session.taskTitle || digest?.displayLabel || session.agentId
-  const label = sessionNumber ? `${sessionNumber} ${taskName}` : taskName
+  const label = sessionNumberLabel ? `${sessionNumberLabel} ${taskName}` : taskName
   const color = statusColor[status] || "#94a3b8"
   const summary = digest?.summary || ""
   const nextAction = digest?.nextAction || ""

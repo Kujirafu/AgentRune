@@ -42,6 +42,13 @@ import { AGENT_INSTALL_INFO, buildAgentLaunch, isLaunchAgentId, normalizeAgentSe
 import { buildSessionActivityPayload, shouldSendCrashPush } from "./crash-notification.js"
 import { buildProjectSummaryResponse, buildSessionDigest } from "./project-summary.js"
 import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
+import {
+  buildQueuedSessionTextPayload,
+  getQueuedSessionSubmitDelayMs,
+  isImmediateSessionInput,
+  isSessionPromptReady,
+  type QueuedSessionTextMode,
+} from "./session-command-dispatch.js"
 import { log } from "../shared/logger.js"
 import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
 import type { AgentEvent, TaskStore, PrdItem, PrdPriority, Project } from "../shared/types.js"
@@ -784,6 +791,100 @@ export function createServer(portOverride?: number) {
   const progressInterceptor = new ProgressInterceptor()
   const sessionLastTitle = new Map<string, string>()  // Track last meaningful event title per session
   const sessionTaskTitle = new Map<string, string>()  // User-assigned task title (from initialCommand or first message)
+  interface QueuedSessionTextInput {
+    agentId: string
+    text: string
+    mode: QueuedSessionTextMode
+    source: string
+  }
+  const sessionTextQueues = new Map<string, QueuedSessionTextInput[]>()
+  const sessionTextQueueTimers = new Map<string, ReturnType<typeof setInterval>>()
+
+  function cleanupSessionTextQueue(sessionId: string) {
+    const timer = sessionTextQueueTimers.get(sessionId)
+    if (timer) clearInterval(timer)
+    sessionTextQueueTimers.delete(sessionId)
+    sessionTextQueues.delete(sessionId)
+  }
+
+  function dispatchQueuedSessionText(sessionId: string) {
+    if (sessionTextQueueTimers.has(sessionId)) return
+    const queue = sessionTextQueues.get(sessionId)
+    if (!queue || queue.length === 0) return
+
+    const current = queue[0]
+    let attempts = 0
+    const maxAttempts = 100
+
+    const tryDispatch = () => {
+      if (!sessions.get(sessionId)) {
+        cleanupSessionTextQueue(sessionId)
+        return true
+      }
+
+      const ready = isSessionPromptReady(sessions.getScrollback(sessionId) || "", current.agentId)
+      if (!ready && attempts < maxAttempts) {
+        return false
+      }
+
+      if (!ready) {
+        log.warn(`[session-text] Prompt not detected in time for ${sessionId.slice(0, 8)} (${current.source}); sending anyway`)
+      }
+
+      const payload = buildQueuedSessionTextPayload(current.agentId, current.text, current.mode)
+      sessions.write(sessionId, payload)
+      setTimeout(() => sessions.write(sessionId, "\r"), getQueuedSessionSubmitDelayMs(current.text))
+      log.info(`[session-text] Dispatched ${current.source} to ${sessionId.slice(0, 8)}`)
+
+      queue.shift()
+      if (queue.length === 0) {
+        sessionTextQueues.delete(sessionId)
+      }
+      setTimeout(() => dispatchQueuedSessionText(sessionId), 50)
+      return true
+    }
+
+    if (tryDispatch()) return
+
+    const timer = setInterval(() => {
+      attempts++
+      if (tryDispatch()) {
+        clearInterval(timer)
+        sessionTextQueueTimers.delete(sessionId)
+      }
+    }, 200)
+    sessionTextQueueTimers.set(sessionId, timer)
+  }
+
+  function queueSessionTextInput(
+    sessionId: string,
+    agentId: string,
+    text: string,
+    mode: QueuedSessionTextMode,
+    source: string,
+  ) {
+    if (!text) return
+    if (isImmediateSessionInput(text)) {
+      sessions.write(sessionId, text)
+      return
+    }
+
+    const normalizedText = text.replace(/[\r\n]+$/, "")
+    if (!normalizedText) {
+      sessions.write(sessionId, text)
+      return
+    }
+
+    const queue = sessionTextQueues.get(sessionId) || []
+    if (queue.some((entry) => entry.text === normalizedText && entry.mode === mode)) {
+      log.info(`[session-text] Skipping duplicate queued input for ${sessionId.slice(0, 8)} (${source})`)
+      return
+    }
+
+    queue.push({ agentId, text: normalizedText, mode, source })
+    sessionTextQueues.set(sessionId, queue)
+    dispatchQueuedSessionText(sessionId)
+  }
 
   // --- Recoverable sessions: scan persisted events on startup ---
   interface RecoverableSession {
@@ -4491,12 +4592,8 @@ export function createServer(portOverride?: number) {
                         }
                       }
                     }
-                    setTimeout(() => {
-                      // Use bracket paste mode so Claude Code treats multi-line text as a single paste
-                      sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
-                      setTimeout(() => sessions.write(session.id, "\r"), 300)
-                      log.info(`[attach] Forwarded initialCommand to session ${session.id}: "${initialCommand.slice(0, 80)}"`)
-                    }, 500)
+                    queueSessionTextInput(session.id, session.agentId, initialCommand, "initial", "initialCommand")
+                    log.info(`[attach] Queued initialCommand for session ${session.id}: "${initialCommand.slice(0, 80)}"`)
                   }
                 }, 500)
               }, 200)
@@ -4504,11 +4601,8 @@ export function createServer(portOverride?: number) {
               log.info(`[attach] Skipping rules/memory injection for resumed session ${session.id}`)
               // For resumed sessions, still forward initialCommand if present
               if (initialCommand) {
-                setTimeout(() => {
-                  sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
-                  setTimeout(() => sessions.write(session.id, "\r"), 300)
-                  log.info(`[attach] Forwarded initialCommand to resumed session ${session.id}: "${initialCommand.slice(0, 80)}"`)
-                }, 2000)
+                queueSessionTextInput(session.id, session.agentId, initialCommand, "initial", "initialCommand(resumed)")
+                log.info(`[attach] Queued initialCommand for resumed session ${session.id}: "${initialCommand.slice(0, 80)}"`)
               }
             }
           }
@@ -4647,7 +4741,8 @@ export function createServer(portOverride?: number) {
             if (cmdMatch) {
               const commandPrompt = getCommandPrompt(cmdMatch[1])
               if (commandPrompt) {
-                sessions.write(sessionId, `${commandPrompt}\n`)
+                const sessionAgentId = sessions.get(sessionId)?.agentId || "claude"
+                queueSessionTextInput(sessionId, sessionAgentId, commandPrompt, "regular", `input:${cmdMatch[1]}`)
                 log.info(`Injected /${cmdMatch[1]} command ready for session ${sessionId}`)
                 break
               }
@@ -4655,7 +4750,8 @@ export function createServer(portOverride?: number) {
 
             // Direct write — client sends text and \r as separate WS messages
             // (500ms delay on client side for Claude Code TUI to process text)
-            sessions.write(sessionId, inputStr)
+            const sessionAgentId = sessions.get(sessionId)?.agentId || "claude"
+            queueSessionTextInput(sessionId, sessionAgentId, inputStr, "regular", "input")
           }
           break
         }
@@ -4713,7 +4809,8 @@ export function createServer(portOverride?: number) {
               if (cmdMatch) {
                 const commandPrompt = getCommandPrompt(cmdMatch[1])
                 if (commandPrompt) {
-                  sessions.write(targetId, `${commandPrompt}\n`)
+                  const targetAgentId = sessions.get(targetId)?.agentId || "claude"
+                  queueSessionTextInput(targetId, targetAgentId, commandPrompt, "regular", `session_input:${cmdMatch[1]}`)
                   log.info(`Batch: injected /${cmdMatch[1]} for session ${targetId}`)
                   break
                 }
@@ -4730,7 +4827,8 @@ export function createServer(portOverride?: number) {
                   }
                 }
               }
-              sessions.write(targetId, inputStr)
+              const targetAgentId = sessions.get(targetId)?.agentId || "claude"
+              queueSessionTextInput(targetId, targetAgentId, inputStr, "regular", "session_input")
               log.info(`Batch input sent to session ${targetId.slice(0, 8)}`)
             }
           }
@@ -5812,6 +5910,7 @@ export function createServer(portOverride?: number) {
     }
 
     progressInterceptor.untrackSession(sessionId)
+    cleanupSessionTextQueue(sessionId)
     sessionEngines.delete(sessionId)
     sessionRecentEvents.delete(sessionId)
     const watcher = sessionJsonlWatchers.get(sessionId)

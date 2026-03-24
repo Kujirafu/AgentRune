@@ -84,6 +84,9 @@ export interface AppSession {
   status?: "active" | "recoverable"
   claudeSessionId?: string
   taskTitle?: string
+  createdAt?: number
+  lastActivity?: number
+  lastAgentStatus?: "working" | "idle" | "waiting"
 }
 
 export interface SmartAction {

@@ -19,7 +19,10 @@ import { App as CapApp } from "@capacitor/app"
 import { useIsDesktop } from "./hooks/useIsDesktop"
 import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
+import { buildSessionCompletionNotice } from "./lib/session-completion"
 import { getSessionActivityNotificationId, getSessionActivityNotificationKey } from "./lib/session-activity"
+import { buildSessionActivityEventId, mergeAgentEventLists, upsertAgentEvent } from "./lib/session-events"
+import { buildSessionOrdinalMap, extractSessionTimestamp } from "./lib/session-ordinals"
 import { isSummaryNoise } from "./lib/session-summary"
 // framer-motion deferred to lazy-loaded components only (saves ~133 KB initial load)
 import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch, trackOnboardingSkip, trackOnboardingComplete, trackConnectStep, trackConnectEscape } from "./lib/analytics"
@@ -1386,6 +1389,7 @@ async function checkForUpdate(): Promise<{ version: string; url: string; notes: 
 
 export function App() {
   const { t, locale } = useLocale()
+  const summaryLocale = locale === "zh-TW" ? "zh-TW" : "en"
   const isDesktop = useIsDesktop()
   // Onboarding — shown once on first app open (Capacitor only)
   const [showOnboarding, setShowOnboarding] = useState(() =>
@@ -1432,6 +1436,10 @@ export function App() {
   const [cliUpdate, setCliUpdate] = useState<{ latest: string; current: string; changelog?: string } | null>(null)
   const requestVoiceRef = useRef<((callback: (text: string) => void, label?: string) => void) | null>(null)
   const [sessionEventsMap, setSessionEventsMap] = useState<Map<string, AgentEvent[]>>(new Map())
+  const activeSessionsRef = useRef<AppSession[]>([])
+  const sessionEventsMapRef = useRef<Map<string, AgentEvent[]>>(new Map())
+  const completionStatusRef = useRef<Map<string, AppSession["lastAgentStatus"]>>(new Map())
+  const completionNoticeIdsRef = useRef<Set<string>>(new Set())
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
@@ -1439,6 +1447,48 @@ export function App() {
   const [pendingPhaseGate, setPendingPhaseGate] = useState<PhaseGateRequest | null>(null)
   const [pendingReauthQueue, setPendingReauthQueue] = useState<PendingReauthRequest[]>([])
   const sessionStartRef = useRef<number>(0)
+
+  useEffect(() => {
+    activeSessionsRef.current = activeSessions
+  }, [activeSessions])
+
+  useEffect(() => {
+    sessionEventsMapRef.current = sessionEventsMap
+  }, [sessionEventsMap])
+
+  const emitSessionCompletionNotice = useCallback((sessionId: string) => {
+    const sessions = activeSessionsRef.current
+    const session = sessions.find((item) => item.id === sessionId)
+    if (!session) return
+
+    const events = sessionEventsMapRef.current.get(sessionId) || []
+    if (events.length === 0) return
+
+    const sessionIdx = buildSessionOrdinalMap(sessions).get(sessionId)
+    if (!sessionIdx) return
+
+    const notice = buildSessionCompletionNotice({
+      session,
+      events,
+      locale: summaryLocale,
+      sessionIdx,
+    })
+    if (!notice || completionNoticeIdsRef.current.has(notice.id)) return
+
+    completionNoticeIdsRef.current.add(notice.id)
+    window.dispatchEvent(new CustomEvent("agentrune_session_completed", { detail: notice }))
+
+    if (isCapacitor() && getNotificationsEnabled() && document.visibilityState !== "visible") {
+      LocalNotifications.schedule({
+        notifications: [{
+          id: Math.abs(hashCode(`session_done_${notice.id}`)) % 2147483647,
+          title: t("desktop.sessionCompleted"),
+          body: (notice.summary || notice.label).slice(0, 200),
+          smallIcon: "ic_launcher",
+        }],
+      }).catch(() => {})
+    }
+  }, [summaryLocale, t])
 
   // ─── Auto Update Check ─────────────────────────────────────────
   // Flow: detect new release → record timestamp → 12h later push notification
@@ -1519,6 +1569,9 @@ export function App() {
             worktreeBranch: s.worktreeBranch || null,
             status: (s.status === "recoverable" ? "recoverable" : "active") as "active" | "recoverable",
             claudeSessionId: s.claudeSessionId,
+            createdAt: typeof s.createdAt === "number" ? s.createdAt : (extractSessionTimestamp(s.id) ?? undefined),
+            lastActivity: typeof s.lastActivity === "number" ? s.lastActivity : undefined,
+            lastAgentStatus: normalizeSessionAgentStatus(s.summaryStatus),
           }))
         // Keep only locally-created sessions less than 30s old (prevents ghost sessions)
         setActiveSessions(prev => {
@@ -1610,7 +1663,13 @@ export function App() {
       if (!sid || !pid || !aid) return
       setActiveSessions(prev => {
         if (prev.some(s => s.id === sid)) return prev
-        return [...prev, { id: sid, projectId: pid, agentId: aid, worktreeBranch: (msg.worktreeBranch as string) || undefined }]
+        return [...prev, {
+          id: sid,
+          projectId: pid,
+          agentId: aid,
+          worktreeBranch: (msg.worktreeBranch as string) || undefined,
+          createdAt: typeof msg.createdAt === "number" ? msg.createdAt as number : (extractSessionTimestamp(sid) ?? Date.now()),
+        }]
       })
     }))
     // Task title updates from server
@@ -1624,6 +1683,7 @@ export function App() {
     unsubs.push(on("session_ended", (msg) => {
       const sid = msg.sessionId as string
       if (!sid) return
+      emitSessionCompletionNotice(sid)
       setActiveSessions(prev => prev.filter(s => s.id !== sid))
       setSessionEventsMap(prev => { const next = new Map(prev); next.delete(sid); return next })
     }))
@@ -1636,7 +1696,7 @@ export function App() {
       setSessionEventsMap(prev => { const next = new Map(prev); next.delete(sid); return next })
     }))
     return () => { for (const u of unsubs) u() }
-  }, [on])
+  }, [emitSessionCompletionNotice, on])
 
   // Settings sync — when another client changes project settings, update localStorage
   useEffect(() => {
@@ -1898,6 +1958,19 @@ export function App() {
     return () => { unsubStarted(); unsub() }
   }, [on])
 
+  useEffect(() => {
+    const next = new Map<string, AppSession["lastAgentStatus"]>()
+    for (const session of activeSessions) {
+      const currentStatus = session.lastAgentStatus
+      const previousStatus = completionStatusRef.current.get(session.id)
+      if (currentStatus === "idle" && previousStatus && previousStatus !== "idle") {
+        emitSessionCompletionNotice(session.id)
+      }
+      next.set(session.id, currentStatus)
+    }
+    completionStatusRef.current = next
+  }, [activeSessions, sessionEventsMap, emitSessionCompletionNotice])
+
   const pendingReauth = pendingReauthQueue[0] || null
 
   // Phase Gate notifications + state management
@@ -2034,14 +2107,33 @@ export function App() {
       const title = msg.eventTitle as string
       const agentStatus = msg.agentStatus as string
       const eventType = normalizeSessionActivityType(msg.eventType)
+      const eventId = buildSessionActivityEventId({
+        sessionId: sid,
+        eventId: msg.eventId as string | undefined,
+        eventType: msg.eventType as string | undefined,
+        eventTitle: title,
+        agentStatus,
+      })
       if (!sid) return
       if (!title || isSummaryNoise(title)) return
+      if (!eventId) return
+      const now = Date.now()
+      const normalizedAgentStatus = normalizeSessionAgentStatus(agentStatus)
+      setActiveSessions(prev => prev.map((session) => (
+        session.id === sid
+          ? {
+            ...session,
+            lastActivity: now,
+            lastAgentStatus: normalizedAgentStatus ?? session.lastAgentStatus,
+          }
+          : session
+      )))
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
         const event: AgentEvent = {
-          id: `activity_${Date.now()}`,
-          timestamp: Date.now(),
+          id: eventId,
+          timestamp: now,
           type: eventType,
           status: agentStatus === "waiting"
             ? "waiting"
@@ -2050,7 +2142,7 @@ export function App() {
               : "in_progress",
           title: title || "",
         }
-        const updated = [...events, event].slice(-200)
+        const updated = upsertAgentEvent(events, event).slice(-200)
         next.set(sid, updated)
         return next
       })
@@ -2069,21 +2161,9 @@ export function App() {
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
-        // Dedup by id
-        if (events.some(e => e.id === event.id)) {
-          // Update status if changed
-          const idx = events.findIndex(e => e.id === event.id)
-          if (idx !== -1 && event.status && event.status !== events[idx].status) {
-            const updated = [...events]
-            updated[idx] = { ...events[idx], status: event.status }
-            next.set(sid, updated)
-            return next
-          }
-          return prev
-        }
-        const merged = [...events, event].slice(-200)
-        merged.sort((a, b) => a.timestamp - b.timestamp)
-        next.set(sid, merged)
+        const mergedEvents = upsertAgentEvent(events, event)
+        if (mergedEvents === events) return prev
+        next.set(sid, mergedEvents.slice(-200))
         return next
       })
     }))
@@ -2102,11 +2182,9 @@ export function App() {
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const existing = next.get(sid) || []
-        const existingIds = new Set(existing.map(e => e.id))
-        const newEvents = filtered.filter(e => !existingIds.has(e.id))
-        if (newEvents.length === 0) return prev
-        const merged = [...existing, ...newEvents].sort((a, b) => a.timestamp - b.timestamp).slice(-200)
-        next.set(sid, merged)
+        const mergedEvents = mergeAgentEventLists(existing, filtered)
+        if (mergedEvents === existing) return prev
+        next.set(sid, mergedEvents.slice(-200))
         return next
       })
     }))
@@ -2122,7 +2200,7 @@ export function App() {
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
-        next.set(sid, [...events, event].slice(-500))
+        next.set(sid, upsertAgentEvent(events, event).slice(-500))
         return next
       })
     }
@@ -2340,7 +2418,12 @@ export function App() {
     setResumeSessionId(resumeAgentSessionId)
     setShouldResumeCurrentSession(false)
     saveLastProject(projectId)
-    setActiveSessions((prev) => [...prev, { id: sessionId, projectId, agentId }])
+    setActiveSessions((prev) => [...prev, {
+      id: sessionId,
+      projectId,
+      agentId,
+      createdAt: extractSessionTimestamp(sessionId) ?? Date.now(),
+    }])
     if (!isDesktop) { setScreen("session"); setViewMode("board") }
   }
 
@@ -2714,6 +2797,8 @@ type SessionSnapshot = {
   projectId: string
   agentId: string
   worktreeBranch?: string | null
+  createdAt?: number
+  lastActivity?: number
   lastEventTitle?: string
   summaryText?: string
   nextAction?: string
@@ -2744,6 +2829,13 @@ function normalizeSessionActivityType(value: unknown): AgentEvent["type"] {
   return typeof value === "string" && SESSION_ACTIVITY_TYPES.includes(value as AgentEvent["type"])
     ? value as AgentEvent["type"]
     : "response"
+}
+
+function normalizeSessionAgentStatus(value: unknown): AppSession["lastAgentStatus"] {
+  if (value === "working") return "working"
+  if (value === "waiting" || value === "blocked") return "waiting"
+  if (value === "idle" || value === "done") return "idle"
+  return undefined
 }
 
 function buildSessionSeedEvent(snapshot: SessionSnapshot): AgentEvent | null {
