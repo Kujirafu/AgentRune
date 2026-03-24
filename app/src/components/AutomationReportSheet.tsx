@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState, useRef } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AutomationResult } from "../data/automation-types"
@@ -145,6 +145,20 @@ export default function AutomationReportSheet({
   const reportLocale: AutomationReportLocale = locale === "zh-TW" ? "zh-TW" : "en"
   const copy = getSheetCopy(reportLocale)
   const isDark = document.documentElement.classList.contains("dark")
+  const [runDropdownOpen, setRunDropdownOpen] = useState(false)
+  const runDropdownRef = useRef<HTMLDivElement>(null)
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!runDropdownOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (runDropdownRef.current && !runDropdownRef.current.contains(e.target as Node)) {
+        setRunDropdownOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [runDropdownOpen])
 
   useEffect(() => {
     if (!open) return
@@ -264,26 +278,64 @@ export default function AutomationReportSheet({
             </div>
 
             {sortedResults.length > 1 && (
-              <select
-                value={activeResult?.id || ""}
-                onChange={(event) => onSelectResult(event.target.value)}
-                style={{
-                  maxWidth: 176,
-                  padding: "9px 11px",
-                  borderRadius: 12,
-                  border: `1px solid ${isDark ? "rgba(255,255,255,0.10)" : "rgba(15,23,42,0.10)"}`,
-                  background: isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.92)",
-                  color: "var(--text-primary)",
-                  fontSize: 11,
-                  outline: "none",
-                }}
-              >
-                {sortedResults.map((result) => (
-                  <option key={result.id} value={result.id}>
-                    {copy.runLabel} {formatStartedAt(result.startedAt, reportLocale)}
-                  </option>
-                ))}
-              </select>
+              <div ref={runDropdownRef} style={{ position: "relative", maxWidth: 176 }}>
+                <button
+                  onClick={() => setRunDropdownOpen(!runDropdownOpen)}
+                  style={{
+                    width: "100%",
+                    padding: "9px 11px",
+                    borderRadius: 12,
+                    border: `1px solid ${isDark ? "rgba(255,255,255,0.10)" : "rgba(15,23,42,0.10)"}`,
+                    background: isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.92)",
+                    backdropFilter: "blur(12px)",
+                    WebkitBackdropFilter: "blur(12px)",
+                    color: "var(--text-primary)",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 6,
+                    fontFamily: "inherit", outline: "none",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {activeResult && `${copy.runLabel} ${formatStartedAt(activeResult.startedAt, reportLocale)}`}
+                  </span>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transition: "transform 0.2s", transform: runDropdownOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {runDropdownOpen && (
+                  <div style={{
+                    position: "absolute", top: "calc(100% + 4px)", right: 0,
+                    minWidth: 200, borderRadius: 10, overflow: "hidden",
+                    border: `1px solid ${isDark ? "rgba(255,255,255,0.10)" : "rgba(15,23,42,0.10)"}`,
+                    background: isDark ? "rgba(30,41,59,0.92)" : "rgba(255,255,255,0.96)",
+                    backdropFilter: "blur(20px) saturate(1.4)",
+                    WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+                    boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+                    zIndex: 10, maxHeight: 200, overflowY: "auto",
+                  }}>
+                    {sortedResults.map((result, i) => (
+                      <button
+                        key={result.id}
+                        onClick={() => { onSelectResult(result.id); setRunDropdownOpen(false) }}
+                        style={{
+                          width: "100%", padding: "9px 12px", border: "none",
+                          background: result.id === activeResult?.id ? "var(--accent-primary)" : "transparent",
+                          color: result.id === activeResult?.id ? "#fff" : "var(--text-primary)",
+                          fontSize: 11, cursor: "pointer", textAlign: "left",
+                          fontFamily: "inherit", display: "block",
+                          borderBottom: i < sortedResults.length - 1 ? `1px solid ${isDark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.06)"}` : "none",
+                        }}
+                        onMouseEnter={(e) => { if (result.id !== activeResult?.id) e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.04)" }}
+                        onMouseLeave={(e) => { if (result.id !== activeResult?.id) e.currentTarget.style.background = "transparent" }}
+                      >
+                        {copy.runLabel} {formatStartedAt(result.startedAt, reportLocale)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

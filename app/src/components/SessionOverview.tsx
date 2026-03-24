@@ -21,10 +21,10 @@ interface SessionOverviewProps {
 }
 
 const STATUS_DOT: Record<string, { color: string; shadow: string }> = {
-  working: { color: "#60a5fa", shadow: "0 0 8px rgba(96,165,250,0.5)" },
-  idle: { color: "#4ade80", shadow: "0 0 8px rgba(74,222,128,0.5)" },
-  blocked: { color: "#f87171", shadow: "0 0 8px rgba(248,113,113,0.5)" },
-  done: { color: "#4ade80", shadow: "0 0 8px rgba(74,222,128,0.5)" },
+  working: { color: "var(--accent-primary)", shadow: "0 0 8px var(--accent-primary-bg)" },
+  idle: { color: "var(--success)", shadow: "0 0 8px var(--success-bg)" },
+  blocked: { color: "var(--danger)", shadow: "0 0 8px var(--danger-bg)" },
+  done: { color: "var(--success)", shadow: "0 0 8px var(--success-bg)" },
 }
 
 function getLatestProgress(events: AgentEvent[]): ProgressReport | null {
@@ -218,7 +218,7 @@ export function SessionOverview({
                 WebkitBackdropFilter: "blur(20px)",
                 borderRadius: 20,
                 border: status === "blocked"
-                  ? "1px solid rgba(248,113,113,0.2)"
+                  ? "1px solid var(--danger-bg)"
                   : "1px solid var(--glass-border)",
                 boxShadow: `inset 3px 0 12px -4px ${dotStyle.color}40, var(--glass-shadow)`,
                 padding: 16,
@@ -281,9 +281,9 @@ export function SessionOverview({
                     marginTop: 10,
                     padding: "8px 12px",
                     borderRadius: 10,
-                    background: "rgba(248,113,113,0.08)",
-                    border: "1px solid rgba(248,113,113,0.2)",
-                    color: "#f87171",
+                    background: "var(--danger-bg)",
+                    border: "1px solid var(--danger-bg)",
+                    color: "var(--danger)",
                     fontSize: 12,
                     fontWeight: 500,
                     cursor: "pointer",

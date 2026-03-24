@@ -122,7 +122,8 @@ export interface AutomationSheetProps {
   serverUrl: string
   onClose: () => void
   /** When provided, open directly into edit mode for this automation */
-  initialEdit?: { id: string; name: string; prompt: string; skill?: string; templateId?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number }; runMode?: string; agentId?: string; bypass?: boolean } | null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  initialEdit?: ({ id: string; name: string; prompt?: string; schedule: { type: string; timeOfDay?: string; weekdays?: number[]; intervalMinutes?: number } } & Record<string, any>) | null
   /** Launch a new session with a template prompt (prefilled into InputBar) */
   onLaunchSession?: (prompt: string) => void
   /** Desktop inline mode: render without overlay/backdrop, as plain content */
@@ -169,7 +170,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       style={{
         width: 44, height: 24, borderRadius: 12, padding: 2,
         border: "none",
-        background: checked ? "#37ACC0" : "var(--glass-border, #334155)",
+        background: checked ? "var(--accent-primary)" : "var(--glass-border, #334155)",
         cursor: "pointer", transition: "background 0.2s",
         display: "flex", alignItems: "center", flexShrink: 0,
       }}
@@ -200,7 +201,7 @@ function PillToggle({ options, value, onChange }: {
         <button key={opt.value} onClick={() => onChange(opt.value)} style={{
           flex: 1, padding: "6px 14px", borderRadius: 8,
           border: "none",
-          background: value === opt.value ? "#37ACC0" : "transparent",
+          background: value === opt.value ? "var(--accent-primary)" : "transparent",
           color: value === opt.value ? "#fff" : "var(--text-secondary)",
           fontSize: 12, fontWeight: 600, cursor: "pointer",
           transition: "all 0.2s",
@@ -229,9 +230,9 @@ function WeekdayPicker({ selected, onChange }: { selected: number[]; onChange: (
         return (
           <button key={i} onClick={() => toggle(i)} style={{
             width: 34, height: 34, borderRadius: "50%",
-            border: active ? "2px solid #37ACC0" : "1px solid var(--glass-border)",
-            background: active ? "rgba(55,172,192,0.15)" : "transparent",
-            color: active ? "#37ACC0" : "var(--text-secondary)",
+            border: active ? "2px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+            background: active ? "var(--accent-primary-bg)" : "transparent",
+            color: active ? "var(--accent-primary)" : "var(--text-secondary)",
             fontSize: 11, fontWeight: 700, cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center",
             transition: "all 0.2s",
@@ -397,6 +398,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const [formAgentId, setFormAgentId] = useState("claude")
   const [formModel, setFormModel] = useState("")
   const [formBypass, setFormBypass] = useState(false)
+  const [formEnabled, setFormEnabled] = useState(true)
   const [formSandboxLevel, setFormSandboxLevel] = useState<SandboxLevel>("strict")
   const [formTrustProfile, setFormTrustProfile] = useState<TrustProfile>("supervised")
   const [formRequirePlanReview, setFormRequirePlanReview] = useState(false)
@@ -472,6 +474,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
         setFormBypass(!!initialEdit.bypass)
+        setFormEnabled((initialEdit as any).enabled !== false)
         const sl = (initialEdit as any).sandboxLevel || "strict"
         let tp = (initialEdit as any).trustProfile
         if (!tp) {
@@ -595,6 +598,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     setFormAgentId("claude")
     setFormModel("")
     setFormBypass(false)
+    setFormEnabled(true)
     setPage("add")
   }
 
@@ -655,7 +659,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           return { ...r, skillChainWorkflow: lines.join("\n") }
         }),
       } : undefined,
-      enabled: true,
+      enabled: formEnabled,
     }
 
     const authToken = localStorage.getItem("agentrune_cloud_token")
@@ -938,7 +942,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
           style={{
             marginTop: 12, padding: "14px 0", borderRadius: 14,
             border: "none",
-            background: formPrompt.trim() ? "#37ACC0" : "rgba(255,255,255,0.1)",
+            background: formPrompt.trim() ? "var(--accent-primary)" : "rgba(255,255,255,0.1)",
             color: formPrompt.trim() ? "#fff" : "rgba(255,255,255,0.4)",
             fontSize: 16, fontWeight: 600, cursor: "pointer",
           }}
@@ -1007,14 +1011,14 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               }} style={{
                 display: "flex", alignItems: "center", gap: 10, flex: 1,
                 padding: "12px 14px", borderRadius: 14,
-                border: "1.5px dashed #37ACC0", background: "rgba(55,172,192,0.05)",
+                border: "1.5px dashed var(--accent-primary)", background: "var(--accent-primary-bg)",
                 cursor: "pointer", textAlign: "left",
               }}>
                 <div style={{
                   width: 36, height: 36, borderRadius: 10,
-                  background: "rgba(55,172,192,0.12)", border: "1px solid rgba(55,172,192,0.2)",
+                  background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  color: "#37ACC0", flexShrink: 0,
+                  color: "var(--accent-primary)", flexShrink: 0,
                 }}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
@@ -1065,7 +1069,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <button onClick={() => setSelectedGroup(null)} style={{
                 padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                 background: selectedGroup === null ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
-                color: selectedGroup === null ? "#37ACC0" : "var(--text-secondary)",
+                color: selectedGroup === null ? "var(--accent-primary)" : "var(--text-secondary)",
                 fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
               }}>
                 {t("automation.allCategories") || "All"}
@@ -1074,7 +1078,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 <button onClick={() => setSelectedGroup(selectedGroup === "custom" ? null : "custom")} style={{
                   padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                   background: selectedGroup === "custom" ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
-                  color: selectedGroup === "custom" ? "#37ACC0" : "var(--text-secondary)",
+                  color: selectedGroup === "custom" ? "var(--accent-primary)" : "var(--text-secondary)",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}>
                   {t("automation.myTemplates") || "My Templates"}
@@ -1084,7 +1088,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 <button key={g.key} onClick={() => setSelectedGroup(selectedGroup === g.key ? null : g.key)} style={{
                   padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                   background: selectedGroup === g.key ? "rgba(55, 172, 192, 0.15)" : "var(--card-bg)",
-                  color: selectedGroup === g.key ? "#37ACC0" : "var(--text-secondary)",
+                  color: selectedGroup === g.key ? "var(--accent-primary)" : "var(--text-secondary)",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}>
                   {t(g.label) !== g.label ? t(g.label) : g.key}
@@ -1120,7 +1124,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     {/* Pinned section */}
                     {pinnedTemplates.length > 0 && (
                       <div style={{ marginBottom: 8 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#37ACC0", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent-primary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
                           {t("automation.pinned") || "Pinned"}
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1133,7 +1137,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     {/* Custom templates section */}
                     {customFiltered.length > 0 && (
                       <div style={{ marginBottom: 8 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#37ACC0", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent-primary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
                           {t("automation.myTemplates") || "My Templates"}
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1159,7 +1163,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                       )
                       return (
                         <div key={g.key} style={{ marginBottom: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0", marginBottom: 8, letterSpacing: 0.5 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent-primary)", marginBottom: 8, letterSpacing: 0.5 }}>
                             {t(g.label)}
                           </div>
                           {subgroups.length > 1 ? subgroups.map(sg => {
@@ -1238,7 +1242,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 <button onClick={() => openAddForm()} style={{
                   display: "flex", alignItems: "center", gap: 5,
                   padding: "8px 12px", borderRadius: 12,
-                  border: "1px solid var(--glass-border)", background: "#37ACC0",
+                  border: "1px solid var(--glass-border)", background: "var(--accent-primary)",
                   color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer",
                 }}>
                   <IconPlus /> {t("automation.add")}
@@ -1265,7 +1269,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 </div>
                 <button onClick={() => openAddForm()} style={{
                   padding: "10px 24px", borderRadius: 12,
-                  border: "1px solid var(--glass-border)", background: "#37ACC0",
+                  border: "1px solid var(--glass-border)", background: "var(--accent-primary)",
                   color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
                 }}>
                   <IconPlus /> {t("automation.newAutomation") || "New Schedule"}
@@ -1309,7 +1313,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                 return (
                                   <div key={i} style={{
                                     fontSize: 8, fontWeight: active ? 700 : 400,
-                                    color: active ? "#37ACC0" : "var(--text-secondary)",
+                                    color: active ? "var(--accent-primary)" : "var(--text-secondary)",
                                     opacity: active ? 1 : 0.4,
                                   }}>
                                     {label}
@@ -1429,8 +1433,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                             <button onClick={(e) => { e.stopPropagation(); handleTrigger(auto.id) }} disabled={triggeringId === auto.id} style={{
                               display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                               padding: "8px 16px", borderRadius: 10,
-                              border: "1px solid rgba(55,172,192,0.3)", background: "rgba(55,172,192,0.08)",
-                              color: "#37ACC0", fontSize: 12, fontWeight: 600, cursor: triggeringId === auto.id ? "default" : "pointer",
+                              border: "1px solid var(--accent-primary-bg)", background: "var(--accent-primary-bg)",
+                              color: "var(--accent-primary)", fontSize: 12, fontWeight: 600, cursor: triggeringId === auto.id ? "default" : "pointer",
                               opacity: triggeringId === auto.id ? 0.5 : 1,
                             }}>
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -1462,6 +1466,13 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               setFormAgentId(auto.agentId || "claude")
                               setFormModel((auto as any).model || "")
                               setFormBypass(!!(auto as any).bypass)
+                              setFormEnabled(auto.enabled !== false)
+                              setFormTrustProfile((auto as any).trustProfile || "supervised")
+                              setFormSandboxLevel((auto as any).sandboxLevel || "strict")
+                              setFormRequirePlanReview(!!(auto as any).requirePlanReview)
+                              setFormRequireMergeApproval(!!(auto as any).requireMergeApproval)
+                              setFormDailyRunLimit((auto as any).dailyRunLimit ?? 50)
+                              setFormPlanReviewTimeout((auto as any).planReviewTimeoutMinutes ?? 30)
                               setFormCrew((auto as any).crew ? JSON.parse(JSON.stringify((auto as any).crew)) : null)
                               setPage("add")
                             }} style={{
@@ -1534,12 +1545,12 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                       padding: "10px 12px",
                                       borderRadius: 12,
                                       background: "var(--glass-border)",
-                                      border: "1px solid rgba(55,172,192,0.16)",
+                                      border: "1px solid var(--accent-primary-bg)",
                                     }}>
                                       <div style={{
                                         fontSize: 10,
                                         fontWeight: 700,
-                                        color: "#37ACC0",
+                                        color: "var(--accent-primary)",
                                         textTransform: "uppercase",
                                         letterSpacing: 1.2,
                                         marginBottom: 8,
@@ -1564,9 +1575,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                         gap: 8,
                                         padding: "10px 12px",
                                         borderRadius: 10,
-                                        border: "1px solid rgba(55,172,192,0.28)",
-                                        background: "rgba(55,172,192,0.08)",
-                                        color: "#37ACC0",
+                                        border: "1px solid var(--accent-primary-bg)",
+                                        background: "var(--accent-primary-bg)",
+                                        color: "var(--accent-primary)",
                                         fontSize: 12,
                                         fontWeight: 700,
                                         cursor: "pointer",
@@ -1654,7 +1665,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <button onClick={() => setSelectedGroup(null)} style={{
                 padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                 background: selectedGroup === null ? "rgba(55, 172, 192, 0.15)" : "var(--icon-bg)",
-                color: selectedGroup === null ? "#37ACC0" : "var(--text-secondary)",
+                color: selectedGroup === null ? "var(--accent-primary)" : "var(--text-secondary)",
                 fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 transition: "all 0.2s",
               }}>
@@ -1664,7 +1675,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                 <button key={g.key} onClick={() => setSelectedGroup(selectedGroup === g.key ? null : g.key)} style={{
                   padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                   background: selectedGroup === g.key ? "rgba(55, 172, 192, 0.15)" : "var(--icon-bg)",
-                  color: selectedGroup === g.key ? "#37ACC0" : "var(--text-secondary)",
+                  color: selectedGroup === g.key ? "var(--accent-primary)" : "var(--text-secondary)",
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                   transition: "all 0.2s",
                 }}>
@@ -1712,7 +1723,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   return (
                     <div key={g.key} style={{ marginBottom: 8 }}>
                       <div style={{
-                        fontSize: 11, fontWeight: 700, color: "#37ACC0",
+                        fontSize: 11, fontWeight: 700, color: "var(--accent-primary)",
                         textTransform: "uppercase", letterSpacing: 1,
                         padding: "6px 2px 4px", borderBottom: "1px solid rgba(55, 172, 192, 0.1)",
                         marginBottom: 6,
@@ -1758,8 +1769,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
                       padding: "6px 14px", borderRadius: 20,
-                      border: "none", background: "rgba(55,172,192,0.12)",
-                      color: "#37ACC0", fontSize: 13, fontWeight: 600,
+                      border: "none", background: "var(--accent-primary-bg)",
+                      color: "var(--accent-primary)", fontSize: 13, fontWeight: 600,
                       cursor: triggeringId === triggerId ? "default" : "pointer",
                       opacity: triggeringId === triggerId ? 0.5 : 1,
                     }}
@@ -1804,13 +1815,13 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         {/* Chain header */}
                         <div style={{
                           padding: "12px 14px", borderRadius: 12, marginBottom: 12,
-                          background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.15)",
+                          background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
                         }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: chainDesc ? 6 : 0 }}>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-primary)" }}>
                               <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/>
                             </svg>
-                            <span style={{ fontSize: 14, fontWeight: 600, color: "#37ACC0" }}>{chainName}</span>
+                            <span style={{ fontSize: 14, fontWeight: 600, color: "var(--accent-primary)" }}>{chainName}</span>
                             <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: "auto" }}>
                               ~{(chainRole!.estimatedTokens || formCrew.tokenBudget).toLocaleString()} tok
                             </span>
@@ -1833,7 +1844,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                                   display: "flex", alignItems: "center", gap: 6,
                                 }}>
                                   <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", flexShrink: 0, width: 20 }}>{i + 1}.</span>
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--accent-primary)" }}>
                                     <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>
                                   </svg>
                                   <span>{branchTexts.join(" + ")}</span>
@@ -2018,13 +2029,13 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                               return (
                                 <div style={{
                                   padding: "6px 10px", borderRadius: 8,
-                                  background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.15)",
+                                  background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
                                   display: "flex", alignItems: "center", gap: 6,
                                 }}>
-                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#37ACC0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-primary)" }}>
                                     <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M7 11v2a2 2 0 0 0 2 2h2"/><path d="M15 13v-2a2 2 0 0 0-2-2h-2"/>
                                   </svg>
-                                  <span style={{ fontSize: 11, color: "#37ACC0", fontWeight: 500 }}>
+                                  <span style={{ fontSize: 11, color: "var(--accent-primary)", fontWeight: 500 }}>
                                     {resolveChainText(chain.nameKey, t)}
                                   </span>
                                   <span style={{ fontSize: 10, color: "var(--text-secondary)", marginLeft: "auto" }}>
@@ -2122,15 +2133,15 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
                       padding: "8px 12px", borderRadius: 8,
-                      border: `1px solid ${formCrew.targetBranch ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
-                      background: formCrew.targetBranch ? "rgba(55,172,192,0.08)" : "var(--glass-bg)",
+                      border: `1px solid ${formCrew.targetBranch ? "var(--accent-primary-bg)" : "var(--glass-border)"}`,
+                      background: formCrew.targetBranch ? "var(--accent-primary-bg)" : "var(--glass-bg)",
                       cursor: "pointer", flexShrink: 0, height: 36, boxSizing: "border-box",
                     }}
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.targetBranch ? "#37ACC0" : "var(--text-secondary)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: formCrew.targetBranch ? "var(--accent-primary)" : "var(--text-secondary)" }}>
                       <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
                     </svg>
-                    <span style={{ fontSize: 11, fontWeight: 500, color: formCrew.targetBranch ? "#37ACC0" : "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 500, color: formCrew.targetBranch ? "var(--accent-primary)" : "var(--text-secondary)", whiteSpace: "nowrap" }}>
                       {t("crew.separateBranch")}
                     </span>
                   </button>
@@ -2142,16 +2153,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   style={{
                     display: "flex", alignItems: "center", gap: 8,
                     width: "100%", padding: "10px 12px", marginTop: 8, borderRadius: 10,
-                    border: `1px solid ${formCrew.phaseGate ? "rgba(55,172,192,0.3)" : "var(--glass-border)"}`,
-                    background: formCrew.phaseGate ? "rgba(55,172,192,0.06)" : "var(--glass-bg)",
+                    border: `1px solid ${formCrew.phaseGate ? "var(--accent-primary-bg)" : "var(--glass-border)"}`,
+                    background: formCrew.phaseGate ? "var(--accent-primary-bg)" : "var(--glass-bg)",
                     cursor: "pointer", textAlign: "left",
                   }}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={formCrew.phaseGate ? "#37ACC0" : "var(--text-secondary)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: formCrew.phaseGate ? "var(--accent-primary)" : "var(--text-secondary)" }}>
                     <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
                   </svg>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: formCrew.phaseGate ? "#37ACC0" : "var(--text-primary)" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: formCrew.phaseGate ? "var(--accent-primary)" : "var(--text-primary)" }}>
                       {t("crew.phaseGate")}
                     </div>
                     <div style={{ fontSize: 10, color: "var(--text-secondary)", marginTop: 1 }}>
@@ -2161,7 +2172,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   {/* Toggle indicator */}
                   <div style={{
                     width: 34, height: 20, borderRadius: 10, padding: 2,
-                    background: formCrew.phaseGate ? "#37ACC0" : "rgba(0,0,0,0.15)",
+                    background: formCrew.phaseGate ? "var(--accent-primary)" : "rgba(0,0,0,0.15)",
                     transition: "background 0.2s",
                     display: "flex", alignItems: "center",
                   }}>
@@ -2197,7 +2208,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   rows={3}
                   style={{
                     width: "100%", padding: "10px 14px", paddingRight: 36, borderRadius: 12,
-                    border: promptMatches.length > 0 ? "1.5px solid rgba(55,172,192,0.4)" : "1px solid var(--glass-border)",
+                    border: promptMatches.length > 0 ? "1.5px solid var(--accent-primary-bg)" : "1px solid var(--glass-border)",
                     background: "var(--glass-bg)",
                     color: "var(--text-primary)", fontSize: 13, outline: "none",
                     boxSizing: "border-box", marginBottom: 0, resize: "vertical",
@@ -2212,7 +2223,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     position: "absolute", top: 8, right: 8,
                     width: 24, height: 24, borderRadius: 6,
                     border: "none", background: "transparent",
-                    color: formPrompt.length > 50 ? "#37ACC0" : "var(--text-secondary)",
+                    color: formPrompt.length > 50 ? "var(--accent-primary)" : "var(--text-secondary)",
                     cursor: "pointer", display: "flex",
                     alignItems: "center", justifyContent: "center",
                     opacity: formPrompt.length > 50 ? 1 : 0.6,
@@ -2233,9 +2244,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             {promptMatches.length > 0 && !formTemplateId && (
               <div style={{
                 marginTop: 6, marginBottom: 10, padding: "8px 10px", borderRadius: 10,
-                background: "rgba(55,172,192,0.06)", border: "1px solid rgba(55,172,192,0.15)",
+                background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
               }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--accent-primary)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
                   {t("automation.suggestions") || "We have templates for this"}
                 </div>
                 {promptMatches.map((tmpl) => (
@@ -2250,9 +2261,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     border: "none", background: "transparent",
                     cursor: "pointer", textAlign: "left", marginBottom: 2,
                   }}>
-                    <span style={{ flexShrink: 0, color: "#37ACC0" }}>{getTemplateIcon(tmpl)}</span>
+                    <span style={{ flexShrink: 0, color: "var(--accent-primary)" }}>{getTemplateIcon(tmpl)}</span>
                     <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", flex: 1 }}>{tplName(tmpl)}</span>
-                    <span style={{ fontSize: 10, color: "#37ACC0" }}>{t("automation.useThis") || "Use"}</span>
+                    <span style={{ fontSize: 10, color: "var(--accent-primary)" }}>{t("automation.useThis") || "Use"}</span>
                   </button>
                 ))}
               </div>
@@ -2262,10 +2273,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             {formTemplateId && (
               <div style={{
                 marginTop: 6, marginBottom: 10, padding: "6px 10px", borderRadius: 8,
-                background: "rgba(55,172,192,0.08)", border: "1px solid rgba(55,172,192,0.15)",
+                background: "var(--accent-primary-bg)", border: "1px solid var(--accent-primary-bg)",
                 display: "flex", alignItems: "center", justifyContent: "space-between",
               }}>
-                <span style={{ fontSize: 11, color: "#37ACC0", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 11, color: "var(--accent-primary)", display: "flex", alignItems: "center", gap: 6 }}>
                   {(() => {
                     const applied = allTemplates.find((t) => t.id === formTemplateId)
                     if (!applied) return null
@@ -2285,7 +2296,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
             {!formTemplateId && (
               <div style={{ marginTop: 6, marginBottom: 10 }}>
                 <button onClick={() => setTemplateTab(templateTab === "all" ? "recommended" : "all")} style={{
-                  border: "none", background: "transparent", color: "#37ACC0",
+                  border: "none", background: "transparent", color: "var(--accent-primary)",
                   fontSize: 11, cursor: "pointer", padding: 0, fontWeight: 600,
                 }}>
                   {templateTab === "all"
@@ -2336,7 +2347,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           setFormSkill(tmpl.skill || "")
                           setTemplateTab("recommended")
                         }}>
-                          <span style={{ flexShrink: 0, color: "#37ACC0" }}>{getTemplateIcon(tmpl)}</span>
+                          <span style={{ flexShrink: 0, color: "var(--accent-primary)" }}>{getTemplateIcon(tmpl)}</span>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>{tplName(tmpl)}</div>
                             <div style={{
@@ -2346,7 +2357,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                           </div>
                           <button onClick={(e) => { e.stopPropagation(); togglePin(tmpl.id) }} style={{
                             border: "none", background: "transparent", padding: 0,
-                            color: isPinned ? "#37ACC0" : "var(--text-secondary)",
+                            color: isPinned ? "var(--accent-primary)" : "var(--text-secondary)",
                             fontSize: 14, cursor: "pointer", opacity: isPinned ? 1 : 0.4,
                             flexShrink: 0,
                           }}>
@@ -2422,9 +2433,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   return (
                     <button key={agent.id} onClick={() => setFormAgentId(agent.id)} style={{
                       padding: "6px 12px", borderRadius: 8, flexShrink: 0,
-                      border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
-                      background: active ? "rgba(55,172,192,0.12)" : "transparent",
-                      color: active ? "#37ACC0" : "var(--text-secondary)",
+                      border: active ? "1.5px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+                      background: active ? "var(--accent-primary-bg)" : "transparent",
+                      color: active ? "var(--accent-primary)" : "var(--text-secondary)",
                       fontSize: 11, fontWeight: 600, cursor: "pointer",
                     }}>
                       {agent.name}
@@ -2448,9 +2459,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                       return (
                         <button key={m.id} onClick={() => setFormModel(m.id)} style={{
                           padding: "6px 12px", borderRadius: 8, flexShrink: 0,
-                          border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
-                          background: active ? "rgba(55,172,192,0.12)" : "transparent",
-                          color: active ? "#37ACC0" : "var(--text-secondary)",
+                          border: active ? "1.5px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+                          background: active ? "var(--accent-primary-bg)" : "transparent",
+                          color: active ? "var(--accent-primary)" : "var(--text-secondary)",
                           fontSize: 11, fontWeight: 600, cursor: "pointer",
                         }}>
                           {m.label}
@@ -2470,7 +2481,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               <div style={{
                 width: 18, height: 18, borderRadius: 4,
                 border: formBypass ? "none" : "1.5px solid var(--text-secondary)",
-                background: formBypass ? "#37ACC0" : "transparent",
+                background: formBypass ? "var(--accent-primary)" : "transparent",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 transition: "all 0.15s ease",
                 flexShrink: 0,
@@ -2570,17 +2581,17 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                         return (
                           <button key={opt.value} onClick={() => { setFormSandboxLevel(opt.value); setScanResult(null) }} style={{
                             display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8,
-                            border: active ? "1.5px solid #37ACC0" : "1px solid var(--glass-border)",
-                            background: active ? "rgba(55,172,192,0.08)" : "transparent",
+                            border: active ? "1.5px solid var(--accent-primary)" : "1px solid var(--glass-border)",
+                            background: active ? "var(--accent-primary-bg)" : "transparent",
                             cursor: "pointer", textAlign: "left",
                           }}>
                             <div style={{
                               width: 12, height: 12, borderRadius: 6, flexShrink: 0,
-                              border: active ? "4px solid #37ACC0" : "2px solid var(--text-secondary)",
+                              border: active ? "4px solid var(--accent-primary)" : "2px solid var(--text-secondary)",
                               background: active ? "#fff" : "transparent",
                             }} />
                             <div>
-                              <span style={{ fontSize: 11, fontWeight: 600, color: active ? "#37ACC0" : "var(--text-primary)" }}>
+                              <span style={{ fontSize: 11, fontWeight: 600, color: active ? "var(--accent-primary)" : "var(--text-primary)" }}>
                                 {t(`sandbox.level.${opt.value}`) || opt.value}
                               </span>
                               <span style={{ fontSize: 9, color: "var(--text-secondary)", marginLeft: 6 }}>{opt.desc}</span>
@@ -2596,7 +2607,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     <div style={{
                       width: 16, height: 16, borderRadius: 4,
                       border: formRequirePlanReview ? "none" : "1.5px solid var(--glass-border)",
-                      background: formRequirePlanReview ? "#37ACC0" : "transparent",
+                      background: formRequirePlanReview ? "var(--accent-primary)" : "transparent",
                       display: "flex", alignItems: "center", justifyContent: "center",
                     }}>
                       {formRequirePlanReview && (
@@ -2613,7 +2624,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                     <div style={{
                       width: 16, height: 16, borderRadius: 4,
                       border: formRequireMergeApproval ? "none" : "1.5px solid var(--glass-border)",
-                      background: formRequireMergeApproval ? "#37ACC0" : "transparent",
+                      background: formRequireMergeApproval ? "var(--accent-primary)" : "transparent",
                       display: "flex", alignItems: "center", justifyContent: "center",
                     }}>
                       {formRequireMergeApproval && (
@@ -2687,7 +2698,7 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
                   onClose()
                 }} style={{
                   flex: 1, padding: "12px 16px", borderRadius: 12,
-                  border: "none", background: "#37ACC0",
+                  border: "none", background: "var(--accent-primary)",
                   color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                 }}>
@@ -2697,9 +2708,9 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               )}
               <button onClick={handleSubmit} disabled={!formName.trim() || (!formPrompt.trim() && !formCrew) || submitting} style={{
                 flex: 1, padding: "12px 16px", borderRadius: 12,
-                border: onLaunchSession && !formCrew && formPrompt.trim() ? "1px solid rgba(55,172,192,0.3)" : "none",
-                background: onLaunchSession && !formCrew && formPrompt.trim() ? "rgba(55,172,192,0.08)" : "#37ACC0",
-                color: onLaunchSession && !formCrew && formPrompt.trim() ? "#37ACC0" : "#fff",
+                border: onLaunchSession && !formCrew && formPrompt.trim() ? "1px solid var(--accent-primary-bg)" : "none",
+                background: onLaunchSession && !formCrew && formPrompt.trim() ? "var(--accent-primary-bg)" : "var(--accent-primary)",
+                color: onLaunchSession && !formCrew && formPrompt.trim() ? "var(--accent-primary)" : "#fff",
                 fontSize: 14, fontWeight: 700,
                 cursor: formName.trim() && (formPrompt.trim() || formCrew) ? "pointer" : "default",
                 opacity: formName.trim() && (formPrompt.trim() || formCrew) ? 1 : 0.4,
@@ -2709,8 +2720,8 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
               {!formTemplateId && formPrompt.trim() && formName.trim() && (
                 <button onClick={saveAsCustomTemplate} style={{
                   padding: "12px 14px", borderRadius: 12,
-                  border: "1px solid rgba(55,172,192,0.3)", background: "rgba(55,172,192,0.08)",
-                  color: "#37ACC0", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  border: "1px solid var(--accent-primary-bg)", background: "var(--accent-primary-bg)",
+                  color: "var(--accent-primary)", fontSize: 12, fontWeight: 600, cursor: "pointer",
                   display: "flex", alignItems: "center", gap: 4,
                 }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
@@ -2771,8 +2782,8 @@ function TemplateCard({ tmpl, isPinned, tplName, tplDesc, t, onPin, onUse }: {
       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
         <button onClick={onPin} style={{
           width: 30, height: 30, borderRadius: 8, border: "none",
-          background: isPinned ? "rgba(55,172,192,0.15)" : "transparent",
-          color: isPinned ? "#37ACC0" : "var(--text-secondary)",
+          background: isPinned ? "var(--accent-primary-bg)" : "transparent",
+          color: isPinned ? "var(--accent-primary)" : "var(--text-secondary)",
           cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill={isPinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2782,7 +2793,7 @@ function TemplateCard({ tmpl, isPinned, tplName, tplDesc, t, onPin, onUse }: {
         <button onClick={onUse} style={{
           padding: "4px 12px", borderRadius: 8,
           border: "1px solid rgba(55, 172, 192, 0.2)", background: "rgba(55, 172, 192, 0.06)",
-          color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+          color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
           transition: "all 0.2s",
         }}>
           {t("automation.useThis") || "Use"}
@@ -2833,7 +2844,7 @@ function PickCard({ tmpl, tplName, tplDesc, onUse, icon, pinned, onTogglePin, on
           flexShrink: 0, width: 36, height: "100%", padding: "0 8px 0 0",
           background: "none", border: "none", cursor: "pointer",
           display: "flex", alignItems: "center", justifyContent: "center",
-          color: pinned ? "#37ACC0" : "var(--glass-border)",
+          color: pinned ? "var(--accent-primary)" : "var(--glass-border)",
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill={pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
@@ -2929,7 +2940,7 @@ function CrewPickCard({ tmpl, t, onUse, pinned, onTogglePin, onDelete }: {
           flexShrink: 0, width: 36, height: "100%", padding: "0 8px 0 0",
           background: "none", border: "none", cursor: "pointer",
           display: "flex", alignItems: "center", justifyContent: "center",
-          color: pinned ? "#37ACC0" : "var(--glass-border)",
+          color: pinned ? "var(--accent-primary)" : "var(--glass-border)",
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill={pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />

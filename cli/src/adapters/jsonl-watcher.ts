@@ -214,7 +214,7 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
           type: "info",
           status: "in_progress",
           title: name,
-          detail: JSON.stringify(input).slice(0, 120),
+          detail: JSON.stringify(input).slice(0, 500),
         })
       }
     }
@@ -226,14 +226,14 @@ function assistantToEvents(line: JsonlLine): AgentEvent[] {
       // Filter injection prompt responses (agent reading rules.md/agentlore.md on startup)
       if (/已讀完.*(?:rules\.md|agentlore\.md)|讀取.*(?:rules\.md|agentlore\.md)|Read.*\.agentrune\/(rules|agentlore)\.md/i.test(text.split("\n")[0])) continue
       // Short text: title only. Long text: first line as title, full text as detail
-      const firstLine = text.split("\n")[0].slice(0, 200)
-      const isLong = text.length > 200 || text.includes("\n")
+      const firstLine = text.split("\n")[0]
+      const isLong = text.length > firstLine.length + 1 || text.includes("\n")
       events.push({
         id: makeId(),
         timestamp: ts,
         type: "response",
         status: "completed",
-        title: isLong ? (firstLine.length < text.split("\n")[0].length ? firstLine + "..." : firstLine) : text,
+        title: isLong ? firstLine : text,
         detail: isLong ? text : undefined,
       })
 

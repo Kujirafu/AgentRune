@@ -49,6 +49,10 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
   const [prdTaskGroups, setPrdTaskGroups] = useState<{ prdId: string; prdTitle: string; priority: PrdPriority; tasks: Task[] }[]>([])
   const [standaloneTasks, setStandaloneTasks] = useState<Task[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
+  const [showAddTask, setShowAddTask] = useState(false)
+  const [newTaskTitle, setNewTaskTitle] = useState("")
+  const [newTaskDesc, setNewTaskDesc] = useState("")
+  const [addingTask, setAddingTask] = useState(false)
 
   const base = getApiBase()
 
@@ -133,6 +137,28 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
       body: JSON.stringify(body),
     }).then(() => fetchAllTasks()).catch(() => {})
   }, [projectId, base, fetchAllTasks])
+
+  const handleAddStandaloneTask = useCallback(() => {
+    if (!projectId || !newTaskTitle.trim()) return
+    setAddingTask(true)
+    const newTask: Task = {
+      id: Date.now(),
+      title: newTaskTitle.trim(),
+      description: newTaskDesc.trim(),
+      status: "pending",
+      dependsOn: [],
+    }
+    const updatedTasks = [...standaloneTasks, newTask]
+    fetch(`${base}/api/tasks/${encodeURIComponent(projectId)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tasks: updatedTasks }),
+    }).then(() => {
+      setNewTaskTitle("")
+      setNewTaskDesc("")
+      setShowAddTask(false)
+      fetchAllTasks()
+    }).catch(() => {}).finally(() => setAddingTask(false))
+  }, [projectId, base, newTaskTitle, newTaskDesc, standaloneTasks, fetchAllTasks])
 
   const handleCreatePrd = useCallback(() => {
     if (!createGoal.trim() || !send) return
@@ -688,50 +714,132 @@ export function PrdTool({ projectId, send, theme, t }: PrdToolProps) {
           )
         })}
 
-        {standaloneTasks.length > 0 && (
+        <div style={{
+          borderRadius: 10, overflow: "hidden",
+          background: cardBg, border: `1px solid ${border}`,
+        }}>
           <div style={{
-            borderRadius: 10, overflow: "hidden",
-            background: cardBg, border: `1px solid ${border}`,
+            padding: "8px 14px", display: "flex", alignItems: "center", gap: 8,
+            background: dark ? "rgba(30,41,59,0.4)" : "rgba(241,245,249,0.6)",
+            borderBottom: `1px solid ${border}`,
           }}>
-            <div style={{
-              padding: "8px 14px", fontSize: 12, fontWeight: 700, color: textSecondary,
-              background: dark ? "rgba(30,41,59,0.4)" : "rgba(241,245,249,0.6)",
-              borderBottom: `1px solid ${border}`,
-            }}>
-              Standalone Tasks
-            </div>
-            {standaloneTasks.map((task, idx) => {
-              const sc = STATUS_COLORS[task.status] || STATUS_COLORS.pending
-              return (
-                <div key={task.id} style={{
-                  display: "flex", alignItems: "center", gap: 8, padding: "7px 14px",
-                  borderTop: idx > 0 ? `1px solid ${dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.03)"}` : "none",
-                }}>
-                  <button onClick={() => {
-                    const cycle: Record<string, string> = { pending: "in_progress", in_progress: "done", done: "pending", skipped: "pending" }
-                    updateStandaloneTask(task.id, { status: cycle[task.status] || "pending" })
-                  }}
-                    style={{
-                      width: 20, height: 20, borderRadius: 5, flexShrink: 0,
-                      background: sc.bg, border: `1px solid ${sc.border}`,
-                      display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
-                    }}>
-                    {isDone(task.status) && (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={sc.text} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-                    )}
-                  </button>
-                  <span style={{
-                    flex: 1, fontSize: 12, color: textPrimary,
-                    textDecoration: isFinished(task.status) ? "line-through" : "none",
-                    opacity: isFinished(task.status) ? 0.5 : 1,
-                  }}>
-                    {task.title}
-                  </span>
-                </div>
-              )
-            })}
+            <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: textSecondary }}>
+              {t("tasks.manual") || "Standalone Tasks"}
+            </span>
+            <button onClick={() => setShowAddTask(v => !v)}
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                padding: "3px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+                background: showAddTask ? "rgba(55,172,192,0.12)" : "transparent",
+                color: showAddTask ? "#37ACC0" : textSecondary,
+                border: `1px solid ${showAddTask ? "rgba(55,172,192,0.25)" : border}`,
+                cursor: "pointer", fontFamily: "inherit",
+              }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              {t("tasks.addQuick") || "Add Task"}
+            </button>
           </div>
-        )}
+
+          {/* Inline add-task form */}
+          {showAddTask && (
+            <div style={{
+              padding: "12px 14px",
+              background: dark ? "rgba(55,172,192,0.04)" : "rgba(55,172,192,0.03)",
+              borderBottom: `1px solid ${dark ? "rgba(55,172,192,0.1)" : "rgba(55,172,192,0.08)"}`,
+              backdropFilter: "blur(12px)",
+              WebkitBackdropFilter: "blur(12px)",
+            }}>
+              <input
+                value={newTaskTitle}
+                onChange={e => setNewTaskTitle(e.target.value)}
+                placeholder={t("tasks.titlePlaceholder") || "Task title"}
+                autoFocus
+                onKeyDown={e => { if (e.key === "Enter" && newTaskTitle.trim()) handleAddStandaloneTask(); if (e.key === "Escape") { setShowAddTask(false); setNewTaskTitle(""); setNewTaskDesc("") } }}
+                style={{
+                  width: "100%", padding: "8px 10px", borderRadius: 6, fontSize: 12,
+                  border: `1px solid ${dark ? "rgba(55,172,192,0.2)" : "rgba(55,172,192,0.15)"}`,
+                  background: dark ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.7)",
+                  color: textPrimary, outline: "none", fontFamily: "inherit",
+                  boxSizing: "border-box",
+                }}
+              />
+              <textarea
+                value={newTaskDesc}
+                onChange={e => setNewTaskDesc(e.target.value)}
+                placeholder={t("tasks.descPlaceholder") || "Description (optional)"}
+                rows={2}
+                onKeyDown={e => { if (e.key === "Escape") { setShowAddTask(false); setNewTaskTitle(""); setNewTaskDesc("") } }}
+                style={{
+                  width: "100%", padding: "8px 10px", borderRadius: 6, fontSize: 12,
+                  border: `1px solid ${dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.15)"}`,
+                  background: dark ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.5)",
+                  color: textPrimary, outline: "none", fontFamily: "inherit",
+                  resize: "vertical", marginTop: 6, lineHeight: 1.5,
+                  boxSizing: "border-box",
+                }}
+              />
+              <div style={{ display: "flex", gap: 6, marginTop: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => { setShowAddTask(false); setNewTaskTitle(""); setNewTaskDesc("") }}
+                  style={{
+                    padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                    background: "transparent", color: textSecondary,
+                    border: `1px solid ${border}`, cursor: "pointer", fontFamily: "inherit",
+                  }}>
+                  {t("tasks.cancel") || "Cancel"}
+                </button>
+                <button onClick={handleAddStandaloneTask}
+                  disabled={!newTaskTitle.trim() || addingTask}
+                  style={{
+                    padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                    background: "linear-gradient(135deg, #37ACC0, #347792)", color: "#fff",
+                    border: "none", cursor: "pointer", fontFamily: "inherit",
+                    opacity: (!newTaskTitle.trim() || addingTask) ? 0.4 : 1,
+                  }}>
+                  {addingTask ? "..." : (t("tasks.add") || "Add")}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {standaloneTasks.map((task, idx) => {
+            const sc = STATUS_COLORS[task.status] || STATUS_COLORS.pending
+            return (
+              <div key={task.id} style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "7px 14px",
+                borderTop: idx > 0 ? `1px solid ${dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.03)"}` : "none",
+              }}>
+                <button onClick={() => {
+                  const cycle: Record<string, string> = { pending: "in_progress", in_progress: "done", done: "pending", skipped: "pending" }
+                  updateStandaloneTask(task.id, { status: cycle[task.status] || "pending" })
+                }}
+                  style={{
+                    width: 20, height: 20, borderRadius: 5, flexShrink: 0,
+                    background: sc.bg, border: `1px solid ${sc.border}`,
+                    display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                  }}>
+                  {isDone(task.status) && (
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={sc.text} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                  )}
+                </button>
+                <span style={{
+                  flex: 1, fontSize: 12, color: textPrimary,
+                  textDecoration: isFinished(task.status) ? "line-through" : "none",
+                  opacity: isFinished(task.status) ? 0.5 : 1,
+                }}>
+                  {task.title}
+                </span>
+              </div>
+            )
+          })}
+
+          {standaloneTasks.length === 0 && !showAddTask && (
+            <div style={{ padding: "16px 14px", fontSize: 12, color: textSecondary, opacity: 0.5, textAlign: "center" }}>
+              {t("tasks.emptyDesc") || "No standalone tasks yet"}
+            </div>
+          )}
+        </div>
       </div>
     )
   }

@@ -42,7 +42,8 @@ export function RoutingPreview({
         const agentId = route.agents?.[0] || session?.agentId
         const agentDef = agentId ? AGENTS.find(a => a.id === agentId) : null
         const model = route.models?.[0]
-        const sessionIdx = session ? sessions.findIndex(s => s.id === session.id) + 1 : null
+        const rawIdx = session ? sessions.findIndex(s => s.id === session.id) : -1
+        const sessionIdx = rawIdx >= 0 ? rawIdx + 1 : null
 
         return (
           <div key={i} style={{

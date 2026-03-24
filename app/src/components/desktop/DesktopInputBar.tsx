@@ -110,9 +110,8 @@ export function DesktopInputBar({
   }, [projects, selectedProjectId])
 
   // ── Target session ──
-  const targetLabel = targetSessionId
-    ? `#${sessions.findIndex(s => s.id === targetSessionId) + 1}`
-    : "Auto"
+  const targetIdx = targetSessionId ? sessions.findIndex(s => s.id === targetSessionId) : -1
+  const targetLabel = targetIdx >= 0 ? `#${targetIdx + 1}` : "Auto"
 
   // ── Skill Chains ──
   const chainMatches = useMemo((): ChainMatch[] => {
@@ -302,7 +301,7 @@ export function DesktopInputBar({
     if (!trimmed && pasteImages.length === 0) return
     // If exact chain match, send formatted chain instructions instead of raw text
     if (matchedChain) {
-      const instructions = formatChainInstructions(matchedChain, "normal", t)
+      const instructions = formatChainInstructions(matchedChain, "standard", t)
       onSend(instructions)
       setInput("")
       return
@@ -510,6 +509,12 @@ export function DesktopInputBar({
         {/* Input area with highlight overlay */}
         <div style={{ flex: 1, position: "relative", minHeight: 28 }}>
           <textarea
+            data-testid="desktop-command-input"
+            aria-label={activeMode === "interrupt"
+              ? (locale === "zh-TW" ? "中斷後指令輸入" : "Interrupted agent input")
+              : activeMode === "task"
+              ? (locale === "zh-TW" ? "任務輸入" : "Task input")
+              : (locale === "zh-TW" ? "桌面指令輸入" : "Desktop command input")}
             ref={inputRef as any}
             value={input}
             onChange={e => {

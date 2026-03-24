@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from "react"
+import React, { useState, useCallback, useMemo, useEffect } from "react"
 import { useLocale } from "../../lib/i18n/index.js"
 import type { Project, AppSession, AgentEvent } from "../../types"
 import { buildProjectDecisionSummary, type SessionDecisionDigest } from "../../lib/session-summary"
@@ -84,6 +84,12 @@ export function CommandCenter(props: CommandCenterProps) {
   const [activeView, setActiveView] = useState<ToolView>("sessions")
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [targetSessionId, setTargetSessionId] = useState<string | null>(null)
+  // Clear stale target when session no longer exists
+  useEffect(() => {
+    if (targetSessionId && !activeSessions.some(s => s.id === targetSessionId)) {
+      setTargetSessionId(null)
+    }
+  }, [targetSessionId, activeSessions])
   const [showNewProject, setShowNewProject] = useState(false)
 
   // Track locally resolved permission IDs (cleared when server updates event status)
@@ -95,6 +101,7 @@ export function CommandCenter(props: CommandCenterProps) {
     const seen = new Set<string>()
     for (const [sid, events] of props.sessionEvents) {
       const idx = activeSessions.findIndex(s => s.id === sid)
+      if (idx === -1) continue // skip closed/removed sessions
       // Skip sessions that are idle/done — they can't have real pending permissions
       const d = digests.get(sid)
       if (d && (d.status === "idle" || d.status === "done")) continue
@@ -116,6 +123,7 @@ export function CommandCenter(props: CommandCenterProps) {
     const results: { event: AgentEvent; sessionId: string; sessionIdx: number }[] = []
     for (const [sid, events] of props.sessionEvents) {
       const idx = activeSessions.findIndex(s => s.id === sid)
+      if (idx === -1) continue // skip closed/removed sessions
       for (const e of events) {
         if (e.type === "decision_request" && e.status === "completed") {
           results.push({ event: e, sessionId: sid, sessionIdx: idx + 1 })
@@ -151,12 +159,10 @@ export function CommandCenter(props: CommandCenterProps) {
       return null
     }
     const sid = resolveTarget()
-    console.log("[CMD] handleSend:", { sid, targetSessionId, activeCount: activeSessions.length, selectedProjectId, textLen: text.length })
     if (!sid) trackDesktopSessionCreate(selectedProjectId || "", "claude", !!text)
     else trackDesktopCommandSend(sid, text.startsWith("/"), !!text.match(/\[AgentLore Skill Chain/))
     if (!sid) {
       const pid = selectedProjectId || projects[0]?.id
-      console.log("[CMD] No session, creating new. pid:", pid)
       if (pid) {
         const newId = `${pid}_${Date.now()}`
         const userSettings = getSettings(pid)
@@ -170,7 +176,6 @@ export function CommandCenter(props: CommandCenterProps) {
           autoSaveKeysPath: getAutoSaveKeysPath(),
           initialCommand: text,
         })
-        console.log("[CMD] attach sent:", ok, "newId:", newId)
       }
       return
     }
@@ -186,10 +191,11 @@ export function CommandCenter(props: CommandCenterProps) {
       timestamp: Date.now(),
       type: "user_message" as const,
       status: "completed" as const,
-      title: text.length > 60 ? text.slice(0, 60) + "..." : text,
-      detail: text.length > 60 ? text : undefined,
+      title: text,
     }
     send({ type: "store_event", sessionId: sid, event: userEvent })
+    // Immediately show in events view (don't wait for server roundtrip)
+    window.dispatchEvent(new CustomEvent("local_user_event", { detail: { sessionId: sid, event: userEvent } }))
   }, [targetSessionId, send, activeSessions, digests, selectedProjectId, projects, props.onLaunch])
 
   // Handle raw send (e.g. interrupt \x03) to specific session
@@ -550,57 +556,67 @@ export function CommandCenter(props: CommandCenterProps) {
           )}
 
           {activeView === "schedules" && (
-            <SchedulesTool
-              automations={props.automations}
-              results={props.autoResults}
-              loading={props.autoLoading}
-              projects={projects}
-              theme={theme}
-              t={t}
-              onToggle={props.autoToggle}
-              onEdit={onEditAutomation}
-              onNew={onNewAutomation}
-              onDelete={props.onDeleteAutomation}
-              onViewReport={props.onViewReport}
-              onViewCrewReport={props.onViewCrewReport}
-            />
+            <div data-testid="schedules-view">
+              <SchedulesTool
+                automations={props.automations}
+                results={props.autoResults}
+                loading={props.autoLoading}
+                projects={projects}
+                theme={theme}
+                t={t}
+                onToggle={props.autoToggle}
+                onEdit={onEditAutomation}
+                onNew={onNewAutomation}
+                onDelete={props.onDeleteAutomation}
+                onViewReport={props.onViewReport}
+                onViewCrewReport={props.onViewCrewReport}
+              />
+            </div>
           )}
 
           {activeView === "prd" && (
-            <PrdTool
-              projectId={selectedProjectId}
-              send={send}
-              theme={theme}
-              t={t}
-            />
+            <div data-testid="prd-view">
+              <PrdTool
+                projectId={selectedProjectId}
+                send={send}
+                theme={theme}
+                t={t}
+              />
+            </div>
           )}
 
           {activeView === "workflows" && (
-            <WorkflowsTool
-              theme={theme}
-              t={t}
-              onFireCrew={onFireCrew}
-              onOpenChainBuilder={props.onOpenBuilder}
-              onCreateFromTemplate={props.onCreateFromTemplate}
-              onOpenChainEditor={props.onOpenChainEditor}
-            />
+            <div data-testid="workflows-view">
+              <WorkflowsTool
+                theme={theme}
+                t={t}
+                onFireCrew={onFireCrew}
+                onOpenChainBuilder={props.onOpenBuilder}
+                onCreateFromTemplate={props.onCreateFromTemplate}
+                onOpenChainEditor={props.onOpenChainEditor}
+              />
+            </div>
           )}
 
           {activeView === "git" && (
-            <GitTool
-              projectId={selectedProjectId}
-              theme={theme}
-              t={t}
-            />
+            <div data-testid="git-view">
+              <GitTool
+                projectId={selectedProjectId}
+                theme={theme}
+                t={t}
+              />
+            </div>
           )}
 
           {activeView === "settings" && (<>
+            <div data-testid="settings-view">
             <SettingsTool
               projectId={selectedProjectId}
               theme={theme}
               t={t}
               onSettingsChange={handleSettingsChange}
             />
+            </div>
             {/* "Apply Changes" banner when sandbox/bypass changes need restart */}
             {pendingRestart && (
               <div style={{
@@ -694,7 +710,7 @@ export function CommandCenter(props: CommandCenterProps) {
                 setTargetSessionId(first.id)
               } else {
                 const currentIdx = sortedSessions.findIndex(s => s.id === currentTarget)
-                const nextIdx = currentIdx + 1
+                const nextIdx = currentIdx >= 0 ? currentIdx + 1 : 0
                 if (nextIdx >= sortedSessions.length) {
                   // Past last → back to All (card view + Auto)
                   setExpandedSessions(new Set())

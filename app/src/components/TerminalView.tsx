@@ -203,6 +203,11 @@ export function TerminalView({
     if (agentId === "openclaw" && newSettings.openclawProvider !== prev.openclawProvider) {
       relaunchSession()
     }
+
+    // Sandbox level change requires session restart for all agents
+    if (newSettings.sandboxLevel !== prev.sandboxLevel) {
+      relaunchSession()
+    }
   }, [agentId, onKillSession, onLaunchSession, project.id, sessionId, settings])
 
   const sendInput = useCallback((data: string) => {

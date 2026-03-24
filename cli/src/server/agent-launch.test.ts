@@ -30,12 +30,11 @@ describe("agent-launch", () => {
       "--effort",
       "high",
       "--dangerously-skip-permissions",
-      "--append-system-prompt",
-      launch.args[launch.args.length - 1],
     ])
     expect(launch.command).toContain("--resume")
     expect(launch.command).toContain("session_123")
-    expect(launch.command).toContain("--append-system-prompt")
+    expect(launch.args).not.toContain("--append-system-prompt")
+    expect(launch.command).not.toContain("--append-system-prompt")
   })
 
   it("sanitizes Codex settings and keeps dangerous text inside a quoted argument", () => {

@@ -209,6 +209,11 @@ export const zhTW: Record<string, string> = {
   "tasks.generate": "產生任務",
   "tasks.next": "下一個",
   "tasks.startNow": "立即執行",
+  "tasks.addQuick": "添加任務",
+  "tasks.titlePlaceholder": "任務標題",
+  "tasks.descPlaceholder": "描述（可選）",
+  "tasks.add": "新增",
+  "tasks.cancel": "取消",
 
   // 開發規範
   "standards.title": "開發規範",

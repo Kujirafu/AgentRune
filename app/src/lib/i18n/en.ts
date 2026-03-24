@@ -207,6 +207,11 @@ export const en: Record<string, string> = {
   "tasks.generate": "Generate Tasks",
   "tasks.next": "NEXT",
   "tasks.startNow": "Start Now",
+  "tasks.addQuick": "Add Task",
+  "tasks.titlePlaceholder": "Task title",
+  "tasks.descPlaceholder": "Description (optional)",
+  "tasks.add": "Add",
+  "tasks.cancel": "Cancel",
 
   // Standards
   "standards.title": "Development Standards",

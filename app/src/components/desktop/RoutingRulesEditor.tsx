@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react"
+import React, { useState, useCallback, useRef, useEffect } from "react"
 import type { RoutingRule } from "../../types"
 import { AGENTS } from "../../types"
 
@@ -55,6 +55,22 @@ export function RoutingRulesEditor({
   const handleToggle = useCallback((id: string) => {
     onSave(activeRules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r))
   }, [activeRules, onSave])
+
+  const [agentDropdownOpenId, setAgentDropdownOpenId] = useState<string | null>(null)
+  const agentDropdownRefs = useRef<Record<string, HTMLDivElement | null>>({})
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!agentDropdownOpenId) return
+    const handleClickOutside = (e: MouseEvent) => {
+      const ref = agentDropdownRefs.current[agentDropdownOpenId]
+      if (ref && !ref.contains(e.target as Node)) {
+        setAgentDropdownOpenId(null)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [agentDropdownOpenId])
 
   // Available agents (only those in AGENTS array)
   const agentOptions = AGENTS.filter(a => a.id !== "terminal")
@@ -144,22 +160,60 @@ export function RoutingRulesEditor({
             </svg>
 
             {/* Agent select */}
-            <select
-              value={rule.agentId}
-              onChange={e => handleChangeAgent(rule.id, e.target.value)}
-              style={{
-                padding: "5px 8px",
-                background: dark ? "rgba(55,172,192,0.1)" : "rgba(55,172,192,0.06)",
-                border: `1px solid ${dark ? "rgba(55,172,192,0.2)" : "rgba(55,172,192,0.15)"}`,
-                borderRadius: 5, color: "#37ACC0", fontSize: 12, fontWeight: 600,
-                cursor: "pointer", minWidth: 90, fontFamily: "inherit",
-                outline: "none",
-              }}
+            <div
+              ref={(el) => { agentDropdownRefs.current[rule.id] = el }}
+              style={{ position: "relative", minWidth: 90 }}
             >
-              {agentOptions.map(a => (
-                <option key={a.id} value={a.id}>{a.id}</option>
-              ))}
-            </select>
+              <button
+                onClick={() => setAgentDropdownOpenId(agentDropdownOpenId === rule.id ? null : rule.id)}
+                style={{
+                  width: "100%", padding: "5px 8px",
+                  background: dark ? "rgba(55,172,192,0.1)" : "rgba(55,172,192,0.06)",
+                  border: `1px solid ${dark ? "rgba(55,172,192,0.2)" : "rgba(55,172,192,0.15)"}`,
+                  borderRadius: 5, color: "#37ACC0", fontSize: 12, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit", outline: "none",
+                  display: "flex", alignItems: "center", gap: 4,
+                  backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                }}
+              >
+                <span style={{ flex: 1, textAlign: "left" }}>{rule.agentId}</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transition: "transform 0.2s", transform: agentDropdownOpenId === rule.id ? "rotate(180deg)" : "rotate(0deg)" }}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              {agentDropdownOpenId === rule.id && (
+                <div style={{
+                  position: "absolute", top: "calc(100% + 3px)", left: 0,
+                  minWidth: "100%", borderRadius: 6, overflow: "hidden",
+                  border: `1px solid ${dark ? "rgba(55,172,192,0.2)" : "rgba(55,172,192,0.15)"}`,
+                  background: dark ? "rgba(15,23,42,0.95)" : "rgba(255,255,255,0.97)",
+                  backdropFilter: "blur(20px) saturate(1.4)",
+                  WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+                  boxShadow: "0 6px 24px rgba(0,0,0,0.18)",
+                  zIndex: 10,
+                }}>
+                  {agentOptions.map((a, i) => (
+                    <button
+                      key={a.id}
+                      onClick={() => { handleChangeAgent(rule.id, a.id); setAgentDropdownOpenId(null) }}
+                      style={{
+                        width: "100%", padding: "6px 10px", border: "none",
+                        background: a.id === rule.agentId ? (dark ? "rgba(55,172,192,0.18)" : "rgba(55,172,192,0.10)") : "transparent",
+                        color: a.id === rule.agentId ? "#37ACC0" : textPrimary,
+                        fontSize: 12, fontWeight: a.id === rule.agentId ? 600 : 400,
+                        cursor: "pointer", textAlign: "left",
+                        fontFamily: "inherit", display: "block",
+                        borderBottom: i < agentOptions.length - 1 ? `1px solid ${border}` : "none",
+                      }}
+                      onMouseEnter={(e) => { if (a.id !== rule.agentId) e.currentTarget.style.background = dark ? "rgba(55,172,192,0.08)" : "rgba(55,172,192,0.04)" }}
+                      onMouseLeave={(e) => { if (a.id !== rule.agentId) e.currentTarget.style.background = "transparent" }}
+                    >
+                      {a.id}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Delete */}
             <button

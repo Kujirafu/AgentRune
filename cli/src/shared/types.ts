@@ -101,11 +101,18 @@ export interface PrdItem {
 }
 
 /** @deprecated Use PrdItem instead — kept for migration */
+export interface Prd {
+  goal: string
+  decisions: PrdDecision[]
+  approaches: PrdApproach[]
+  scope: { included: string[]; excluded: string[] }
+}
+
 export interface TaskStore {
   projectId: string
   requirement: string
   tasks: Task[]
-  prd?: string
+  prd?: Prd
   createdAt: number
   updatedAt: number
 }

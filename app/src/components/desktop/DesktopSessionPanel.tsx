@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AppSession, AgentEvent } from "../../types"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
+import { getSettings } from "../../lib/storage"
 
 const DesktopTerminalPanel = lazy(() =>
   import("./DesktopTerminalPanel").then(m => ({ default: m.DesktopTerminalPanel }))
@@ -76,12 +77,6 @@ const typeIcons: Record<string, React.ReactNode> = {
       <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
     </svg>
   ),
-  user_message: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
-    </svg>
-  ),
   session_summary: (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
@@ -105,21 +100,38 @@ const defaultIcon = (
   </svg>
 )
 
-const typeColors: Record<string, string> = {
-  file_edit: "#37ACC0",
-  file_create: "#BDD1C6",
-  file_delete: "#FB8184",
-  command_run: "#347792",
-  test_result: "#BDD1C6",
-  error: "#FB8184",
-  decision_request: "#D09899",
-  info: "#94a3b8",
-  response: "#37ACC0",
-  user_message: "#37ACC0",
-  session_summary: "#37ACC0",
-  progress_report: "#D09899",
-  install_package: "#347792",
-  token_usage: "#94a3b8",
+function getTypeColors(dark: boolean): Record<string, string> {
+  return dark ? {
+    file_edit: "#38bdf8",
+    file_create: "#86efac",
+    file_delete: "#f87171",
+    command_run: "#0ea5e9",
+    test_result: "#86efac",
+    error: "#f87171",
+    decision_request: "#fbbf24",
+    info: "#64748b",
+    response: "#38bdf8",
+    user_message: "#38bdf8",
+    session_summary: "#38bdf8",
+    progress_report: "#fbbf24",
+    install_package: "#0ea5e9",
+    token_usage: "#64748b",
+  } : {
+    file_edit: "#347792",
+    file_create: "#2d8a6e",
+    file_delete: "#dc2626",
+    command_run: "#1e6b87",
+    test_result: "#2d8a6e",
+    error: "#dc2626",
+    decision_request: "#b45309",
+    info: "#94a3b8",
+    response: "#347792",
+    user_message: "#347792",
+    session_summary: "#347792",
+    progress_report: "#b45309",
+    install_package: "#1e6b87",
+    token_usage: "#94a3b8",
+  }
 }
 
 const typeLabels: Record<string, string> = {
@@ -177,9 +189,21 @@ export function DesktopSessionPanel({
   const [mode, setMode] = useState<"events" | "terminal">("events")
   const eventsEndRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // Tick every 10s to re-evaluate hasRecentActivity
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 10000)
+    return () => clearInterval(t)
+  }, [])
   const [autoScroll, setAutoScroll] = useState(true)
+  const [planDetail, setPlanDetail] = useState<string | null>(null)
 
-  const status = digest?.status || "idle"
+  const digestStatus = digest?.status || "idle"
+  // Working indicator: use digest status OR check if recent events are fresh (< 30s)
+  const lastEventTime = events.length > 0 ? events[events.length - 1].timestamp : 0
+  const hasRecentActivity = Date.now() - lastEventTime < 30000
+  const isWorking = digestStatus === "working" || (session.status === "active" && hasRecentActivity && digestStatus !== "done")
+  const status = isWorking ? "working" : digestStatus
   const sessionNumber = index != null ? `#${index + 1}` : ""
   const taskName = session.taskTitle || digest?.displayLabel || session.agentId
   const label = sessionNumber ? `${sessionNumber} ${taskName}` : taskName
@@ -191,10 +215,20 @@ export function DesktopSessionPanel({
   const textSecondary = dark ? "#94a3b8" : "#64748b"
   const borderClr = dark ? "rgba(148,163,184,0.08)" : "rgba(148,163,184,0.12)"
 
-  // Request events from server on mount + re-subscribe on WS reconnect
-  // (reconnect creates a new server-side clientAttachedSessions entry)
+  // Request events + auto-resume recoverable sessions on mount
   useEffect(() => {
     send({ type: "request_events", sessionId: session.id, agentId: session.agentId })
+    // Auto-resume recoverable sessions — don't require user to click terminal tab
+    if (session.status === "recoverable") {
+      send({
+        type: "attach",
+        projectId: session.projectId,
+        agentId: session.agentId,
+        sessionId: session.id,
+        isAgentResume: true,
+        settings: getSettings(session.projectId),
+      })
+    }
     const unsub = on("__ws_open__", () => {
       send({ type: "request_events", sessionId: session.id, agentId: session.agentId })
     })
@@ -204,18 +238,15 @@ export function DesktopSessionPanel({
   // Filter out noise events + dedup decision_requests + hide waiting decisions (shown in banner)
   const visibleEvents = useMemo(() => {
     const seen = new Set<string>()
-    let lastThinkingTs = 0
     return events
       .filter(e => {
         if (e.type === "token_usage") return false
+        // Filter ParseEngine's "X responded" — raw PTY garbage, JSONL watcher has clean version
+        if (e.type === "info" && /^(?:Claude|Codex|Cursor|Gemini|Aider) responded/i.test(e.title || "")) return false
+        // Filter Claude CLI status spinners (not agent content)
+        if (e.type === "info" && /^(?:Thinking|Beboppin|Ionizing|Saut[ée]ing|Crunching|Orchestrating|Brewing|Moonwalking|plan mode|bypass permissions)/i.test(e.title || "")) return false
         if (e.type === "response" && (e.detail || e.title)) return true
         if (!e.title || !e.title.trim()) return false
-        // Collapse consecutive "Thinking..." — keep only one per 15s window
-        if (e.type === "info" && /^Thinking/i.test(e.title)) {
-          if (e.timestamp - lastThinkingTs < 15000) return false
-          lastThinkingTs = e.timestamp
-          return true
-        }
         if (e.type === "decision_request") {
           const key = `decision:${e.detail || e.title}`
           if (seen.has(key)) return false
@@ -415,8 +446,31 @@ export function DesktopSessionPanel({
                     onReject={event.type === "decision_request" && event.status === "waiting" ? () => {
                       send({ type: "session_input", sessionId: session.id, data: "n\n" })
                     } : undefined}
+                    onViewDetail={event.title === "Plan ready" ? (d) => setPlanDetail(d) : undefined}
                   />
                 ))}
+                {/* Working indicator at bottom of events */}
+                {status === "working" && (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "10px 10px",
+                    borderRadius: 7,
+                    background: dark ? "rgba(55,172,192,0.06)" : "rgba(55,172,192,0.04)",
+                    border: `1px solid ${dark ? "rgba(55,172,192,0.1)" : "rgba(55,172,192,0.08)"}`,
+                  }}>
+                    <span style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                      {[0, 1, 2].map(i => (
+                        <span key={i} style={{
+                          width: 5, height: 5, borderRadius: "50%",
+                          background: dark ? "#38bdf8" : "#37ACC0",
+                          animation: `desktopPulse 1.4s ease-in-out ${i * 0.2}s infinite`,
+                        }} />
+                      ))}
+                    </span>
+                    <span style={{ fontSize: 12, color: textSecondary }}>Agent working...</span>
+                    <style>{`@keyframes desktopPulse { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.1); } }`}</style>
+                  </div>
+                )}
                 <div ref={eventsEndRef} />
               </div>
             )}
@@ -476,18 +530,59 @@ export function DesktopSessionPanel({
         .desktop-md blockquote { margin: 4px 0; padding: 4px 10px; border-left: 3px solid #37ACC0; opacity: 0.85; }
         .desktop-md a { color: #37ACC0; text-decoration: none; }
       `}</style>
+      {/* Plan detail modal */}
+      {planDetail && (
+        <div onClick={() => setPlanDetail(null)} style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "min(720px, 90vw)", maxHeight: "80vh",
+            background: dark ? "#1e293b" : "#fff",
+            borderRadius: 12, overflow: "hidden",
+            border: `1px solid ${dark ? "rgba(148,163,184,0.15)" : "rgba(148,163,184,0.2)"}`,
+            boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+            display: "flex", flexDirection: "column",
+          }}>
+            <div style={{
+              padding: "14px 20px", borderBottom: `1px solid ${dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.12)"}`,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+            }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: textPrimary }}>Plan</span>
+              <button onClick={() => setPlanDetail(null)} style={{
+                width: 24, height: 24, borderRadius: 6, border: "none",
+                background: "transparent", cursor: "pointer", color: textSecondary,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div className="desktop-md" style={{
+              padding: "16px 20px", overflow: "auto", flex: 1,
+              fontSize: 13, color: dark ? "#cbd5e1" : "#334155",
+              lineHeight: 1.8, wordBreak: "break-word",
+            }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{planDetail}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 // --- Compact event row for desktop ---
 const DesktopEventRow = React.memo(function DesktopEventRow({
-  event, theme, onApprove, onReject,
+  event, theme, onApprove, onReject, onViewDetail,
 }: {
   event: AgentEvent
   theme: "light" | "dark"
   onApprove?: () => void
   onReject?: () => void
+  onViewDetail?: (detail: string) => void
 }) {
   const dark = theme === "dark"
   const isResponse = event.type === "response" || event.type === "session_summary" || event.type === "progress_report"
@@ -495,7 +590,7 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
 
   const textPrimary = dark ? "#e2e8f0" : "#1e293b"
   const textSecondary = dark ? "#94a3b8" : "#64748b"
-  const typeColor = typeColors[event.type] || "#94a3b8"
+  const typeColor = getTypeColors(dark)[event.type] || "#94a3b8"
   const isUser = event.id.startsWith("usr_")
   const isError = event.type === "error" || event.status === "failed"
 
@@ -522,15 +617,14 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
         display: "flex", flexDirection: "column",
         padding: "6px 10px",
         borderRadius: 7,
-        borderLeft: isUser ? "3px solid rgba(55,172,192,0.5)" : undefined,
+        borderLeft: isUser ? undefined : undefined,
         background: isUser
-          ? (dark ? "rgba(55,172,192,0.08)" : "rgba(55,172,192,0.06)")
+          ? (dark ? "#1e6b87" : "#37ACC0")
           : isError
-            ? (dark ? "rgba(239,68,68,0.06)" : "rgba(239,68,68,0.04)")
+            ? (dark ? "rgba(248,113,113,0.1)" : "rgba(220,38,38,0.06)")
             : (dark ? "rgba(30,41,59,0.3)" : "rgba(241,245,249,0.5)"),
         border: `1px solid ${
-          isUser ? "rgba(59,130,246,0.1)"
-          : isError ? "rgba(239,68,68,0.1)"
+          isError ? (dark ? "rgba(248,113,113,0.15)" : "rgba(220,38,38,0.1)")
           : "transparent"
         }`,
         cursor: hasDetail ? "pointer" : "default",
@@ -540,7 +634,11 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
       {/* Main row */}
       <div style={{ display: "flex", alignItems: isResponse ? "flex-start" : "center", gap: 8, minHeight: 22 }}>
         {/* Type icon */}
-        <span style={{ color: typeColor, flexShrink: 0, display: "flex", alignItems: "center", marginTop: isResponse ? 2 : 0 }}>
+        <span style={{
+          color: isUser ? "#fff" : typeColor, flexShrink: 0, display: "flex", alignItems: "center",
+          marginTop: isResponse ? 2 : 0,
+          animation: event.status === "in_progress" ? "desktopPulse 1.4s ease-in-out infinite" : undefined,
+        }}>
           {typeIcons[event.type] || defaultIcon}
         </span>
         {/* Title */}
@@ -555,7 +653,7 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
           </div>
         ) : (
           <span style={{
-            fontSize: 12, color: textPrimary,
+            fontSize: 12, color: isUser ? "#fff" : textPrimary,
             flex: 1, overflow: "hidden", textOverflow: "ellipsis",
             whiteSpace: expanded ? "normal" : "nowrap",
             wordBreak: expanded ? "break-word" : undefined,
@@ -569,7 +667,8 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
         {/* Type label */}
         <span style={{
           fontSize: 10, fontWeight: 600,
-          color: typeColor, opacity: 0.8,
+          color: isUser ? "rgba(255,255,255,0.8)" : typeColor,
+          opacity: isUser ? 1 : 0.8,
           flexShrink: 0, textTransform: "uppercase",
           letterSpacing: 0.3,
         }}>
@@ -577,12 +676,26 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
         </span>
         {/* Timestamp */}
         <span style={{
-          fontSize: 10, color: textSecondary,
-          opacity: 0.6, flexShrink: 0,
+          fontSize: 10, color: isUser ? "rgba(255,255,255,0.6)" : textSecondary,
+          opacity: isUser ? 1 : 0.6, flexShrink: 0,
           fontFamily: "'JetBrains Mono', monospace",
         }}>
           {time}
         </span>
+        {/* View full plan button */}
+        {event.title === "Plan ready" && cleanDetail && onViewDetail && (
+          <button onClick={(e) => { e.stopPropagation(); onViewDetail(cleanDetail) }} style={{
+            padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 600,
+            border: `1px solid ${dark ? "rgba(55,172,192,0.3)" : "rgba(55,172,192,0.2)"}`,
+            background: "transparent", color: dark ? "#38bdf8" : "#37ACC0",
+            cursor: "pointer", flexShrink: 0,
+          }}>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 3, verticalAlign: -1 }}>
+              <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+            </svg>
+            Plan
+          </button>
+        )}
         {/* Expand indicator */}
         {hasDetail && (
           <span style={{
@@ -639,18 +752,16 @@ const DesktopEventRow = React.memo(function DesktopEventRow({
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
           </div>
         ) : (
-          <div style={{
+          <div className="desktop-md" style={{
             marginTop: 6, paddingTop: 6,
             borderTop: `1px solid ${dark ? "rgba(148,163,184,0.06)" : "rgba(148,163,184,0.08)"}`,
             fontSize: 12, color: dark ? "#cbd5e1" : "#475569",
-            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
             lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            maxHeight: 300,
+            maxHeight: 400,
             overflow: "auto",
           }}>
-            {cleanDetail}
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanDetail}</ReactMarkdown>
           </div>
         )
       )}

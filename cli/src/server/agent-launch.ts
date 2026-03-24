@@ -232,14 +232,14 @@ function buildAgentProtocol(locale: string, projectId?: string): { full: string;
   return {
     full: [
       "AGENTRUNE PROTOCOL: You are running inside AgentRune.",
-      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory - treat it like memory.md). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
-      "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system - user cannot see those.",
+      `FIRST ACTION (mandatory, before anything else): If .agentrune/rules.md exists, read it and follow the behavior rules strictly. Then read .agentrune/agentlore.md (your project memory). If agentlore.md does not exist, create it (mkdir -p .agentrune) by scanning the project.${langHint}`,
+      "MEMORY: .agentrune/agentlore.md IS your memory. Read it at session start, write to it when you learn something. If agentlore.md contains an Index section with links to other files, follow those links to read detailed sections. Do NOT use CLAUDE.md, .claude/memory/, or any agent-native memory system — user cannot see those.",
       prdHint,
     ].filter(Boolean).join(" "),
     short: [
       "AGENTRUNE: If .agentrune/rules.md exists, read and follow it.",
       "Read .agentrune/agentlore.md (project memory) - if missing, create it (mkdir -p .agentrune) by scanning the project.",
-      "agentlore.md IS your memory - read on start, write when you learn. Do NOT use your own memory system - only .agentrune/agentlore.md.",
+      "agentlore.md IS your memory - read on start, write when you learn. If it has an Index with links, follow them. Do NOT use your own memory system - only .agentrune/agentlore.md.",
       langHint.trim(),
       prdHint.trim(),
     ].filter(Boolean).join(" "),
@@ -286,7 +286,10 @@ function buildClaudeArgs(settings: NormalizedAgentSettings, options: AgentLaunch
     args.push("--permission-mode", "acceptEdits")
   }
 
-  args.push("--append-system-prompt", protocol.full)
+  // Only inject protocol on fresh sessions — resume/continue inherits previous system prompt
+  if (!resumeSessionId && !options.continueSession) {
+    args.push("--append-system-prompt", protocol.full)
+  }
   return args
 }
 

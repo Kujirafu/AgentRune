@@ -51,3 +51,4 @@ tmp-*.json
 tmp-*.png
 app/test-results/
 cli/coverage/
+.worktrees/

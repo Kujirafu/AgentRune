@@ -808,10 +808,10 @@ export function ProjectOverview({
                     <div style={{
                       width: 40, height: 40, borderRadius: "50%",
                       border: "3px solid var(--glass-border)",
-                      borderTopColor: "#37ACC0",
+                      borderTopColor: "var(--accent-primary)",
                       animation: "spin 1s linear infinite",
                     }} />
-                    <div style={{ fontSize: 14, fontWeight: 500, color: "#37ACC0" }}>{t("overview.waitingForConnection")}</div>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: "var(--accent-primary)" }}>{t("overview.waitingForConnection")}</div>
                     <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
                   </>
                 ) : (
@@ -947,7 +947,7 @@ export function ProjectOverview({
                         >
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
                           {autoCount > 0
-                            ? <><span style={{ color: "#37ACC0" }}>{autoCount}</span> {t("automation.schedulesActive") || "schedules"}</>
+                            ? <><span style={{ color: "var(--accent-primary)" }}>{autoCount}</span> {t("automation.schedulesActive") || "schedules"}</>
                             : <span style={{ opacity: 0.6 }}>{t("automation.addSchedule") || "Add schedule"}</span>
                           }
                         </span>
@@ -1160,7 +1160,7 @@ export function ProjectOverview({
                   return (
                     <div key={auto.id} style={{
                       padding: "12px 14px", borderRadius: 14,
-                      border: auto.enabled ? "1px solid rgba(55,172,192,0.25)" : "1px solid var(--glass-border)",
+                      border: auto.enabled ? "1px solid var(--accent-primary-bg)" : "1px solid var(--glass-border)",
                       background: "var(--glass-bg)",
                       backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
                       opacity: auto.enabled ? 1 : 0.5,
@@ -1181,7 +1181,7 @@ export function ProjectOverview({
                           style={{
                             width: 40, height: 22, borderRadius: 11, padding: 2,
                             border: "none",
-                            background: auto.enabled ? "#37ACC0" : "var(--glass-border)",
+                            background: auto.enabled ? "var(--accent-primary)" : "var(--glass-border)",
                             cursor: "pointer", transition: "background 0.2s",
                             display: "flex", alignItems: "center", flexShrink: 0,
                           }}
@@ -1299,7 +1299,7 @@ export function ProjectOverview({
                   <button onClick={() => setTplGroup(null)} style={{
                     padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                     background: tplGroup === null ? "rgba(55, 172, 192, 0.15)" : "var(--icon-bg)",
-                    color: tplGroup === null ? "#37ACC0" : "var(--text-secondary)",
+                    color: tplGroup === null ? "var(--accent-primary)" : "var(--text-secondary)",
                     fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                   }}>
                     {t("automation.allCategories") || "All"}
@@ -1308,7 +1308,7 @@ export function ProjectOverview({
                     <button key={g.key} onClick={() => setTplGroup(tplGroup === g.key ? null : g.key)} style={{
                       padding: "5px 12px", borderRadius: 20, border: "none", cursor: "pointer",
                       background: tplGroup === g.key ? "rgba(55, 172, 192, 0.15)" : "var(--icon-bg)",
-                      color: tplGroup === g.key ? "#37ACC0" : "var(--text-secondary)",
+                      color: tplGroup === g.key ? "var(--accent-primary)" : "var(--text-secondary)",
                       fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                     }}>
                       {t(g.label)}
@@ -1348,7 +1348,7 @@ export function ProjectOverview({
                             width: "100%", textAlign: "left",
                             display: "flex", alignItems: "center", gap: 10,
                             padding: "12px 14px", borderRadius: isExpanded ? "14px 14px 0 0" : 14,
-                            border: isPinned ? "1px solid rgba(55,172,192,0.25)" : "1px solid var(--glass-border)",
+                            border: isPinned ? "1px solid var(--accent-primary-bg)" : "1px solid var(--glass-border)",
                             borderBottom: isExpanded ? "none" : undefined,
                             background: "var(--glass-bg)",
                             backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
@@ -1422,7 +1422,7 @@ export function ProjectOverview({
                         {isExpanded && (
                           <div style={{
                             padding: "10px 14px 12px", borderRadius: "0 0 14px 14px",
-                            border: isPinned ? "1px solid rgba(55,172,192,0.25)" : "1px solid var(--glass-border)",
+                            border: isPinned ? "1px solid var(--accent-primary-bg)" : "1px solid var(--glass-border)",
                             borderTop: "1px solid var(--glass-border)",
                             background: "var(--glass-bg)",
                             backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
@@ -1441,8 +1441,8 @@ export function ProjectOverview({
                                   {(["lite", "standard", "deep"] as ChainDepth[]).map(d => (
                                     <button key={d} onClick={() => setChainDepths(prev => ({ ...prev, [tmpl.id]: d }))} style={{
                                       padding: "3px 10px", borderRadius: 12, border: "none", cursor: "pointer",
-                                      background: depth === d ? "rgba(55,172,192,0.2)" : "var(--icon-bg)",
-                                      color: depth === d ? "#37ACC0" : "var(--text-secondary)",
+                                      background: depth === d ? "var(--accent-primary-bg)" : "var(--icon-bg)",
+                                      color: depth === d ? "var(--accent-primary)" : "var(--text-secondary)",
                                       fontSize: 11, fontWeight: 600,
                                     }}>
                                       {t(`chain.depth.${d}`)}
@@ -1461,7 +1461,7 @@ export function ProjectOverview({
                                         <div key={node.id} style={{ display: "flex", gap: 0 }}>
                                           <div style={{ width: 20, display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
                                             <div style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--text-secondary)", opacity: 0.4 }} />
-                                            {!isLast && <div style={{ width: 1.5, flex: 1, background: "rgba(55,172,192,0.15)" }} />}
+                                            {!isLast && <div style={{ width: 1.5, flex: 1, background: "var(--accent-primary-bg)" }} />}
                                           </div>
                                           <div style={{ flex: 1, paddingBottom: isLast ? 0 : 6, marginTop: -2 }}>
                                             <div style={{ fontSize: 11, color: "var(--text-primary)", fontWeight: 500, lineHeight: 1.2 }}>
@@ -1480,7 +1480,7 @@ export function ProjectOverview({
                                       <div key={node.id} style={{ display: "flex", gap: 0 }}>
                                         <div style={{ width: 20, display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
                                           <div style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--text-secondary)", opacity: 0.4 }} />
-                                          {!isLast && <div style={{ width: 1.5, flex: 1, background: "rgba(55,172,192,0.15)" }} />}
+                                          {!isLast && <div style={{ width: 1.5, flex: 1, background: "var(--accent-primary-bg)" }} />}
                                         </div>
                                         <div style={{ fontSize: 11, color: "var(--text-primary)", fontWeight: 500, paddingBottom: isLast ? 0 : 6, lineHeight: 1.2, marginTop: -2 }}>
                                           {resolveChainText(node.labelKey, t)}
@@ -1492,8 +1492,8 @@ export function ProjectOverview({
                                 {/* Edit chain button */}
                                 <button onClick={() => setChainEditSlug(chainSlug!)} style={{
                                   padding: "5px 12px", borderRadius: 8, marginBottom: 8,
-                                  border: "1px solid var(--glass-border)", background: "rgba(55,172,192,0.08)",
-                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  border: "1px solid var(--glass-border)", background: "var(--accent-primary-bg)",
+                                  color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
                                   display: "flex", alignItems: "center", gap: 4,
                                 }}>
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
@@ -1560,8 +1560,8 @@ export function ProjectOverview({
                                   setExpandedTemplateId(null)
                                 }} style={{
                                   padding: "6px 12px", borderRadius: 8,
-                                  border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  border: "1px solid var(--accent-primary-bg)", background: "var(--accent-primary-bg)",
+                                  color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
                                   display: "flex", alignItems: "center", gap: 4,
                                 }}>
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -1574,8 +1574,8 @@ export function ProjectOverview({
                                   onLaunch(selectedProjectForSessions || selectedProject || "", "claude")
                                 }} style={{
                                   padding: "6px 12px", borderRadius: 8,
-                                  border: "1px solid rgba(55,172,192,0.25)", background: "rgba(55,172,192,0.15)",
-                                  color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                  border: "1px solid var(--accent-primary-bg)", background: "var(--accent-primary-bg)",
+                                  color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
                                   display: "flex", alignItems: "center", gap: 4,
                                 }}>
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -1616,8 +1616,8 @@ export function ProjectOverview({
                                 setShowAutomation(true)
                               }} style={{
                                 padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid var(--glass-border)", background: "rgba(55,172,192,0.1)",
-                                color: "#37ACC0", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                border: "1px solid var(--glass-border)", background: "var(--accent-primary-bg)",
+                                color: "var(--accent-primary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
                                 display: "flex", alignItems: "center", gap: 4,
                               }}>
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
@@ -1630,8 +1630,8 @@ export function ProjectOverview({
                                 localStorage.setItem("agentrune_pinned_templates", JSON.stringify(next))
                               }} style={{
                                 padding: "6px 12px", borderRadius: 8,
-                                border: "1px solid var(--glass-border)", background: isPinned ? "rgba(55,172,192,0.15)" : "transparent",
-                                color: isPinned ? "#37ACC0" : "var(--text-secondary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                border: "1px solid var(--glass-border)", background: isPinned ? "var(--accent-primary-bg)" : "transparent",
+                                color: isPinned ? "var(--accent-primary)" : "var(--text-secondary)", fontSize: 11, fontWeight: 600, cursor: "pointer",
                                 display: "flex", alignItems: "center", gap: 4,
                               }}>
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1662,7 +1662,7 @@ export function ProjectOverview({
                     })
                     return (
                       <div key={g.key} style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: "#37ACC0", marginBottom: 8, letterSpacing: 0.5 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent-primary)", marginBottom: 8, letterSpacing: 0.5 }}>
                           {t(g.label)}
                         </div>
                         {subgroups.length > 1 ? subgroups.map(sg => {
@@ -1711,10 +1711,10 @@ export function ProjectOverview({
                         <div style={{
                           width: 40, height: 40, borderRadius: "50%",
                           border: "3px solid var(--glass-border)",
-                          borderTopColor: "#37ACC0",
+                          borderTopColor: "var(--accent-primary)",
                           animation: "spin 1s linear infinite",
                         }} />
-                        <div style={{ fontSize: 14, fontWeight: 500, color: "#37ACC0" }}>{t("overview.waitingForConnection")}</div>
+                        <div style={{ fontSize: 14, fontWeight: 500, color: "var(--accent-primary)" }}>{t("overview.waitingForConnection")}</div>
                       </>
                     ) : (
                       <div style={{ fontSize: 14, fontWeight: 500 }}>{t("sessions.noSessions")}</div>
@@ -2766,7 +2766,7 @@ export function ProjectOverview({
                   backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
                   color: "#fff", cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  boxShadow: "0 0 40px rgba(55,172,192,0.3), 0 0 80px rgba(251,129,132,0.15)",
+                  boxShadow: "0 0 40px var(--accent-primary-bg), 0 0 80px var(--danger-bg)",
                 }}>
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="white" stroke="none">
                     <rect x="5" y="5" width="14" height="14" rx="3" />
@@ -2789,7 +2789,7 @@ export function ProjectOverview({
             }}>
               <span className="voice-spin" style={{
                 width: 40, height: 40, border: "3px solid rgba(255,255,255,0.2)",
-                borderTopColor: "#37ACC0", borderRadius: "50%", display: "inline-block",
+                borderTopColor: "var(--accent-primary)", borderRadius: "50%", display: "inline-block",
               }} />
               <div style={{ marginTop: 16, color: "rgba(255,255,255,0.8)", fontSize: 14, fontWeight: 500 }}>
                 {t("voice.cleaning")}
@@ -2826,7 +2826,7 @@ export function ProjectOverview({
                   <button onClick={startVoiceEdit} style={{
                     padding: "12px 16px", borderRadius: 14,
                     border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
-                    color: "#37ACC0", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    color: "var(--accent-primary)", fontSize: 13, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                   }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2846,9 +2846,9 @@ export function ProjectOverview({
                 {voiceText.trim() && (
                   <button onClick={sendVoice} style={{
                     flex: 1, padding: "12px", borderRadius: 14,
-                    border: "1px solid rgba(251,129,132,0.4)",
-                    background: "linear-gradient(135deg, rgba(251,129,132,0.18), rgba(208,152,153,0.14))",
-                    color: "#FB8184", fontSize: 13, fontWeight: 700, cursor: "pointer",
+                    border: "1px solid var(--danger-bg)",
+                    background: "var(--danger-bg)",
+                    color: "var(--danger)", fontSize: 13, fontWeight: 700, cursor: "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                   }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2864,15 +2864,15 @@ export function ProjectOverview({
 
           <style>{`
             .voice-orb { position: absolute; width: 160px; height: 160px; border-radius: 50%; filter: blur(40px); will-change: transform, opacity; opacity: 0.8; }
-            .voice-orb-teal { background: radial-gradient(circle, #37ACC0, rgba(52,119,146,0.4) 60%, transparent 80%); box-shadow: 0 0 60px rgba(55,172,192,0.5); animation: orbWander1 8s ease-in-out infinite, orbPulse 3s ease-in-out infinite; }
-            .voice-orb-coral { background: radial-gradient(circle, #FB8184, rgba(208,152,153,0.4) 60%, transparent 80%); box-shadow: 0 0 60px rgba(251,129,132,0.5); animation: orbWander2 9s ease-in-out infinite, orbPulse 3.5s ease-in-out infinite 0.8s; }
+            .voice-orb-teal { background: radial-gradient(circle, var(--accent-primary), var(--accent-primary-bg) 60%, transparent 80%); box-shadow: 0 0 60px var(--accent-primary-bg); animation: orbWander1 8s ease-in-out infinite, orbPulse 3s ease-in-out infinite; }
+            .voice-orb-coral { background: radial-gradient(circle, var(--danger), var(--danger-bg) 60%, transparent 80%); box-shadow: 0 0 60px var(--danger-bg); animation: orbWander2 9s ease-in-out infinite, orbPulse 3.5s ease-in-out infinite 0.8s; }
             .voice-orb-purple { background: radial-gradient(circle, #a78bfa, rgba(139,92,246,0.3) 60%, transparent 80%); box-shadow: 0 0 50px rgba(139,92,246,0.4); width: 120px; height: 120px; animation: orbWander3 7s ease-in-out infinite, orbPulse 2.8s ease-in-out infinite 1.5s; }
             @keyframes orbPulse { 0%, 100% { transform: scale(1); filter: blur(40px); opacity: 0.7; } 30% { transform: scale(1.3); filter: blur(30px); opacity: 1; } 70% { transform: scale(0.85); filter: blur(50px); opacity: 0.5; } }
             @keyframes orbWander1 { 0% { top: 15%; left: 10%; } 20% { top: 60%; left: 65%; } 40% { top: 30%; left: 75%; } 60% { top: 70%; left: 20%; } 80% { top: 10%; left: 50%; } 100% { top: 15%; left: 10%; } }
             @keyframes orbWander2 { 0% { top: 70%; left: 75%; } 25% { top: 20%; left: 30%; } 50% { top: 50%; left: 5%; } 75% { top: 80%; left: 60%; } 100% { top: 70%; left: 75%; } }
             @keyframes orbWander3 { 0% { top: 40%; left: 45%; } 33% { top: 15%; left: 80%; } 66% { top: 75%; left: 15%; } 100% { top: 40%; left: 45%; } }
             .voice-stop-btn { animation: stopBtnGlow 2s ease-in-out infinite; }
-            @keyframes stopBtnGlow { 0%, 100% { box-shadow: 0 0 40px rgba(55,172,192,0.3), 0 0 80px rgba(251,129,132,0.15); } 50% { box-shadow: 0 0 60px rgba(55,172,192,0.5), 0 0 100px rgba(251,129,132,0.25); } }
+            @keyframes stopBtnGlow { 0%, 100% { box-shadow: 0 0 40px var(--accent-primary-bg), 0 0 80px var(--danger-bg); } 50% { box-shadow: 0 0 60px var(--accent-primary-bg), 0 0 100px var(--danger-bg); } }
             @keyframes voiceSpin { to { transform: rotate(360deg); } }
             .voice-spin { animation: voiceSpin 0.8s linear infinite; }
           `}</style>

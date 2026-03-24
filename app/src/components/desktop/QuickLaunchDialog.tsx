@@ -48,6 +48,20 @@ export function QuickLaunchDialog({
   const [totalMessageCount, setTotalMessageCount] = useState(0)
   const [loadingPreview, setLoadingPreview] = useState(false)
   const previewScrollRef = useRef<HTMLDivElement>(null)
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false)
+  const projectDropdownRef = useRef<HTMLDivElement>(null)
+
+  // Close project dropdown on outside click
+  useEffect(() => {
+    if (!projectDropdownOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
+        setProjectDropdownOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [projectDropdownOpen])
 
   useEffect(() => {
     if (open && selectedProjectId) setProjectId(selectedProjectId)
@@ -159,21 +173,59 @@ export function QuickLaunchDialog({
           }}>
             {t("newSession.project")}
           </div>
-          <select
-            value={projectId}
-            onChange={(e) => { setProjectId(e.target.value); setShowResume(false) }}
-            style={{
-              width: "100%", padding: "8px 12px", borderRadius: 8,
-              border: `1px solid ${glassBorder}`,
-              background: inputBg, color: textPrimary,
-              fontSize: 12, fontFamily: "inherit",
-              outline: "none", cursor: "pointer",
-            }}
-          >
-            {projects.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
+          <div ref={projectDropdownRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setProjectDropdownOpen(!projectDropdownOpen)}
+              style={{
+                width: "100%", padding: "8px 12px", borderRadius: 8,
+                border: `1px solid ${glassBorder}`,
+                background: inputBg, color: textPrimary,
+                fontSize: 12, fontFamily: "inherit",
+                outline: "none", cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 8,
+                textAlign: "left",
+                backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+              }}
+            >
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {projects.find(p => p.id === projectId)?.name || projectId}
+              </span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transition: "transform 0.2s", transform: projectDropdownOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {projectDropdownOpen && (
+              <div style={{
+                position: "absolute", top: "calc(100% + 4px)", left: 0,
+                width: "100%", borderRadius: 8, overflow: "hidden",
+                border: `1px solid ${glassBorder}`,
+                background: dark ? "rgba(15,23,42,0.95)" : "rgba(255,255,255,0.97)",
+                backdropFilter: "blur(20px) saturate(1.4)",
+                WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+                boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+                zIndex: 10, maxHeight: 200, overflowY: "auto",
+              }}>
+                {projects.map((p, i) => (
+                  <button
+                    key={p.id}
+                    onClick={() => { setProjectId(p.id); setShowResume(false); setProjectDropdownOpen(false) }}
+                    style={{
+                      width: "100%", padding: "8px 12px", border: "none",
+                      background: p.id === projectId ? "var(--accent-primary)" : "transparent",
+                      color: p.id === projectId ? "#fff" : textPrimary,
+                      fontSize: 12, cursor: "pointer", textAlign: "left",
+                      fontFamily: "inherit", display: "block",
+                      borderBottom: i < projects.length - 1 ? `1px solid ${glassBorder}` : "none",
+                    }}
+                    onMouseEnter={(e) => { if (p.id !== projectId) e.currentTarget.style.background = dark ? "rgba(148,163,184,0.08)" : "rgba(148,163,184,0.06)" }}
+                    onMouseLeave={(e) => { if (p.id !== projectId) e.currentTarget.style.background = "transparent" }}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Resume past session toggle */}

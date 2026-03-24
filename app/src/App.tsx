@@ -1625,6 +1625,15 @@ export function App() {
       const sid = msg.sessionId as string
       if (!sid) return
       setActiveSessions(prev => prev.filter(s => s.id !== sid))
+      setSessionEventsMap(prev => { const next = new Map(prev); next.delete(sid); return next })
+    }))
+    // Session killed (immediate broadcast from kill API — syncs desktop/mobile instantly)
+    unsubs.push(on("session_killed", (msg) => {
+      const sid = msg.sessionId as string
+      if (!sid) return
+      setActiveSessions(prev => prev.filter(s => s.id !== sid))
+      // Clean up events for killed session
+      setSessionEventsMap(prev => { const next = new Map(prev); next.delete(sid); return next })
     }))
     return () => { for (const u of unsubs) u() }
   }, [on])
@@ -2055,6 +2064,8 @@ export function App() {
       const sid = (msg.sessionId as string) || ""
       if (!sid) return
       if (event.type === "token_usage") return // skip noise
+      // Skip ParseEngine's "Claude responded" — JSONL watcher provides cleaner response events
+      if (event.type === "info" && /^(Claude|Codex|Cursor|Gemini|Aider) responded/i.test(event.title || "")) return
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
@@ -2102,6 +2113,22 @@ export function App() {
 
     return () => { for (const u of unsubs) u() }
   }, [on])
+
+  // Instant local user events (desktop input → events view without server roundtrip)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: sid, event } = (e as CustomEvent).detail
+      if (!sid || !event) return
+      setSessionEventsMap(prev => {
+        const next = new Map(prev)
+        const events = next.get(sid) || []
+        next.set(sid, [...events, event].slice(-500))
+        return next
+      })
+    }
+    window.addEventListener("local_user_event", handler)
+    return () => window.removeEventListener("local_user_event", handler)
+  }, [])
 
   const toggleTheme = () => {
     const newTheme = theme === "light" ? "dark" : "light"
@@ -2358,6 +2385,13 @@ export function App() {
     // Persist locally first so session won't reappear even if server call fails
     addKilledSessionId(sessionId)
     setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId))
+    // Clean up events for the killed session to avoid stale state
+    setSessionEventsMap(prev => {
+      if (!prev.has(sessionId)) return prev
+      const next = new Map(prev)
+      next.delete(sessionId)
+      return next
+    })
     if (currentSessionId === sessionId) {
       setShouldResumeCurrentSession(false)
     }

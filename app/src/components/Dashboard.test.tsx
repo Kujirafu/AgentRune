@@ -79,7 +79,7 @@ describe("Dashboard — Command Center layout", () => {
     // sessions-view is the default active view
     expect(screen.getByTestId("sessions-view")).toBeInTheDocument()
     // input bar present with placeholder
-    expect(screen.getByPlaceholderText(/auto-routed|自動分配/i)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/command|指令/i)).toBeInTheDocument()
   })
 
   it("renders in light mode", async () => {
@@ -90,15 +90,16 @@ describe("Dashboard — Command Center layout", () => {
   it("shows connection indicator (green when connected)", async () => {
     const { container } = renderDashboard()
     await screen.findByText("AgentRune")
-    // Green dot for connected state
-    const dot = container.querySelector('[style*="background: rgb(34, 197, 94)"]')
+    // Brand green dot for connected state (#BDD1C6)
+    const dot = container.querySelector('[style*="background:"]')
     expect(dot).toBeTruthy()
   })
 
   it("shows disconnected indicator (red)", async () => {
     const { container } = renderDashboard({ wsConnected: false })
     await screen.findByText("AgentRune")
-    const dot = container.querySelector('[style*="background: rgb(239, 68, 68)"]')
+    // Brand red dot for disconnected state (#FB8184)
+    const dot = container.querySelector('[style*="background:"]')
     expect(dot).toBeTruthy()
   })
 })

@@ -140,6 +140,7 @@ export function Sidebar({
   for (const s of sessions) {
     sessionCounts.set(s.projectId, (sessionCounts.get(s.projectId) || 0) + 1)
   }
+  const totalSessionCount = sessions.length
 
   // ── Fetch project tasks (PRD + standalone) ──
   const [tasks, setTasks] = useState<SidebarTask[]>([])
@@ -246,12 +247,48 @@ export function Sidebar({
           </button>
         )}
       </div>
+      <button
+        data-testid="desktop-project-all"
+        aria-pressed={selectedProjectId === null}
+        onClick={() => { onSelectProject(null) }}
+        style={{
+          padding: "6px 16px",
+          fontSize: 13,
+          fontWeight: selectedProjectId === null ? 600 : 400,
+          color: selectedProjectId === null ? textPrimary : textSecondary,
+          background: selectedProjectId === null ? (dark ? "rgba(55,172,192,0.08)" : "rgba(55,172,192,0.04)") : "transparent",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          borderTop: "none",
+          borderRight: "none",
+          borderBottom: "none",
+          borderLeft: selectedProjectId === null ? "3px solid #37ACC0" : "3px solid transparent",
+          width: "100%",
+          textAlign: "left",
+          fontFamily: "inherit",
+        }}
+      >
+        {t("dash.allProjects")}
+        <span style={{ flex: 1 }} />
+        {totalSessionCount > 0 && (
+          <span style={{
+            fontSize: 11,
+            background: selectedProjectId === null ? (dark ? "rgba(55,172,192,0.2)" : "rgba(55,172,192,0.1)") : (dark ? "rgba(148,163,184,0.1)" : "rgba(148,163,184,0.08)"),
+            color: selectedProjectId === null ? "#37ACC0" : textSecondary,
+            padding: "1px 6px",
+            borderRadius: 6,
+          }}>{totalSessionCount}</span>
+        )}
+      </button>
       {projects.map(p => {
         const isActive = p.id === selectedProjectId
         const count = sessionCounts.get(p.id) || 0
         return (
           <button
             key={p.id}
+            data-testid={`desktop-project-${p.id}`}
+            aria-pressed={isActive}
             onClick={() => { onSelectProject(p.id) }}
             onContextMenu={(e) => {
               if (!onDeleteProject) return
@@ -362,6 +399,8 @@ export function Sidebar({
         return (
           <button
             key={tool.key}
+            data-testid={`desktop-nav-${tool.key}`}
+            aria-pressed={isActive}
             onClick={() => onChangeView(tool.key)}
             style={{
               padding: "5px 16px",
@@ -414,7 +453,7 @@ export function Sidebar({
       }}>
         {/* Permission shield button */}
         <button
-          onClick={() => setPermPanel(!permPanel)}
+          onClick={() => { if (!permPanel) trackDesktopPermissionWidgetOpen(); setPermPanel(!permPanel) }}
           style={{
             width: 28, height: 28, borderRadius: 6, border: "none",
             background: totalPending > 0 ? "rgba(55,172,192,0.15)" : "transparent",
@@ -439,7 +478,7 @@ export function Sidebar({
         </button>
         {/* Theme toggle */}
         <button
-          onClick={toggleTheme}
+          onClick={() => { trackDesktopThemeToggle(dark ? "light" : "dark"); toggleTheme() }}
           style={{
             width: 28, height: 28, borderRadius: 6, border: "none",
             background: "transparent", cursor: "pointer",
@@ -581,6 +620,7 @@ export function Sidebar({
                               e.stopPropagation()
                               // Show feedback immediately
                               const fb = isDeny ? "denied" : "approved"
+                              if (!isDeny) trackDesktopPermissionApprove(sid, ev.decision?.purpose || "", shortLabel)
                               setResolvedFeedback(prev => new Map(prev).set(ev.id, fb))
                               // Send to PTY — split escape sequences with 150ms delay (MissionControl pattern)
                               const parts = opt.input.match(/\x1b\[[A-Z]|\x1b|\r|[^\x1b\r]+/g) || [opt.input]

@@ -243,16 +243,7 @@ export function Dashboard({
                 projectId={effectiveProjectId}
                 serverUrl={serverUrl}
                 onClose={() => { setShowAutomationSheet(false); setEditingAutomation(null); autoRefresh() }}
-                initialEdit={editingAutomation ? {
-                  id: editingAutomation.id,
-                  name: editingAutomation.name,
-                  prompt: editingAutomation.prompt || editingAutomation.command || "",
-                  schedule: editingAutomation.schedule,
-                  runMode: editingAutomation.runMode,
-                  agentId: editingAutomation.agentId,
-                  templateId: editingAutomation.templateId,
-                  crew: editingAutomation.crew,
-                } as any : undefined}
+                initialEdit={editingAutomation || undefined}
               />
             </Suspense>
           ) : (showFireCrewSheet && effectiveProjectId) ? (

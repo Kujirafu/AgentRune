@@ -32,6 +32,8 @@ import { createManifestForLevel, type SandboxLevel } from "./skill-manifest.js"
 import { readAuditLog, listAuditDates, getRecentAuditEntries, getAutomationAudit } from "./audit-log.js"
 import { analyzeSkillContent } from "./skill-analyzer.js"
 import { getCommandPrompt, getProjectMemory, updateProjectMemory, getMemoryPath, ensureRulesFile, ensurePrdApiSection, getRulesPath } from "./behavior-rules.js"
+import { initAgentloreStructure, migrateMonolithicAgentlore, listContextSections, readContextSection, writeContextSection, isAllowedContextSectionFile } from "./agentlore-init.js"
+import { getRequestClientIp, isExemptApiAuthPath, isTrustedLocalRequest } from "./request-security.js"
 import { loadStandards, saveRule, deleteRule, saveCategory, deleteCategory, getGlobalStandardsDir, getProjectStandardsDir } from "./standards-loader.js"
 import { validateStandards } from "./standards-validator.js"
 import { loadVaultKeys, saveVaultKey, deleteVaultKey, listVaultKeyNames } from "./vault-keys.js"
@@ -649,14 +651,6 @@ export function createServer(portOverride?: number) {
   // Session tokens for WS auth — Map<token, boundIp>
   const sessionTokens = new Map<string, string>()
 
-  /** Extract real client IP (cloudflared sets Cf-Connecting-Ip) */
-  function getClientIp(req: any): string {
-    return req.headers?.["cf-connecting-ip"]
-      || req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
-      || req.socket?.remoteAddress
-      || ""
-  }
-
   function issueSessionToken(clientIp?: string): string {
     const token = createSessionToken("local", clientIp)
     sessionTokens.set(token, clientIp || "")
@@ -669,12 +663,10 @@ export function createServer(portOverride?: number) {
   function requireAuth(req: any, res: any, next: any) {
     // Skip auth routes (pairing, device auth, cloud auth, etc.)
     // EXCEPT /api/auth/new-code which must require auth to prevent remote pairing bypass
-    if (req.path.startsWith("/api/auth/") && req.path !== "/api/auth/new-code") return next()
+    if (isExemptApiAuthPath(req.path || req.originalUrl || req.url)) return next()
 
     // Allow local connections without auth (same as WS local bypass)
-    const remoteAddr = req.socket?.remoteAddress || ""
-    const isLocal = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1"
-    if (isLocal) return next()
+    if (isTrustedLocalRequest(req)) return next()
 
     // Check for session token
     const authHeader = req.headers.authorization || ""
@@ -686,7 +678,7 @@ export function createServer(portOverride?: number) {
       return res.status(401).json({ error: "Authentication required" })
     }
 
-    const clientIp = getClientIp(req)
+    const clientIp = getRequestClientIp(req)
     const boundIp = sessionTokens.get(token)
     // Fast path: token in local cache — verify IP binding
     if (boundIp !== undefined) {
@@ -875,15 +867,15 @@ export function createServer(portOverride?: number) {
 
   // --- Session-to-Claude mapping (persisted to disk for resume across daemon restarts) ---
   const sessionMapPath = join(getConfigDir(), "session-map.json")
-  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string }>()
-  let lastResumeTime = 0
+  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string }>()
+  const lastResumeTimeBySession = new Map<string, number>()
 
   function loadSessionMap() {
     try {
       if (existsSync(sessionMapPath)) {
         const raw = JSON.parse(readFileSync(sessionMapPath, "utf-8"))
         for (const [k, v] of Object.entries(raw)) {
-          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string })
+          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string })
         }
       }
     } catch { /* ignore */ }
@@ -895,12 +887,13 @@ export function createServer(portOverride?: number) {
     } catch { /* ignore */ }
   }
 
-  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string) {
+  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string, cwd?: string) {
     const existing = sessionClaudeMap.get(agentruneSessionId)
     sessionClaudeMap.set(agentruneSessionId, {
       claudeSessionId,
       projectId,
       lastTitle: lastTitle || existing?.lastTitle || "",
+      cwd: cwd || existing?.cwd,
     })
     saveSessionMap()
   }
@@ -997,17 +990,11 @@ export function createServer(portOverride?: number) {
   const projects = loadProjects()
   buildInitialSessionMap()
   cachedRecoverable = scanRecoverableSessions()
-  // Remove recoverable sessions from closed list — they were killed, not normally closed
-  const reopened: string[] = []
-  for (const r of cachedRecoverable) {
-    if (closedSessionIds.has(r.id)) {
-      closedSessionIds.delete(r.id)
-      reopened.push(r.id)
-    }
-  }
-  if (reopened.length > 0) {
-    persistClosedSessions()
-    log.info(`[Startup] Reopened ${reopened.length} sessions from closed list (were killed, not closed)`)
+  // Filter out sessions that were explicitly closed by the user
+  const closedCount = cachedRecoverable.filter(r => closedSessionIds.has(r.id)).length
+  cachedRecoverable = cachedRecoverable.filter(r => !closedSessionIds.has(r.id))
+  if (closedCount > 0) {
+    log.info(`[Startup] Excluded ${closedCount} closed sessions from recoverable list`)
   }
   log.info(`[Startup] Found ${cachedRecoverable.length} recoverable sessions`)
   const cfg = loadConfig()
@@ -1103,9 +1090,7 @@ export function createServer(portOverride?: number) {
   // Used by sibling daemon and app failback to discover tunnel URLs
   app.get("/api/daemon-info", (req, res) => {
     // Restrict to localhost — this endpoint exposes tunnel URLs and should not be reachable via tunnel
-    const remoteIp = req.socket.remoteAddress || ""
-    const isLocalhost = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1"
-    if (!isLocalhost) {
+    if (!isTrustedLocalRequest(req)) {
       return res.status(403).json({ error: "Forbidden" })
     }
     res.json({
@@ -1118,9 +1103,7 @@ export function createServer(portOverride?: number) {
 
   // --- Social scraper trigger (localhost only, called from AgentLore dashboard) ---
   app.post("/api/social-scrape", async (req, res) => {
-    const remoteIp = req.socket.remoteAddress || ""
-    const isLocalhost = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1"
-    if (!isLocalhost) {
+    if (!isTrustedLocalRequest(req)) {
       return res.status(403).json({ error: "Forbidden — localhost only" })
     }
 
@@ -1162,7 +1145,7 @@ export function createServer(portOverride?: number) {
   // Pair a new device with the 6-digit code shown in CLI
   app.post("/api/auth/pair", (req, res) => {
     // Rate limit by IP
-    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    const ip = getRequestClientIp(req) || "unknown"
     const now = Date.now()
     const attempt = pairAttempts.get(ip)
     if (attempt && attempt.resetAt > now && attempt.count >= 5) {
@@ -1235,7 +1218,7 @@ export function createServer(portOverride?: number) {
         return res.status(403).json({ error: "Device not registered under this account" })
       }
       // Phone token is valid and owns this device — issue a session token bound to client IP
-      const authClientIp = getClientIp(req)
+      const authClientIp = getRequestClientIp(req)
       const sessionToken = issueSessionToken(authClientIp)
       res.json({ authenticated: true, sessionToken })
     } catch (err: any) {
@@ -1245,7 +1228,7 @@ export function createServer(portOverride?: number) {
   })
 
   // Generate a new pairing code (for adding more devices)
-  app.post("/api/auth/new-code", (_req, res) => {
+  app.post("/api/auth/new-code", requireAuth, (_req, res) => {
     const code = generatePairingCode()
     res.json({ code, expiresIn: 300 })
   })
@@ -1667,6 +1650,8 @@ export function createServer(portOverride?: number) {
     persistClosedSessions()
     // Also remove from cachedRecoverable in-memory list
     cachedRecoverable = cachedRecoverable.filter(r => r.id !== killId)
+    // Broadcast session_killed to ALL connected clients immediately (don't wait for PTY exit)
+    broadcastAll({ type: "session_killed", sessionId: killId })
     res.json({ ok: true })
   })
 
@@ -2585,6 +2570,46 @@ export function createServer(portOverride?: number) {
     try { return JSON.parse(readFileSync(filePath, "utf-8")) } catch { return null }
   }
 
+  function listProjectPrds(projectId: string): PrdItem[] {
+    const dir = getPrdDir(projectId)
+    try {
+      return readdirSync(dir)
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => readPrd(join(dir, file)))
+        .filter((prd): prd is PrdItem => !!prd)
+        .sort((a, b) => {
+          if (a.status !== b.status) return a.status === "active" ? -1 : 1
+          if (a.priority !== b.priority) return a.priority < b.priority ? -1 : 1
+          return b.updatedAt - a.updatedAt
+        })
+    } catch {
+      return []
+    }
+  }
+
+  function prdToTaskStore(projectId: string, prd: PrdItem): TaskStore {
+    return {
+      projectId,
+      requirement: prd.goal || prd.title || "",
+      prd: {
+        goal: prd.goal || prd.title || "",
+        decisions: prd.decisions || [],
+        approaches: prd.approaches || [],
+        scope: prd.scope || { included: [], excluded: [] },
+      },
+      tasks: prd.tasks.map((task) => ({
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        priority: task.priority,
+        dependsOn: task.dependsOn,
+      })),
+      createdAt: prd.createdAt,
+      updatedAt: prd.updatedAt,
+    }
+  }
+
   function checkAutoComplete(prd: PrdItem): boolean {
     if (prd.status === "done" || prd.tasks.length === 0) return false
     const allDone = prd.tasks.every(t => t.status === "done" || t.status === "skipped")
@@ -2740,11 +2765,15 @@ export function createServer(portOverride?: number) {
 
   app.get("/api/tasks/:projectId", (req, res) => {
     const path = join(TASKS_DIR, `${req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`)
-    if (!existsSync(path)) return res.json(null)
+    if (!existsSync(path)) {
+      const latestPrd = listProjectPrds(req.params.projectId)[0]
+      return res.json(latestPrd ? prdToTaskStore(req.params.projectId, latestPrd) : null)
+    }
     try {
       res.json(JSON.parse(readFileSync(path, "utf-8")))
     } catch {
-      res.json(null)
+      const latestPrd = listProjectPrds(req.params.projectId)[0]
+      res.json(latestPrd ? prdToTaskStore(req.params.projectId, latestPrd) : null)
     }
   })
 
@@ -3013,6 +3042,46 @@ export function createServer(portOverride?: number) {
     updateProjectMemory(cwd, content)
     log.info(`[Memory] Updated agentlore.md for project at ${cwd} (${content.length} chars)`)
     res.json({ ok: true, path: getMemoryPath(cwd) })
+  })
+
+  // --- Agentlore Context Section endpoints ---
+
+  app.get("/api/memory/sections", (_req, res) => {
+    const cwd = resolveProjectCwd()
+    if (!cwd) { res.json({ sections: [] }); return }
+    res.json({ sections: listContextSections(cwd) })
+  })
+
+  app.get("/api/memory/sections/:file", (req, res) => {
+    const cwd = resolveProjectCwd()
+    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    if (!isAllowedContextSectionFile(req.params.file)) {
+      res.status(400).json({ error: "Invalid section file name" }); return
+    }
+    const content = readContextSection(cwd, req.params.file)
+    res.json({ content, file: req.params.file })
+  })
+
+  app.put("/api/memory/sections/:file", express.json(), (req, res) => {
+    const { content } = req.body
+    if (typeof content !== "string") { res.status(400).json({ error: "Missing content" }); return }
+    const cwd = resolveProjectCwd()
+    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    // Validate file name (only allow known section files)
+    if (!isAllowedContextSectionFile(req.params.file)) {
+      res.status(400).json({ error: "Invalid section file name" }); return
+    }
+    writeContextSection(cwd, req.params.file, content)
+    log.info(`[Memory] Updated context section ${req.params.file} (${content.length} chars)`)
+    res.json({ ok: true })
+  })
+
+  app.post("/api/memory/migrate", (_req, res) => {
+    const cwd = resolveProjectCwd()
+    if (!cwd) { res.status(400).json({ error: "No active project" }); return }
+    const result = migrateMonolithicAgentlore(cwd)
+    log.info(`[Memory] Migration: ${result.migrated ? `migrated ${result.sections.join(", ")}` : "skipped (already structured)"}`)
+    res.json(result)
   })
 
   // --- Standards endpoints ---
@@ -3396,7 +3465,7 @@ export function createServer(portOverride?: number) {
   }
 
   function auditRateLimiter(req: any, res: any, next: any) {
-    const ip = req.ip || req.socket.remoteAddress || "unknown"
+    const ip = getRequestClientIp(req) || "unknown"
     if (!checkAuditRate(ip)) {
       return res.status(429).json({ error: "Too many requests", retryAfter: 60 })
     }
@@ -3583,7 +3652,12 @@ export function createServer(portOverride?: number) {
   // Common callback factory for JSONL watchers: store events, send to clients, broadcast activity.
   // Defined at module scope so both "attach" and "request_events" handlers can use it.
   const makeWatcherCallback = (sid: string) => (events: AgentEvent[]) => {
-    const filtered = events.filter(e => e.type !== "user_message")
+    const filtered = events.filter(e => {
+      if (e.type === "user_message") return false
+      // Filter ParseEngine "X responded" (contains raw PTY garbage, JSONL watcher has clean version)
+      if (e.type === "info" && /^(?:Claude|Codex|Cursor|Gemini|Aider) responded/i.test(e.title || "")) return false
+      return true
+    })
     if (filtered.length === 0) return
 
     log.info(`[watcher-cb] sid=${sid} events=${filtered.length} types=${filtered.map(e=>e.type).join(",")}`)
@@ -3608,7 +3682,12 @@ export function createServer(portOverride?: number) {
     const list = sessionRecentEvents.get(sid)
     if (list) {
       list.push(...filtered)
-      if (list.length > 200) list.splice(0, list.length - 200)
+      // Remove token_usage from stored list — they take 60%+ space but add no value to events view
+      const meaningful = list.filter(e => e.type !== "token_usage")
+      if (meaningful.length > 500) meaningful.splice(0, meaningful.length - 500)
+      // Replace in-place
+      list.length = 0
+      list.push(...meaningful)
       persistEvents(sid, list)
     }
     const serializedEvents = filtered.map(event => JSON.stringify({ type: "event", sessionId: sid, event }))
@@ -3683,7 +3762,8 @@ export function createServer(portOverride?: number) {
   wss.on("connection", (ws, req) => {
     wsAlive.set(ws, true)
     ws.on("pong", () => wsAlive.set(ws, true))
-    log.info(`WS connection from ${req.socket.remoteAddress} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
+    const requestClientIp = getRequestClientIp(req) || req.socket.remoteAddress || "unknown"
+    log.info(`WS connection from ${requestClientIp} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
 
     // Push CLI update notification to app
     if (updateInfo) {
@@ -3695,8 +3775,7 @@ export function createServer(portOverride?: number) {
     // Remote connections require a valid session token.
     const url = new URL(req.url || "/", "http://localhost")
     const token = url.searchParams.get("token") || ""
-    const remoteAddr = req.socket.remoteAddress || ""
-    const isLocal = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1"
+    const isLocal = isTrustedLocalRequest(req)
     if (!isLocal) {
       // Reject connections with no token or invalid token
       if (!token) {
@@ -3704,7 +3783,7 @@ export function createServer(portOverride?: number) {
         ws.close()
         return
       }
-      const wsClientIp = getClientIp(req)
+      const wsClientIp = getRequestClientIp(req)
       // Check local cache with IP binding
       const wsBoundIp = sessionTokens.get(token)
       if (wsBoundIp !== undefined) {
@@ -3877,9 +3956,10 @@ export function createServer(portOverride?: number) {
               // Try to extract Claude session ID from watcher's JSONL path
               if (agentId === "claude" && watcher && (watcher as any).jsonlPath) {
                 const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
-                if (jsonlFile && !sessionClaudeMap.has(sid)) {
-                  updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid))
-                  log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile}`)
+                const existingMapping = sessionClaudeMap.get(sid)
+                if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
+                  updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid), sessionProject.cwd)
+                  log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile} cwd=${sessionProject.cwd}`)
                 }
               }
             }
@@ -3888,12 +3968,12 @@ export function createServer(portOverride?: number) {
             // Use sessionProject.cwd (may be worktree path) — this is where Claude Code runs
             const claudeSessionId = msg.claudeSessionId as string | undefined
             if (agentId === "claude") {
-              // Skip JSONL replay for recoverable/resumed sessions — persisted events
-              // will be replayed separately (avoids sending events twice + faster attach).
-              const skipReplay = !!requestedSessionId
-              // Use SESSION project CWD for JsonlWatcher (worktree path if applicable),
-              // because Claude Code uses the CWD it's launched from for JSONL path
-              const watcherCwd = sessionProject.cwd
+              // For resumed sessions: don't skip replay — watcher needs to find and lock onto the JSONL file
+              // For new sessions with requestedSessionId (WS reconnect): skip replay to avoid duplicates
+              const skipReplay = !!requestedSessionId && alreadyExisted
+              // Use persisted CWD first (survives daemon restart), fallback to session project CWD
+              const persistedCwd = sessionClaudeMap.get(session.id)?.cwd
+              const watcherCwd = persistedCwd || sessionProject.cwd
               watcher = new JsonlWatcher(watcherCwd, cb, claudeSessionId, skipReplay)
               log.info(`[attach] JsonlWatcher created for cwd=${watcherCwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
@@ -4002,16 +4082,26 @@ export function createServer(portOverride?: number) {
           if (agentId !== "terminal") {
             sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
             saveSessionAgentType(session.id, agentId)
+            // Persist CWD so JSONL watcher can find the right file after daemon restart
+            const existingMapping = sessionClaudeMap.get(session.id)
+            if (existingMapping) {
+              existingMapping.cwd = sessionProject.cwd
+              saveSessionMap()
+            } else {
+              sessionClaudeMap.set(session.id, { claudeSessionId: "", projectId: sessionProject.id, lastTitle: "", cwd: sessionProject.cwd })
+              saveSessionMap()
+            }
           }
 
           const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
           if (isRecoverable) {
             const now = Date.now()
             const RESUME_COOLDOWN_MS = 5_000
+            const lastResumeTime = lastResumeTimeBySession.get(session.id) || 0
             if (now - lastResumeTime < RESUME_COOLDOWN_MS) {
               log.warn(`[attach] Resume cooldown: skipped ${session.id} (${Math.round((RESUME_COOLDOWN_MS - (now - lastResumeTime)) / 1000)}s remaining)`)
             } else {
-              lastResumeTime = now
+              lastResumeTimeBySession.set(session.id, now)
               // Suppress crash detection while agent boots after resume
               restartGrace.set(session.id, now)
               crashPending.delete(session.id)
@@ -4039,8 +4129,9 @@ export function createServer(portOverride?: number) {
           if (alreadyExisted && crashedSessions.has(session.id) && agentId !== "terminal" && !restartGrace.has(session.id)) {
             const now = Date.now()
             const RESUME_COOLDOWN_MS = 5_000
+            const lastResumeTime = lastResumeTimeBySession.get(session.id) || 0
             if (now - lastResumeTime >= RESUME_COOLDOWN_MS) {
-              lastResumeTime = now
+              lastResumeTimeBySession.set(session.id, now)
               crashedSessions.delete(session.id)
               crashPending.delete(session.id)
               restartGrace.set(session.id, now)
@@ -4080,6 +4171,9 @@ export function createServer(portOverride?: number) {
             }
           }
 
+          // Determine if this is a resumed session (affects auto-start, init injection, etc.)
+          const isResumedSession = !!(requestedSessionId && !alreadyExisted && (agentId as string) !== "terminal" && msg.isAgentResume)
+
           // For new sessions: auto-install agent if not found, then inject rules prompt.
           // Skip injection when resuming (requestedSessionId means user chose to resume an existing session —
           // the agent already has context from the previous conversation).
@@ -4109,17 +4203,20 @@ export function createServer(portOverride?: number) {
             }
 
             // --- Auto-start agent with settings from frontend ---
-            // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
-            // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
-            // Store launch settings for crash recovery / restart
-            sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
-            saveSessionAgentType(session.id, agentId)
-            const launch = buildAgentLaunch(agentId, normalizedSettings, { projectId: sessionProject.id, port: PORT })
-            if (launch.command) {
-              setTimeout(() => {
-                sessions.write(session.id, `${launch.command}\r`)
-                log.info(`[attach] Agent auto-start: ${launch.command}`)
-              }, 1500)
+            // Skip if this is a resume (isRecoverable already launched the agent with --continue/--resume)
+            if (!isResumedSession) {
+              // Bypass confirmation is handled client-side (App dialog) before settings.bypass is sent.
+              // If bypass=true arrives here, the user already confirmed via the App confirmation dialog.
+              // Store launch settings for crash recovery / restart
+              sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
+              saveSessionAgentType(session.id, agentId)
+              const launch = buildAgentLaunch(agentId, normalizedSettings, { projectId: sessionProject.id, port: PORT })
+              if (launch.command) {
+                setTimeout(() => {
+                  sessions.write(session.id, `${launch.command}\r`)
+                  log.info(`[attach] Agent auto-start: ${launch.command}`)
+                }, 1500)
+              }
             }
 
             // --- Global sandbox: attach SkillMonitor if sandboxLevel is not "none" ---
@@ -4136,7 +4233,7 @@ export function createServer(portOverride?: number) {
                 const monitor = new SkillMonitor({
                   manifest,
                   projectCwd: sessionProject.cwd,
-                  autoHalt: false, // Don't auto-halt regular sessions — notify instead
+                  autoHalt: globalSandbox === "strict", // Auto-halt in strict mode, notify-only otherwise
                   authorityMap,
                   onViolation: (violation) => {
                     log.warn(`[sandbox] Session ${session.id}: ${violation.type} violation — ${violation.description}`)
@@ -4161,7 +4258,7 @@ export function createServer(portOverride?: number) {
               }
             }
 
-            // --- Ensure rules.md exists (+ PRD API section if needed), then inject ---
+            // --- Ensure rules.md + agentlore context structure exists ---
             ensureRulesFile(sessionProject.cwd)
             ensurePrdApiSection(sessionProject.cwd, PORT, sessionProject.id)
             const rulesPath = getRulesPath(sessionProject.cwd)
@@ -4172,7 +4269,8 @@ export function createServer(portOverride?: number) {
             // Standards injection is opt-in — users can run validation manually from the Standards page.
             // Standards prompt file can be generated via POST /api/standards/generate-prompt if needed.
 
-            {
+            // Skip rules/memory injection for resumed sessions — agent already has full context
+            if (!isResumedSession) {
               let attempts = 0
               const pollAgent = setInterval(() => {
                 attempts++
@@ -4306,6 +4404,16 @@ export function createServer(portOverride?: number) {
                   }
                 }, 500)
               }, 200)
+            } else {
+              log.info(`[attach] Skipping rules/memory injection for resumed session ${session.id}`)
+              // For resumed sessions, still forward initialCommand if present
+              if (initialCommand) {
+                setTimeout(() => {
+                  sessions.write(session.id, `\x1b[200~${initialCommand}\x1b[201~`)
+                  setTimeout(() => sessions.write(session.id, "\r"), 300)
+                  log.info(`[attach] Forwarded initialCommand to resumed session ${session.id}: "${initialCommand.slice(0, 80)}"`)
+                }, 2000)
+              }
             }
           }
           break
@@ -4390,7 +4498,7 @@ export function createServer(portOverride?: number) {
                     options: buildCrashRestartOptions(loc),
                   },
                 }
-                ws.send(JSON.stringify({ type: "event", sessionId: session.id, event: blockEvent }))
+                ws.send(JSON.stringify({ type: "event", sessionId, event: blockEvent }))
               }
               break
             }
@@ -5008,7 +5116,7 @@ export function createServer(portOverride?: number) {
           const currentSession = sessions.get(currentSid)
           if (!currentSession) break
           const restartProject = currentSession.project
-          const restartAgentId = currentSession.agentId
+          const restartAgentId = currentSession.agentId as import("./agent-launch.js").LaunchAgentId
           // Kill old session
           sessions.kill(currentSid)
           // Clean up watchers
@@ -5122,44 +5230,37 @@ export function createServer(portOverride?: number) {
             if (isResumed) {
               const sid = reqSid
               const projId = resolvedProjectId
-
-              if (resolvedAgentType === "claude") {
-                for (const [oldSid, oldW] of sessionJsonlWatchers) {
-                  if (oldSid === sid) continue
-                  const oldProjId = oldSid.replace(/_\d+$/, "")
-                  const oldAgent = sessionAgentTypes.get(oldSid)
-                  if (oldProjId === projId && oldAgent === "claude") {
-                    log.info(`[request_events] Stopping old Claude watcher for ${oldSid} (freeing JSONL claims for ${sid})`)
-                    oldW.stop()
-                    sessionJsonlWatchers.delete(oldSid)
-                  }
-                }
-              }
+              // Use persisted CWD (worktree-safe), fallback to project CWD.
+              // Define this before the callback so Claude mapping updates can reuse it.
+              const persistedCwd2 = sessionClaudeMap.get(sid)?.cwd
+              const watcherCwd2 = persistedCwd2 || resolvedProj.cwd
 
               const baseCb = makeWatcherCallback(sid)
               const cb = (events: AgentEvent[]) => {
                 baseCb(events)
                 if (resolvedAgentType === "claude" && watcher && (watcher as any).jsonlPath) {
                   const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
-                  if (jsonlFile && !sessionClaudeMap.has(sid)) {
-                    updateSessionMapping(sid, jsonlFile, projId, sessionLastTitle.get(sid))
+                  const existingMapping = sessionClaudeMap.get(sid)
+                  if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
+                    updateSessionMapping(sid, jsonlFile, projId, sessionLastTitle.get(sid), watcherCwd2)
                   }
                 }
               }
               let watcher: { stop(): void; rescan?(): void; [key: string]: any } | null = null
               if (resolvedAgentType === "claude") {
-                watcher = new JsonlWatcher(resolvedProj.cwd, cb, undefined, true)
+                const claudeId2 = sessionClaudeMap.get(sid)?.claudeSessionId
+                watcher = new JsonlWatcher(watcherCwd2, cb, claudeId2 || undefined, true)
               } else if (resolvedAgentType === "codex") {
-                watcher = new CodexWatcher(resolvedProj.cwd, cb)
+                watcher = new CodexWatcher(watcherCwd2, cb)
               } else if (resolvedAgentType === "gemini") {
-                watcher = new GeminiWatcher(resolvedProj.cwd, cb)
+                watcher = new GeminiWatcher(watcherCwd2, cb)
               }
               if (watcher) {
                 if (!sessionRecentEvents.has(sid)) sessionRecentEvents.set(sid, [])
                 sessionJsonlWatchers.set(sid, watcher)
                 ;(watcher as any).start()
                 if ((watcher as any).rescan) (watcher as any).rescan()
-                log.info(`[request_events] Created ${resolvedAgentType} watcher for ${sid} cwd=${resolvedProj.cwd}`)
+                log.info(`[request_events] Created ${resolvedAgentType} watcher for ${sid} cwd=${watcherCwd2}`)
               }
             } else {
               log.info(`[request_events] Skipped watcher creation for new session ${reqSid} — attach handler will create it`)
@@ -5182,19 +5283,18 @@ export function createServer(portOverride?: number) {
             const lastToolIdx = storedEvents.reduce((max, e, i) =>
               (e.type === "file_edit" || e.type === "file_create" || e.type === "command_run") ? i : max, -1)
             const replayEvents = storedEvents.filter((e, i) => {
+              if (e.type === "token_usage") return false
               if (e.type !== "decision_request" || e.status !== "waiting") return true
               return i > lastToolIdx
             })
             if (replayEvents.length > 0) {
               ws.send(JSON.stringify({ type: "events_replay", sessionId: reqSid, events: replayEvents }))
             }
-          } else {
-            // Last resort: try JSONL forceReplay
-            const w = sessionJsonlWatchers.get(reqSid)
-            if (w && typeof (w as any).forceReplay === "function") {
-              ;(w as any).forceReplay()
-            }
           }
+          // NOTE: Do NOT auto-replay JSONL here — it can cause cross-session event contamination
+          // (replaying the wrong session's JSONL into this session's event list).
+          // Stored events from disk are the authoritative source for historical events.
+          // JSONL watchers are only created during attach (when we know the correct CWD/session).
           break
         }
       }

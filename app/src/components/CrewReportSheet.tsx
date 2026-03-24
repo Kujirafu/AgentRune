@@ -1,6 +1,6 @@
 // components/CrewReportSheet.tsx
 // Crew execution report viewer — shows phase timeline, role results, token usage
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useLocale } from "../lib/i18n"
 import type { CrewExecutionReport, CrewRoleResult } from "../data/automation-types"
 import { buildApiUrl, canUseApi } from "../lib/storage"
@@ -57,7 +57,21 @@ export default function CrewReportSheet({ open, automationId, automationName, se
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [expandedRole, setExpandedRole] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [historyDropdownOpen, setHistoryDropdownOpen] = useState(false)
+  const historyDropdownRef = useRef<HTMLDivElement>(null)
   const apiUrl = useCallback((path: string) => buildApiUrl(path, serverUrl), [serverUrl])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!historyDropdownOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target as Node)) {
+        setHistoryDropdownOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [historyDropdownOpen])
 
   const fetchReports = useCallback(async () => {
     if (!automationId || !canUseApi(serverUrl)) return
@@ -113,21 +127,63 @@ export default function CrewReportSheet({ open, automationId, automationName, se
         </div>
         {/* History selector */}
         {reports.length > 1 && (
-          <select
-            value={selectedIdx}
-            onChange={(e) => { setSelectedIdx(Number(e.target.value)); setExpandedRole(null) }}
-            style={{
-              padding: "4px 8px", borderRadius: 6, fontSize: 11,
-              border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
-              color: "var(--text-primary)", outline: "none",
-            }}
-          >
-            {reports.map((r, i) => (
-              <option key={i} value={i}>
-                {new Date(r.startedAt).toLocaleDateString()} {new Date(r.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </option>
-            ))}
-          </select>
+          <div ref={historyDropdownRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setHistoryDropdownOpen(!historyDropdownOpen)}
+              style={{
+                padding: "4px 8px", borderRadius: 6, fontSize: 11,
+                border: "1px solid var(--glass-border)", background: "var(--glass-bg)",
+                color: "var(--text-primary)", cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+                fontFamily: "inherit", outline: "none",
+                backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+              }}
+            >
+              <span>
+                {reports[selectedIdx] && (
+                  <>
+                    {new Date(reports[selectedIdx].startedAt).toLocaleDateString()}{" "}
+                    {new Date(reports[selectedIdx].startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </>
+                )}
+              </span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transition: "transform 0.2s", transform: historyDropdownOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {historyDropdownOpen && (
+              <div style={{
+                position: "absolute", top: "calc(100% + 4px)", right: 0,
+                minWidth: 180, borderRadius: 8, overflow: "hidden",
+                border: "1px solid var(--glass-border)",
+                background: "var(--glass-bg)",
+                backdropFilter: "blur(20px) saturate(1.4)",
+                WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+                boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+                zIndex: 10, maxHeight: 200, overflowY: "auto",
+              }}>
+                {reports.map((r, i) => (
+                  <button
+                    key={i}
+                    onClick={() => { setSelectedIdx(i); setExpandedRole(null); setHistoryDropdownOpen(false) }}
+                    style={{
+                      width: "100%", padding: "8px 12px", border: "none",
+                      background: i === selectedIdx ? "var(--accent-primary)" : "transparent",
+                      color: i === selectedIdx ? "#fff" : "var(--text-primary)",
+                      fontSize: 11, cursor: "pointer", textAlign: "left",
+                      fontFamily: "inherit", display: "block",
+                      borderBottom: i < reports.length - 1 ? "1px solid var(--glass-border)" : "none",
+                    }}
+                    onMouseEnter={(e) => { if (i !== selectedIdx) e.currentTarget.style.background = "var(--glass-border)" }}
+                    onMouseLeave={(e) => { if (i !== selectedIdx) e.currentTarget.style.background = "transparent" }}
+                  >
+                    {new Date(r.startedAt).toLocaleDateString()}{" "}
+                    {new Date(r.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

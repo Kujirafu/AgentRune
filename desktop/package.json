@@ -7,16 +7,16 @@
   "scripts": {
     "dev": "tsup && electron .",
     "build": "tsup",
-    "rebuild-pty": "electron-rebuild -m ../cli -o node-pty",
+    "rebuild-pty": "node ./scripts/rebuild-pty.cjs",
     "package": "npm run build && electron-builder --win"
   },
   "dependencies": {
     "electron-updater": "^6.3.0"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0",
-    "@electron/rebuild": "^3.7.0",
+    "@electron/rebuild": "^4.0.3",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.8.1",
     "tsup": "^8.4.0",
     "typescript": "^5.8.0"
   }
