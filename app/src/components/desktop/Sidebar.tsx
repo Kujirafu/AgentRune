@@ -128,6 +128,7 @@ export function Sidebar({
   const [completionNotices, setCompletionNotices] = useState<CompletionNotice[]>([])
   const [unreadCompletionIds, setUnreadCompletionIds] = useState<Set<string>>(new Set())
   const msgBtnRef = useRef<HTMLButtonElement>(null)
+  const autoCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const totalPending = pendingPermissions.length + (pendingPhaseGate ? 1 : 0) + pendingReauthQueue.length
   const unreadCompletionCount = unreadCompletionIds.size
@@ -214,9 +215,13 @@ export function Sidebar({
     if (totalPending > previous.pending && totalPending > 0) {
       setPermPanel(true)
       setPermTab("inbox")
+      if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current)
+      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 1000)
     } else if (unreadCompletionCount > previous.completions && unreadCompletionCount > 0) {
       setPermPanel(true)
       setPermTab("recent")
+      if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current)
+      autoCloseTimerRef.current = setTimeout(() => setPermPanel(false), 1000)
     }
     prevInboxCounts.current = { pending: totalPending, completions: unreadCompletionCount }
   }, [totalPending, unreadCompletionCount])
@@ -556,6 +561,7 @@ export function Sidebar({
         <button
           ref={msgBtnRef}
           onClick={() => {
+            if (autoCloseTimerRef.current) { clearTimeout(autoCloseTimerRef.current); autoCloseTimerRef.current = null }
             if (!permPanel) {
               trackDesktopPermissionWidgetOpen()
               if (totalPending > 0) setPermTab("inbox")
@@ -609,10 +615,12 @@ export function Sidebar({
         {/* Permission panel — fixed position to escape sidebar overflow */}
         {permPanel && (() => {
           const rect = msgBtnRef.current?.getBoundingClientRect()
-          const panelW = 300
+          const panelW = 240
           const panelMaxH = Math.min(440, (rect?.top ?? 440) - 8)
           return (
-          <div style={{
+          <div
+            onMouseEnter={() => { if (autoCloseTimerRef.current) { clearTimeout(autoCloseTimerRef.current); autoCloseTimerRef.current = null } }}
+            style={{
             position: "fixed",
             bottom: rect ? window.innerHeight - rect.top + 4 : 48,
             left: rect ? rect.left : 0,
@@ -712,7 +720,7 @@ export function Sidebar({
                           <span style={{ fontSize: 10, color: textMuted }}>{permIdx + 1}/{pendingPermissions.length}</span>
                         )}
                         <span style={{ fontSize: 11, fontWeight: 700, color: "#37ACC0" }}>#{sessionIdx}</span>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary, flex: 1 }}>{ev.decision!.purpose || t("perm.title")}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary, flex: 1, minWidth: 0, wordBreak: "break-word" }}>{ev.decision!.purpose || t("perm.title")}</span>
                         <button onClick={() => { onJumpToSession?.(sid); setPermPanel(false) }} title="View session" style={{
                           width: 20, height: 20, borderRadius: 4, border: "none", background: "transparent", cursor: "pointer",
                           display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, flexShrink: 0,
@@ -802,7 +810,7 @@ export function Sidebar({
                             <polyline points="22 4 12 14.01 9 11.01" />
                           </svg>
                           <span style={{ fontSize: 10, fontWeight: 700, color: "#37ACC0" }}>#{item.sessionIdx}</span>
-                          <span style={{ fontSize: 12, fontWeight: 700, color: textPrimary, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: textPrimary, flex: 1, minWidth: 0, wordBreak: "break-word" }}>
                             {item.label}
                           </span>
                           <span style={{ fontSize: 10, color: textMuted, flexShrink: 0 }}>
@@ -826,10 +834,7 @@ export function Sidebar({
                           color: textSecondary,
                           lineHeight: 1.5,
                           marginBottom: item.nextAction ? 8 : 0,
-                          display: "-webkit-box",
-                          WebkitBoxOrient: "vertical",
-                          WebkitLineClamp: 3,
-                          overflow: "hidden",
+                          wordBreak: "break-word",
                         }}>
                           {item.summary}
                         </div>
@@ -840,10 +845,7 @@ export function Sidebar({
                               fontSize: 12,
                               color: textPrimary,
                               lineHeight: 1.5,
-                              display: "-webkit-box",
-                              WebkitBoxOrient: "vertical",
-                              WebkitLineClamp: 2,
-                              overflow: "hidden",
+                              wordBreak: "break-word",
                             }}>
                               {item.nextAction}
                             </div>
