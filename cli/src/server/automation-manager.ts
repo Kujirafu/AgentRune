@@ -2374,7 +2374,16 @@ export class AutomationManager {
       if (!existsSync(filePath)) return
 
       const content = readAtomicEncrypted(filePath)
-      if (!content) return
+      if (!content) {
+        // File exists but can't be read/decrypted — likely encryption key mismatch (salt was regenerated)
+        log.warn(`[Automation] automations.json exists but could not be decrypted. This usually means the encryption salt (~/.agentrune/.encryption-salt) was regenerated. Backing up the unreadable file and starting fresh.`)
+        try {
+          const backupPath = `${filePath}.bak.${Date.now()}`
+          renameSync(filePath, backupPath)
+          log.info(`[Automation] Backed up unreadable automations to ${backupPath}`)
+        } catch {}
+        return
+      }
       const data: AutomationConfig[] = JSON.parse(content)
       let needsSave = false
       for (const auto of data) {

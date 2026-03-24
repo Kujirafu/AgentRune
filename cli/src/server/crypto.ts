@@ -3,7 +3,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, pbkdf2Sync, createHash } from "node:crypto"
 import { hostname, userInfo } from "node:os"
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, readdirSync, openSync, closeSync, constants as fsConstants } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 
@@ -16,11 +16,17 @@ const PBKDF2_ITERATIONS = 100_000
 const MAGIC = "ARENC1" // file header to identify encrypted files
 
 let cachedKey: Buffer | null = null
+let cachedSaltHex: string | null = null
 
 /**
  * Derive a stable machine-specific encryption key.
  * Uses: hostname + username + a persisted random salt (generated once).
  * The salt is stored at ~/.agentrune/.encryption-salt
+ *
+ * SAFETY: If the salt file already exists, it is NEVER overwritten.
+ * New salt is only created when no salt file exists. On creation, we check
+ * whether encrypted files already exist (which would indicate a lost salt)
+ * and log a warning.
  */
 function deriveKey(): Buffer {
   if (cachedKey) return cachedKey
@@ -32,10 +38,31 @@ function deriveKey(): Buffer {
   let salt: Buffer
   if (existsSync(saltPath)) {
     salt = readFileSync(saltPath)
+    // Validate salt size — if corrupted, do NOT overwrite (would make things worse)
+    if (salt.length !== SALT_LENGTH) {
+      throw new Error(`Encryption salt at ${saltPath} is corrupted (${salt.length} bytes, expected ${SALT_LENGTH}). Manual recovery required.`)
+    }
   } else {
-    // Generate and persist a random salt (one-time)
+    // Check for existing encrypted data before creating a new salt.
+    // If encrypted files exist but no salt, a previous salt was lost.
+    const hasExistingEncrypted = checkForExistingEncryptedFiles(dir)
+    if (hasExistingEncrypted) {
+      console.error(`[crypto] WARNING: Creating new encryption salt but encrypted files already exist in ${dir}. Previously encrypted data will be UNREADABLE. This typically means the old .encryption-salt was deleted.`)
+    }
+    // Use O_CREAT | O_EXCL to atomically create — prevents race if two processes start simultaneously
     salt = randomBytes(SALT_LENGTH)
-    writeFileSync(saltPath, salt)
+    try {
+      const fd = openSync(saltPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL)
+      writeFileSync(fd, salt)
+      closeSync(fd)
+    } catch (err: any) {
+      if (err.code === "EEXIST") {
+        // Another process created it first — use that one
+        salt = readFileSync(saltPath)
+      } else {
+        throw err
+      }
+    }
     try { chmodSync(saltPath, 0o600) } catch {}
   }
 
@@ -46,7 +73,27 @@ function deriveKey(): Buffer {
     .digest()
 
   cachedKey = pbkdf2Sync(machineId, salt, PBKDF2_ITERATIONS, KEY_LENGTH, "sha512")
+  cachedSaltHex = salt.toString("hex")
   return cachedKey
+}
+
+/** Quick check: do any ARENC1-prefixed files exist under the config dir? */
+function checkForExistingEncryptedFiles(dir: string): boolean {
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile()) {
+        try {
+          const head = Buffer.alloc(6)
+          const fd = openSync(join(dir, entry.name), "r")
+          const { readSync } = require("node:fs")
+          readSync(fd, head, 0, 6, 0)
+          closeSync(fd)
+          if (head.toString("utf-8") === MAGIC) return true
+        } catch {}
+      }
+    }
+  } catch {}
+  return false
 }
 
 /**
