@@ -2,6 +2,8 @@
   "name": "agentrune-desktop",
   "version": "0.2.30",
   "private": true,
+  "description": "AgentRune desktop app — AI agent control panel",
+  "author": "Kujirafu",
   "type": "commonjs",
   "main": "dist/main.js",
   "scripts": {
@@ -19,7 +21,7 @@
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",
     "@vitest/coverage-v8": "^3.1.1",
-    "electron": "^35.7.5",
+    "electron": "35.7.5",
     "electron-builder": "^26.8.1",
     "tsup": "^8.4.0",
     "typescript": "^5.8.0",
