@@ -52,3 +52,4 @@ tmp-*.png
 app/test-results/
 cli/coverage/
 .worktrees/
+.agentrune-session.json

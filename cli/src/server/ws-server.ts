@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, basename, dirname, isAbsolute, resolve, normalize, sep } from "node:path"
 import { homedir, hostname, networkInterfaces } from "node:os"
 import { execFileSync, spawn as childSpawn } from "node:child_process"
-import { randomInt, randomBytes } from "node:crypto"
+import { randomInt, randomBytes, timingSafeEqual } from "node:crypto"
 import * as childProcess from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { PtyManager } from "./pty-manager.js"
@@ -575,7 +575,7 @@ export function createServer(portOverride?: number) {
   checkCliUpdate()
 
   const app = express()
-  app.use(express.json({ limit: "10mb" }))
+  app.use(express.json({ limit: "2mb" }))
 
   // Security headers
   app.use((_req, res, next) => {
@@ -600,8 +600,6 @@ export function createServer(portOverride?: number) {
     if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
     // Allow capacitor with any scheme (http or capacitor)
     if (/^(capacitor|http):\/\/localhost$/.test(origin)) return origin
-    // Allow AgentLore preview deployments
-    if (/^https:\/\/agentlore[a-z0-9-]*\.vercel\.app$/.test(origin)) return origin
     return false
   }
   app.use((_req, res, next) => {
@@ -700,7 +698,7 @@ export function createServer(portOverride?: number) {
   app.use("/api", requireAuth)
 
   const server = createHttpServer(app)
-  const wss = new WebSocketServer({ server })
+  const wss = new WebSocketServer({ server, maxPayload: 1_048_576 }) // 1MB max WebSocket message
 
   // Broadcast to ALL connected WS clients (for session lifecycle sync)
   function broadcastAll(msg: Record<string, unknown>) {
@@ -1078,6 +1076,7 @@ export function createServer(portOverride?: number) {
   function generatePairingCode(): string {
     pairingCode = String(randomInt(100000, 1000000))
     pairingCodeExpiry = Date.now() + 5 * 60 * 1000 // 5 min expiry
+    globalPairFailures = 0 // Reset global failure counter for new code
     log.info(`\n  Pairing code: ${pairingCode}\n  (expires in 5 minutes)\n`)
     return pairingCode
   }
@@ -1111,12 +1110,26 @@ export function createServer(portOverride?: number) {
     try {
       const { execFile } = await import("child_process")
       const { resolve } = await import("path")
-      const agentlorePath = resolve(process.cwd(), "..", "AgentWiki")
+      const { existsSync: fileExists } = await import("fs")
+
+      // Resolve AgentWiki from known absolute path — never from process.cwd()
+      const agentlorePath = resolve(homedir(), "Documents", "Test", "AgentWiki")
       const scriptPath = resolve(agentlorePath, "scripts", "social-scraper.ts")
+
+      // Validate script exists and is within the expected directory
+      if (!fileExists(scriptPath) || !scriptPath.startsWith(agentlorePath)) {
+        return res.status(400).json({ error: "Social scraper script not found at expected path" })
+      }
+
+      // Strip sensitive env vars — only pass PATH and minimal runtime vars
+      const safeEnv: Record<string, string> = {}
+      for (const k of ["PATH", "HOME", "USERPROFILE", "NODE_ENV", "LANG", "TERM"]) {
+        if (process.env[k]) safeEnv[k] = process.env[k]!
+      }
 
       const child = execFile("npx", ["tsx", scriptPath, "--prod"], {
         cwd: agentlorePath,
-        env: { ...process.env },
+        env: safeEnv,
         timeout: 10 * 60 * 1000, // 10 min max
       }, (err, stdout, stderr) => {
         if (err) log.warn(`[social-scrape] finished with error: ${err.message}`)
@@ -1142,6 +1155,16 @@ export function createServer(portOverride?: number) {
 
   // Rate limiter for pairing attempts (brute-force protection)
   const pairAttempts = new Map<string, { count: number; resetAt: number }>()
+  let globalPairFailures = 0 // Global cap — expires with the pairing code
+  const GLOBAL_PAIR_FAIL_LIMIT = 15 // Max total failed attempts before code is burned
+
+  // Cleanup stale rate-limit entries every 5 minutes
+  setInterval(() => {
+    const now = Date.now()
+    for (const [ip, entry] of pairAttempts) {
+      if (entry.resetAt <= now) pairAttempts.delete(ip)
+    }
+  }, 5 * 60 * 1000)
 
   // Pair a new device with the 6-digit code shown in CLI
   app.post("/api/auth/pair", (req, res) => {
@@ -1162,9 +1185,24 @@ export function createServer(portOverride?: number) {
     if (!code || !deviceName) {
       return res.status(400).json({ error: "Missing code or deviceName" })
     }
-    if (!pairingCode || Date.now() > pairingCodeExpiry || code !== pairingCode) {
+
+    // Check expiry and global brute-force cap
+    if (!pairingCode || Date.now() > pairingCodeExpiry || globalPairFailures >= GLOBAL_PAIR_FAIL_LIMIT) {
+      if (globalPairFailures >= GLOBAL_PAIR_FAIL_LIMIT) {
+        pairingCode = null // Burn the code
+        log.warn(`[auth] Pairing code burned after ${globalPairFailures} global failed attempts`)
+      }
       return res.status(401).json({ error: "Invalid or expired code" })
     }
+
+    // Timing-safe comparison to prevent timing attacks on the pairing code
+    const codeA = Buffer.from(String(code).padEnd(6, "\0"))
+    const codeB = Buffer.from(String(pairingCode).padEnd(6, "\0"))
+    if (codeA.length !== codeB.length || !timingSafeEqual(codeA, codeB)) {
+      globalPairFailures++
+      return res.status(401).json({ error: "Invalid or expired code" })
+    }
+    globalPairFailures = 0 // Reset on success
     // Code is valid — register device and issue tokens
     const device = registerDevice(deviceName)
     const sessionToken = issueSessionToken()
@@ -2154,7 +2192,7 @@ export function createServer(portOverride?: number) {
       let before = ""
       let after = ""
       try {
-        before = execFileSync("git", ["show", `HEAD:${file}`], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
+        before = execFileSync("git", ["show", `HEAD:./${file}`], { cwd: project.cwd, encoding: "utf-8", timeout: 5000 })
       } catch { /* new file, no HEAD version */ }
       if (existsSync(fullPath)) {
         after = readFileSync(fullPath, "utf-8")

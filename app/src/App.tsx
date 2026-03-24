@@ -1560,8 +1560,9 @@ export function App() {
     if (isCapacitor() && !base) return
     console.log(`[App] Loading projects: base=${base} wsConnected=${wsConnected} isAuthed=${isAuthed}`)
     fetch(`${base}/api/projects`)
-      .then((r) => r.json())
+      .then((r) => r.ok ? r.json() : Promise.reject(r.status))
       .then((data) => {
+        if (!Array.isArray(data)) return
         setProjects(data)
         // Auto-select last used project or first
         const last = getLastProject()
@@ -1583,8 +1584,9 @@ export function App() {
       const base = getApiBase()
       if (!base && isCapacitor()) return
       fetch(`${base}/api/projects`)
-        .then((r) => r.json())
+        .then((r) => r.ok ? r.json() : Promise.reject(r.status))
         .then((data) => {
+          if (!Array.isArray(data)) return
           setProjects(data)
           const last = getLastProject()
           if (last && data.find((p: Project) => p.id === last)) {
