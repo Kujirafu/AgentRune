@@ -409,7 +409,7 @@ export function SettingsTool({ projectId, theme, t, onSettingsChange }: Settings
   }
 
   return (
-    <div style={{ maxWidth: 680, margin: "0 auto", overflow: "auto" }}>
+    <div style={{ maxWidth: 680, margin: "0 auto", overflow: "auto", paddingBottom: 40 }}>
       {/* Header */}
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",

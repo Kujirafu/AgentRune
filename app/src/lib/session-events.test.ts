@@ -62,6 +62,60 @@ describe("upsertAgentEvent", () => {
       timestamp: 101,
     })
   })
+
+  it("merges semantically identical response and info events even when ids differ", () => {
+    const initial = [makeEvent({
+      id: "evt-info",
+      type: "info",
+      title: "Plan ready",
+      detail: "Full plan body",
+      timestamp: 100,
+    })]
+
+    const next = upsertAgentEvent(initial, makeEvent({
+      id: "evt-response",
+      type: "response",
+      title: "Plan ready",
+      detail: "Full plan body",
+      timestamp: 102,
+    }))
+
+    expect(next).toHaveLength(1)
+    expect(next[0]).toMatchObject({
+      id: "evt-response",
+      type: "response",
+      title: "Plan ready",
+      detail: "Full plan body",
+      timestamp: 102,
+    })
+  })
+
+  it("merges generic fallback info responses into the later structured response", () => {
+    const initial = [makeEvent({
+      id: "evt-generic",
+      type: "info",
+      title: "Codex responded",
+      detail: "Implemented the scheduling fix and updated tests.",
+      timestamp: 100,
+    })]
+
+    const next = upsertAgentEvent(initial, makeEvent({
+      id: "evt-response",
+      type: "response",
+      title: "Implemented the scheduling fix and updated tests.",
+      detail: undefined,
+      timestamp: 102,
+    }))
+
+    expect(next).toHaveLength(1)
+    expect(next[0]).toMatchObject({
+      id: "evt-response",
+      type: "response",
+      title: "Implemented the scheduling fix and updated tests.",
+      detail: "Implemented the scheduling fix and updated tests.",
+      timestamp: 102,
+    })
+  })
 })
 
 describe("mergeAgentEventLists", () => {

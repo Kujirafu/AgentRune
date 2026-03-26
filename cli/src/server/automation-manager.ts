@@ -774,6 +774,7 @@ export class AutomationManager {
     const wasEnabled = auto.enabled
     const oldSchedule = JSON.stringify(auto.schedule)
 
+    if ((updates as any).projectId !== undefined) auto.projectId = (updates as any).projectId
     if (updates.name !== undefined) auto.name = updates.name
     if (updates.command !== undefined) auto.command = updates.command
     if (updates.prompt !== undefined) auto.prompt = updates.prompt
@@ -974,7 +975,7 @@ export class AutomationManager {
   /** Build the agent command args + prompt file for an automation.
    *  Prompt is written to a temp file and piped via stdin (child_process.spawn).
    */
-  private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string; fullPrompt: string } | null {
+  private buildAutomationCommand(auto: AutomationConfig): { bin: string; args: string[]; promptFilePath: string; fullPrompt: string; stdinPrompt?: string } | null {
     const rawPrompt = auto.prompt || ""
     let promptText = wrapPromptWithLocale(rawPrompt, getAutomationLocale(auto))
     const socialMode = detectAutomationSocialMode(auto)
@@ -1043,7 +1044,10 @@ export class AutomationManager {
 
     switch (auto.agentId) {
       case "claude": {
-        // Use -p with short instruction to read prompt file — avoids stdin pipe issues with long prompts
+        // Use -p with short instruction to read prompt file.
+        // Do NOT pipe long prompts via stdin — Windows PowerShell PTY intercepts pipes
+        // (see agentlore Lessons: "Windows automation pipe fix").
+        // Claude in -p mode CAN use Read tool to access the prompt file.
         const args = ["-p", `Read and follow all instructions in this file: ${promptFilePath}`, "--dangerously-skip-permissions"]
         if (auto.model && /^[a-zA-Z0-9._-]+$/.test(auto.model)) args.push("--model", auto.model)
         return { bin: "claude", args, promptFilePath, fullPrompt }
@@ -1500,7 +1504,7 @@ export class AutomationManager {
 
         this.runningProcesses.set(id, proc)
 
-        // Close stdin — prompt is passed via -p flag or agent reads from file
+        // Close stdin — prompt is passed via -p flag, agent reads from file
         if (proc.stdin) {
           try { proc.stdin.end() } catch {}
           proc.stdin.on("error", () => {})

@@ -53,6 +53,7 @@ const {
       requestSingleInstanceLock: vi.fn(() => true),
       whenReady: vi.fn(() => Promise.resolve()),
       on: vi.fn((ev: string, cb: Function) => { appHandlers[ev] = cb }),
+      exit: vi.fn(),
       quit: vi.fn(),
     },
     mockIpcMain: {
@@ -80,6 +81,7 @@ vi.mock("electron", () => ({
 
 vi.mock("./tray.js", () => ({ setupTray: mockSetupTray }))
 vi.mock("./updater.js", () => ({ setupAutoUpdate: mockSetupAutoUpdate }))
+vi.mock("./runtime-log.js", () => ({ logRuntime: vi.fn() }))
 
 // Mock global fetch — simulate daemon already running so startDaemon returns early
 vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true })))
@@ -214,9 +216,10 @@ describe("main process", () => {
 describe("main process — no lock", () => {
   it("quits when single instance lock is not obtained", async () => {
     vi.resetModules()
+    mockApp.exit.mockClear()
     mockApp.quit.mockClear()
     mockApp.requestSingleInstanceLock.mockReturnValueOnce(false)
     await import("./main.js")
-    expect(mockApp.quit).toHaveBeenCalled()
+    expect(mockApp.exit).toHaveBeenCalledWith(0)
   })
 })

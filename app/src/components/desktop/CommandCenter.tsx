@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react"
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react"
 import { useLocale } from "../../lib/i18n/index.js"
 import type { Project, AppSession, AgentEvent } from "../../types"
 import { buildProjectDecisionSummary, type SessionDecisionDigest } from "../../lib/session-summary"
@@ -18,6 +18,7 @@ import type { AutomationTemplate } from "../../data/automation-types"
 import { resolveDesktopLaunchAgentId } from "../../lib/desktop-session-launch"
 import { resolveDesktopSessionTarget } from "../../lib/desktop-session-routing"
 import { buildSessionOrdinalMap, sortSessionsByOrdinal } from "../../lib/session-ordinals"
+import { buildSessionAttachMessage } from "../../lib/session-attach"
 import { getSettings, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../../lib/storage"
 import { trackDesktopSessionCreate, trackDesktopCommandSend, trackDesktopToolView, trackDesktopSessionExpand, trackDesktopSessionRestart, trackDesktopBypassToggle, trackDesktopSessionKill, trackDesktopNewProject } from "../../lib/analytics"
 
@@ -87,12 +88,44 @@ export function CommandCenter(props: CommandCenterProps) {
   const [activeView, setActiveView] = useState<ToolView>("sessions")
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [targetSessionId, setTargetSessionId] = useState<string | null>(null)
+  const [forceNewSession, setForceNewSession] = useState(false)
+  const [pendingNewSessionId, setPendingNewSessionId] = useState<string | null>(null)
+  const lastHandledExpandSessionIdRef = React.useRef<string | null>(null)
+  const forceNewSessionRef = useRef(false)
+  const pendingNewSessionIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    forceNewSessionRef.current = forceNewSession
+  }, [forceNewSession])
+
+  useEffect(() => {
+    pendingNewSessionIdRef.current = pendingNewSessionId
+  }, [pendingNewSessionId])
   // Clear stale target when session no longer exists
   useEffect(() => {
+    if (targetSessionId === pendingNewSessionId) return
     if (targetSessionId && !activeSessions.some(s => s.id === targetSessionId)) {
       setTargetSessionId(null)
     }
-  }, [targetSessionId, activeSessions])
+  }, [targetSessionId, activeSessions, pendingNewSessionId])
+  useEffect(() => {
+    if (!pendingNewSessionId) return
+    if (!activeSessions.some(s => s.id === pendingNewSessionId)) return
+    setActiveView("sessions")
+    setExpandedSessions(new Set([pendingNewSessionId]))
+    setTargetSessionId(pendingNewSessionId)
+    forceNewSessionRef.current = false
+    pendingNewSessionIdRef.current = null
+    setForceNewSession(false)
+    setPendingNewSessionId(null)
+  }, [pendingNewSessionId, activeSessions])
+  useEffect(() => {
+    if (!pendingNewSessionId) return
+    if (targetSessionId === pendingNewSessionId && expandedSessions.has(pendingNewSessionId)) return
+    setActiveView("sessions")
+    setExpandedSessions(new Set([pendingNewSessionId]))
+    setTargetSessionId(pendingNewSessionId)
+  }, [pendingNewSessionId, targetSessionId, expandedSessions])
   const [showNewProject, setShowNewProject] = useState(false)
   const sessionOrdinals = useMemo(() => buildSessionOrdinalMap(activeSessions), [activeSessions])
   const ordinalSessions = useMemo(() => sortSessionsByOrdinal(activeSessions), [activeSessions])
@@ -138,10 +171,29 @@ export function CommandCenter(props: CommandCenterProps) {
     return results.slice(-10)
   }, [props.sessionEvents, sessionOrdinals])
 
+  const handleTargetChange = useCallback((sessionId: string | null) => {
+    forceNewSessionRef.current = false
+    pendingNewSessionIdRef.current = null
+    setForceNewSession(false)
+    setPendingNewSessionId(null)
+    setTargetSessionId(sessionId)
+  }, [])
+
+  const handleNewSessionIntent = useCallback(() => {
+    forceNewSessionRef.current = true
+    pendingNewSessionIdRef.current = null
+    setActiveView("sessions")
+    setExpandedSessions(new Set())
+    setTargetSessionId(null)
+    setPendingNewSessionId(null)
+    setForceNewSession(true)
+  }, [])
+
   // Handle send from input bar (with optional images)
   const handleSend = useCallback((text: string, images?: string[]) => {
-    const sid = resolveDesktopSessionTarget({
+    const sid = pendingNewSessionId || resolveDesktopSessionTarget({
       text,
+      forceNewSession,
       targetSessionId,
       expandedSessionIds: expandedSessions,
       sessions: activeSessions,
@@ -161,37 +213,49 @@ export function CommandCenter(props: CommandCenterProps) {
       if (pid) {
         const newId = `${pid}_${Date.now()}`
         const userSettings = getSettings(pid)
-        send({
-          type: "attach",
+        const attachMsg = buildSessionAttachMessage({
           projectId: pid,
           agentId: launchAgentId,
           sessionId: newId,
-          settings: userSettings,
           autoSaveKeys: getAutoSaveKeysEnabled(),
           autoSaveKeysPath: getAutoSaveKeysPath(),
-          initialCommand: text,
-        })
+          settings: userSettings,
+          locale,
+        }) as Record<string, unknown>
+        attachMsg.initialCommand = text
+        if (images && images.length > 0) attachMsg.initialImages = images
+        if (send(attachMsg)) {
+          forceNewSessionRef.current = false
+          pendingNewSessionIdRef.current = newId
+          setActiveView("sessions")
+          setExpandedSessions(new Set([newId]))
+          setTargetSessionId(newId)
+          setForceNewSession(false)
+          setPendingNewSessionId(newId)
+        }
       }
       return
     }
     // Send text and Enter separately — match MissionControl's delay pattern
-    const isSlash = text.startsWith("/")
-    const msg: Record<string, unknown> = { type: "session_input", sessionId: sid, data: text }
-    if (images && images.length > 0) msg.images = images
-    send(msg)
-    setTimeout(() => send({ type: "session_input", sessionId: sid, data: "\r" }), isSlash ? 300 : 500)
-    // Store user message event (like MissionControl does)
-    const userEvent = {
-      id: `usr_${Date.now()}`,
-      timestamp: Date.now(),
-      type: "user_message" as const,
-      status: "completed" as const,
-      title: text,
+    const msg: Record<string, unknown> = {
+      type: "session_input",
+      sessionId: sid,
+      data: text,
+      persistUserEvent: true,
     }
-    send({ type: "store_event", sessionId: sid, event: userEvent })
-    // Immediately show in events view (don't wait for server roundtrip)
-    window.dispatchEvent(new CustomEvent("local_user_event", { detail: { sessionId: sid, event: userEvent } }))
-  }, [targetSessionId, expandedSessions, send, activeSessions, digests, props.sessionEvents, selectedProjectId, projects])
+    if (images && images.length > 0) msg.images = images
+    if (send(msg)) {
+      forceNewSessionRef.current = false
+      setForceNewSession(false)
+      setActiveView("sessions")
+      setExpandedSessions(new Set([sid]))
+      setTargetSessionId(sid)
+      if (sid !== pendingNewSessionId) {
+        pendingNewSessionIdRef.current = null
+        setPendingNewSessionId(null)
+      }
+    }
+  }, [pendingNewSessionId, forceNewSession, targetSessionId, expandedSessions, send, activeSessions, digests, props.sessionEvents, selectedProjectId, projects, locale])
 
   // Handle raw send (e.g. interrupt \x03) to specific session
   const handleRawSend = useCallback((sessionId: string, data: string) => {
@@ -296,36 +360,54 @@ export function CommandCenter(props: CommandCenterProps) {
 
   // Direct expand: when expandSessionId prop changes, expand that session
   React.useEffect(() => {
-    if (props.expandSessionId) {
-      setActiveView("sessions")
-      setExpandedSessions(new Set([props.expandSessionId]))
-      setTargetSessionId(props.expandSessionId)
+    if (!props.expandSessionId) {
+      lastHandledExpandSessionIdRef.current = null
+      return
     }
+    if (forceNewSessionRef.current || pendingNewSessionIdRef.current) {
+      lastHandledExpandSessionIdRef.current = props.expandSessionId
+      return
+    }
+    if (props.expandSessionId === lastHandledExpandSessionIdRef.current) return
+    lastHandledExpandSessionIdRef.current = props.expandSessionId
+    setActiveView("sessions")
+    setExpandedSessions(new Set([props.expandSessionId]))
+    setTargetSessionId(props.expandSessionId)
+    pendingNewSessionIdRef.current = null
+    forceNewSessionRef.current = false
+    setPendingNewSessionId(null)
+    setForceNewSession(false)
   }, [props.expandSessionId])
 
-  // Listen for server "attached" to auto-expand new sessions created via QuickLaunchDialog
+  // Only the session we explicitly started is allowed to finish the fresh-session handshake.
   React.useEffect(() => {
     return props.on("attached", (msg) => {
+      const pendingSid = pendingNewSessionIdRef.current
       const sid = msg.sessionId as string
       const resumed = msg.resumed as boolean
-      if (sid && !resumed) {
+      if (!sid || resumed || !pendingSid || sid !== pendingSid) return
+      forceNewSessionRef.current = false
+      setActiveView("sessions")
+      setExpandedSessions(new Set([sid]))
+      setTargetSessionId(sid)
+      setForceNewSession(false)
+      /*
+      const sid = msg.sessionId as string
+      const resumed = msg.resumed as boolean
+      if (!sid || resumed || forceNewSession) return
         // New session attached — expand it
         setActiveView("sessions")
         setExpandedSessions(new Set([sid]))
         setTargetSessionId(sid)
-      }
+        setForceNewSession(false)
+      */
     })
   }, [props.on])
 
-  // Sort sessions: blocked -> working -> idle -> done
+  // Keep card positions stable by creation order; status is shown in the card itself.
   const sortedSessions = useMemo(() => {
-    const order: Record<string, number> = { blocked: 0, working: 1, idle: 2, done: 3 }
-    return [...activeSessions].sort((a, b) => {
-      const sa = order[digests.get(a.id)?.status || "idle"] ?? 2
-      const sb = order[digests.get(b.id)?.status || "idle"] ?? 2
-      return sa - sb || (sessionOrdinals.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sessionOrdinals.get(b.id) ?? Number.MAX_SAFE_INTEGER)
-    })
-  }, [activeSessions, digests, sessionOrdinals])
+    return ordinalSessions
+  }, [ordinalSessions])
 
   const bg = dark ? "#0f172a" : "#f8fafc"
   const sidebarBg = dark ? "rgba(15,23,42,0.95)" : "rgba(255,255,255,0.95)"
@@ -385,6 +467,8 @@ export function CommandCenter(props: CommandCenterProps) {
               setActiveView("sessions")
               setExpandedSessions(new Set([sid]))
               setTargetSessionId(sid)
+              setPendingNewSessionId(null)
+              setForceNewSession(false)
             }}
           />
         </div>
@@ -691,8 +775,10 @@ export function CommandCenter(props: CommandCenterProps) {
             sessionOrdinals={sessionOrdinals}
             digests={digests}
             targetSessionId={targetSessionId}
-            onChangeTarget={setTargetSessionId}
-            onNewSession={onNewSession}
+            pendingNewSession={forceNewSession || !!pendingNewSessionId}
+            onChangeTarget={handleTargetChange}
+            onNewSession={props.onNewSession}
+            onArmFreshSession={handleNewSessionIntent}
             onCycleSession={() => {
               if (ordinalSessions.length === 0) return
               setActiveView("sessions")
@@ -704,6 +790,8 @@ export function CommandCenter(props: CommandCenterProps) {
                 const first = ordinalSessions[0]
                 setExpandedSessions(new Set([first.id]))
                 setTargetSessionId(first.id)
+                setPendingNewSessionId(null)
+                setForceNewSession(false)
               } else {
                 const currentIdx = ordinalSessions.findIndex(s => s.id === currentTarget)
                 const nextIdx = currentIdx >= 0 ? currentIdx + 1 : 0
@@ -711,10 +799,14 @@ export function CommandCenter(props: CommandCenterProps) {
                   // Past last → back to All (card view + Auto)
                   setExpandedSessions(new Set())
                   setTargetSessionId(null)
+                  setPendingNewSessionId(null)
+                  setForceNewSession(false)
                 } else {
                   const next = ordinalSessions[nextIdx]
                   setExpandedSessions(new Set([next.id]))
                   setTargetSessionId(next.id)
+                  setPendingNewSessionId(null)
+                  setForceNewSession(false)
                 }
               }
             }}

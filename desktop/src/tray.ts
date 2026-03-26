@@ -1,8 +1,15 @@
 // desktop/src/tray.ts — System tray with context menu
 import { app, Tray, Menu, nativeImage, type BrowserWindow } from "electron"
 import { join } from "node:path"
+import { logRuntime } from "./runtime-log.js"
 
 let tray: Tray | null = null
+
+function safeLog(message: string) {
+  try {
+    if (typeof logRuntime === "function") logRuntime(message)
+  } catch {}
+}
 
 export function setupTray(win: BrowserWindow, port: number): void {
   // Use tray icon from assets, fallback to main icon
@@ -29,6 +36,7 @@ export function setupTray(win: BrowserWindow, port: number): void {
     {
       label: "Open Dashboard",
       click: () => {
+        safeLog("[Tray] Open Dashboard clicked");
         win.show()
         win.focus()
       },
@@ -42,7 +50,9 @@ export function setupTray(win: BrowserWindow, port: number): void {
     {
       label: "Quit",
       click: () => {
-        (app as any).isQuitting = true
+        safeLog("[Tray] Quit clicked");
+        ;(app as any).__agentruneQuitSource = "tray"
+        ;(app as any).isQuitting = true
         app.quit()
       },
     },
@@ -52,6 +62,7 @@ export function setupTray(win: BrowserWindow, port: number): void {
 
   // Double-click tray icon -> show window
   tray.on("double-click", () => {
+    safeLog("[Tray] Double-click -> show window");
     win.show()
     win.focus()
   })

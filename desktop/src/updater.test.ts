@@ -23,6 +23,10 @@ vi.mock("electron", () => ({
   },
 }))
 
+vi.mock("./runtime-log.js", () => ({
+  logRuntime: vi.fn(),
+}))
+
 /* ── Tests ───────────────────────────────────────────────────── */
 
 import { setupAutoUpdate } from "./updater.js"

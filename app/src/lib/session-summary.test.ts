@@ -123,4 +123,28 @@ describe("session-summary", () => {
 
     expect(buildProjectSummarySignature([baseDigest])).toBe(buildProjectSummarySignature([noisyDigest]))
   })
+
+  it("ignores noisy Claude fallback response events when picking the session summary", () => {
+    const digest = buildSessionDigest([
+      makeEvent({
+        id: "r1",
+        timestamp: 100,
+        type: "response",
+        status: "completed",
+        title: "已載入安全審查技能。",
+        detail: "現在啟動 Step 1 的兩個並行審計分支。",
+      }),
+      makeEvent({
+        id: "i1",
+        timestamp: 110,
+        type: "info",
+        status: "completed",
+        title: "Claude responded (detailed)",
+        detail: "Vibing... thinking with max effort\ncurrent: 2.1.84 latest: 2.1.84",
+      }),
+    ], { locale: "zh-TW", sessionId: "session-noise" })
+
+    expect(digest.summary).toContain("並行審計分支")
+    expect(digest.summary).not.toContain("Vibing")
+  })
 })

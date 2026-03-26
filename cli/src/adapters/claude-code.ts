@@ -123,7 +123,7 @@ function flushResponseAccum(state: AdapterState, ctx: ParseContext, chunk: strin
         type: "decision_request",
         status: "waiting",
         title: state.responseAccum.split("\n")[0].slice(0, 200),
-        detail: state.responseAccum.slice(0, 3000),
+        detail: state.responseAccum,
         raw: chunk,
         decision: { options: opts },
       }
@@ -135,7 +135,7 @@ function flushResponseAccum(state: AdapterState, ctx: ParseContext, chunk: strin
         type: "info",
         status: "completed",
         title: state.responseAccum.split("\n")[0].slice(0, 200),
-        detail: state.responseAccum.slice(0, 3000),
+        detail: state.responseAccum,
         raw: chunk,
       }
     }
@@ -146,7 +146,7 @@ function flushResponseAccum(state: AdapterState, ctx: ParseContext, chunk: strin
       type: "info",
       status: "completed",
       title: state.responseAccum.length > 300 ? "Claude responded (detailed)" : "Claude responded",
-      detail: state.responseAccum.slice(0, 3000),
+      detail: state.responseAccum,
       raw: chunk,
     }
   }
@@ -574,7 +574,7 @@ export const claudeCodeAdapter: AgentAdapter = {
             type: "info",
             status: "completed",
             title: "Plan ready",
-            detail: planContent.slice(0, 5000),
+            detail: planContent,
             raw: chunk,
           })
         }

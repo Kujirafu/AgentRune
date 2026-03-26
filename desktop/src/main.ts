@@ -2,10 +2,21 @@
 import { app, BrowserWindow, nativeTheme, ipcMain, session } from "electron"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
+import { logRuntime } from "./runtime-log.js"
 import { setupTray } from "./tray.js"
 import { setupAutoUpdate } from "./updater.js"
 
 const PORT = 3457
+
+function getQuitSource(): string {
+  const source = (app as any).__agentruneQuitSource
+  return typeof source === "string" && source ? source : "unknown"
+}
+
+function getWindowCloseSource(): string {
+  const source = (app as any).__agentruneWindowCloseSource
+  return typeof source === "string" && source ? source : "unknown"
+}
 
 // ─── Daemon startup ───────────────────────────────────────────
 
@@ -66,6 +77,20 @@ function createWindow(): BrowserWindow {
 
   win.loadURL(`http://localhost:${PORT}`)
 
+  win.webContents.on("did-fail-load", (_event, code, desc, url, isMainFrame) => {
+    logRuntime(`[Electron] did-fail-load code=${code} desc=${desc} url=${url} main=${isMainFrame}`)
+  })
+
+  win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level <= 2 || /error|warning|failed/i.test(message)) {
+      logRuntime(`[Renderer:${level}] ${sourceId}:${line} ${message}`)
+    }
+  })
+
+  win.webContents.on("unresponsive", () => {
+    logRuntime("[Electron] Renderer became unresponsive")
+  })
+
   // Open DevTools with F12 or Ctrl+Shift+I
   win.webContents.on("before-input-event", (_e, input) => {
     if (input.key === "F12" || (input.control && input.shift && input.key === "I")) {
@@ -83,10 +108,18 @@ function createWindow(): BrowserWindow {
 
   // Close -> hide to tray (unless app is quitting)
   win.on("close", (e) => {
+    logRuntime(
+      `[Electron] Window close event: isQuitting=${Boolean((app as any).isQuitting)} source=${getWindowCloseSource()}`,
+    )
     if (!(app as any).isQuitting) {
       e.preventDefault()
       win.hide()
+      logRuntime("[Electron] Window close prevented; hiding to tray")
     }
+  })
+
+  win.on("closed", () => {
+    logRuntime(`[Electron] Window closed source=${getWindowCloseSource()}`)
   })
 
   return win
@@ -99,7 +132,12 @@ ipcMain.on("window:maximize", () => {
   if (mainWindow?.isMaximized()) mainWindow.unmaximize()
   else mainWindow?.maximize()
 })
-ipcMain.on("window:close", () => mainWindow?.close())
+ipcMain.on("window:close", (_event, payload?: { source?: string }) => {
+  const source = payload?.source || "unknown"
+  ;(app as any).__agentruneWindowCloseSource = source
+  logRuntime(`[Electron] IPC window:close received source=${source}`)
+  mainWindow?.close()
+})
 
 // ─── Theme change → update titlebar overlay ───────────────────
 
@@ -130,9 +168,11 @@ ipcMain.on("theme:set", (_e, dark: boolean) => {
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
-  app.quit()
+  logRuntime("[Electron] Single-instance lock denied; exiting current process as secondary instance")
+  app.exit(0)
 } else {
   app.on("second-instance", () => {
+    logRuntime("[Electron] Second instance detected; reloading and focusing existing window")
     if (mainWindow) {
       // Hard-reload to pick up new builds (dev mode runs npm run dev again)
       mainWindow.webContents.reloadIgnoringCache()
@@ -154,15 +194,35 @@ if (!gotLock) {
 
 app.on("before-quit", () => {
   (app as any).isQuitting = true
+  logRuntime(
+    `[Electron] before-quit source=${getQuitSource()} windowCloseSource=${getWindowCloseSource()}`,
+  )
+})
+
+app.on("will-quit", () => {
+  logRuntime("[Electron] will-quit")
 })
 
 // Catch renderer crashes
 app.on("render-process-gone", (_event, _webContents, details) => {
-  console.error("[Electron] Renderer crashed:", details.reason, details.exitCode)
+  logRuntime(`[Electron] Renderer crashed: reason=${details.reason} exitCode=${details.exitCode}`)
+})
+
+app.on("child-process-gone", (_event, details) => {
+  logRuntime(`[Electron] Child process gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode ?? "n/a"} service=${details.serviceName || ""}`)
 })
 
 process.on("uncaughtException", (err) => {
-  console.error("[Electron] Uncaught exception:", err.message, err.stack?.slice(0, 300))
+  logRuntime(`[Electron] Uncaught exception: ${err.message}\n${err.stack?.slice(0, 300) || ""}`)
+})
+
+process.on("unhandledRejection", (err) => {
+  const detail = err instanceof Error ? `${err.message}\n${err.stack || ""}` : String(err)
+  logRuntime(`[Electron] Unhandled rejection: ${detail.slice(0, 600)}`)
+})
+
+process.on("exit", (code) => {
+  logRuntime(`[Electron] process exit code=${code}`)
 })
 
 // Keep app running when all windows closed (tray mode)

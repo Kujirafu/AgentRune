@@ -35,6 +35,9 @@ export function getAttachSettings(settings: ProjectSettings, locale: string): Re
     cursorMode: settings.cursorMode,
     cursorModel: settings.cursorModel,
     cursorSandbox: settings.cursorSandbox,
+    sandboxLevel: settings.sandboxLevel,
+    requirePlanReview: settings.requirePlanReview,
+    requireMergeApproval: settings.requireMergeApproval,
     locale,
   }
 }

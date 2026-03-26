@@ -1,12 +1,12 @@
 import { useEffect, useRef, useCallback } from "react"
 import { Terminal as XTerm } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
-import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
 import type { AppSession } from "../../types"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
 import { buildSessionAttachMessage } from "../../lib/session-attach"
 import { getSettings, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../../lib/storage"
+import { shouldUseXtermWebgl } from "../../lib/terminal-renderer"
 
 export interface DesktopTerminalPanelProps {
   session: AppSession
@@ -91,16 +91,21 @@ export function DesktopTerminalPanel({
     term.loadAddon(fit)
     term.open(termRef.current)
 
-    // WebGL renderer
-    let webglAddon: WebglAddon | null = null
-    try {
-      webglAddon = new WebglAddon()
-      webglAddon.onContextLoss(() => { try { webglAddon?.dispose() } catch {} })
-      term.loadAddon(webglAddon)
-    } catch {
-      webglAddon = null
+    let disposed = false
+    ;(term as any)._webglAddon = null
+    if (shouldUseXtermWebgl()) {
+      void import("@xterm/addon-webgl")
+        .then(({ WebglAddon }) => {
+          if (disposed) return
+          const webglAddon = new WebglAddon()
+          webglAddon.onContextLoss(() => { try { webglAddon.dispose() } catch {} })
+          term.loadAddon(webglAddon)
+          ;(term as any)._webglAddon = webglAddon
+        })
+        .catch(() => {
+          ;(term as any)._webglAddon = null
+        })
     }
-    ;(term as any)._webglAddon = webglAddon
 
     requestAnimationFrame(() => {
       fit.fit()
@@ -123,6 +128,7 @@ export function DesktopTerminalPanel({
     resizeObs.observe(termRef.current)
 
     return () => {
+      disposed = true
       resizeObs.disconnect()
       try { (term as any)._webglAddon?.dispose() } catch {}
       try { term.dispose() } catch {}

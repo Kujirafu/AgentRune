@@ -195,16 +195,16 @@ export const cursorAdapter: AgentAdapter = {
           // Flush old response
           if (state.responseAccum.length > 10 && now - state.lastResponseTime > 2000) {
             state.lastResponseTime = now
-            events.push({
-              id: makeEventId(),
-              timestamp: state.responseAccumTime,
-              type: "info",
-              status: "completed",
-              title: state.responseAccum.length > 300 ? "Cursor responded (detailed)" : "Cursor responded",
-              detail: state.responseAccum.slice(0, 3000),
-              raw: chunk,
-            })
-          }
+              events.push({
+                id: makeEventId(),
+                timestamp: state.responseAccumTime,
+                type: "info",
+                status: "completed",
+                title: state.responseAccum.length > 300 ? "Cursor responded (detailed)" : "Cursor responded",
+                detail: state.responseAccum,
+                raw: chunk,
+              })
+            }
           state.responseAccum = responseText
           state.responseAccumTime = now
         } else {
@@ -222,7 +222,7 @@ export const cursorAdapter: AgentAdapter = {
         type: "info",
         status: "completed",
         title: state.responseAccum.length > 300 ? "Cursor responded (detailed)" : "Cursor responded",
-        detail: state.responseAccum.slice(0, 3000),
+        detail: state.responseAccum,
         raw: chunk,
       })
       state.responseAccum = ""

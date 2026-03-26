@@ -1,4 +1,5 @@
 import type { AgentEvent, ProgressReport } from "../types"
+import { isGenericAgentResponseTitle, isNoisyFallbackResponseEvent } from "./event-noise"
 
 export type SummaryLocale = "en" | "zh-TW"
 export type SessionDigestStatus = "blocked" | "done" | "working" | "idle"
@@ -88,6 +89,7 @@ export function isSummaryNoise(text: string | null | undefined): boolean {
   const normalized = normalizeWhitespace(text || "")
   if (!normalized) return true
   if (normalized.length < 4) return true
+  if (isGenericAgentResponseTitle(normalized)) return true
   if (NOISE_PATTERNS.some((pattern) => pattern.test(normalized))) return true
   if (BOILERPLATE_PREFIX.test(normalized) && !OUTCOME_HINT.test(normalized)) return true
   return false
@@ -188,7 +190,9 @@ export function buildSessionDigest(events: AgentEvent[], options: DigestOptions 
   const latestFailedTest = findLatestEvent(events, (event) => event.type === "test_result" && event.status === "failed")
   const latestSessionSummary = findLatestEvent(events, (event) => event.type === "session_summary")
   const latestResponse = findLatestEvent(events, (event) =>
-    (event.type === "response" || event.type === "info") && !event.id.startsWith("usr_"),
+    (event.type === "response" || event.type === "info")
+    && !event.id.startsWith("usr_")
+    && !isNoisyFallbackResponseEvent(event),
   )
   const latestCommand = findLatestEvent(events, (event) => event.type === "command_run")
   const latestFile = findLatestEvent(events, (event) => event.type === "file_edit" || event.type === "file_create")

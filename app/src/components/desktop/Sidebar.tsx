@@ -135,71 +135,20 @@ export function Sidebar({
   const totalInboxBadges = totalPending + unreadCompletionCount
   const hasInboxAlerts = totalInboxBadges > 0
 
-  const completionSnapshotRef = React.useRef<Map<string, { status: string; updatedAt: number }>>(new Map())
-  useEffect(() => {
-    const nextSnapshot = new Map<string, { status: string; updatedAt: number }>()
-    const additions: CompletionNotice[] = []
-
-    sessions.forEach((session, index) => {
-      const digest = digests.get(session.id)
-      if (!digest) return
-      const updatedAt = digest.updatedAt || Date.now()
-      const previous = completionSnapshotRef.current.get(session.id)
-      const sessionIdx = sessionOrdinals.get(session.id) ?? (index + 1)
-
-      if (
-        previous
-        && previous.status === "working"
-        && (digest.status === "idle" || digest.status === "done")
-        && (digest.summary || digest.nextAction)
-      ) {
-        additions.push({
-          id: `${session.id}:${updatedAt}`,
-          sessionId: session.id,
-          sessionIdx,
-          label: digest.displayLabel || session.taskTitle || `Session ${sessionIdx}`,
-          summary: digest.summary || t("desktop.sessionCompleted"),
-          nextAction: digest.nextAction,
-          updatedAt,
-        })
-      }
-
-      nextSnapshot.set(session.id, { status: digest.status, updatedAt })
-    })
-
-    completionSnapshotRef.current = nextSnapshot
-
-    if (additions.length === 0) return
-
-    setCompletionNotices((prev) => {
-      const merged = new Map<string, CompletionNotice>()
-      for (const item of [...additions, ...prev]) merged.set(item.id, item)
-      return [...merged.values()]
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 10)
-    })
-    setUnreadCompletionIds((prev) => {
-      const next = new Set(prev)
-      for (const item of additions) next.add(item.id)
-      return next
-    })
-  }, [sessions, digests, sessionOrdinals, t])
-
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<SessionCompletionNotice | null>).detail
       if (!detail?.id) return
 
       setCompletionNotices((prev) => {
-        const merged = new Map<string, CompletionNotice>()
-        for (const item of [detail, ...prev]) merged.set(item.id, item)
-        return [...merged.values()]
+        const merged = [detail, ...prev.filter((item) => item.sessionId !== detail.sessionId)]
+        return merged
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, 10)
       })
       setUnreadCompletionIds((prev) => {
         const next = new Set(prev)
-        next.add(detail.id)
+        next.add(detail.sessionId)
         return next
       })
     }

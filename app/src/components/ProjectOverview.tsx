@@ -301,10 +301,12 @@ export function ProjectOverview({
   useEffect(() => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
     if (!canUseApi(serverUrl) || projects.length === 0) return
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const authHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     const counts = new Map<string, number>()
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl), { headers: authHeaders })
         if (res.ok) {
           const autos: { enabled: boolean }[] = await res.json()
           const enabled = autos.filter((a) => a.enabled).length
@@ -320,7 +322,9 @@ export function ProjectOverview({
     const serverUrl = localStorage.getItem("agentrune_server") || ""
     if (!canUseApi(serverUrl)) return
     setAutomationsLoading(true)
-    fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}`, serverUrl))
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const authHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}`, serverUrl), { headers: authHeaders })
       .then((r) => r.ok ? r.json() : [])
       .then((data) => setProjectAutomations(Array.isArray(data) ? data : []))
       .catch(() => setProjectAutomations([]))
@@ -419,10 +423,13 @@ export function ProjectOverview({
 
   const callCleanupAPI = async (text: string, aid: string): Promise<string> => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const authHeaders: Record<string, string> = { "content-type": "application/json" }
+    if (authToken) authHeaders["Authorization"] = `Bearer ${authToken}`
     try {
       const res = await fetch(buildApiUrl("/api/voice-cleanup", serverUrl), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({ text, agentId: aid }),
         signal: AbortSignal.timeout(15000),
       })
@@ -445,10 +452,13 @@ export function ProjectOverview({
     const isEdit = !!voiceEditOriginal.current
     if (isEdit) {
       const serverUrl = localStorage.getItem("agentrune_server") || ""
+      const authToken = localStorage.getItem("agentrune_cloud_token")
+      const editAuthHeaders: Record<string, string> = { "content-type": "application/json" }
+      if (authToken) editAuthHeaders["Authorization"] = `Bearer ${authToken}`
       try {
         const res = await fetch(buildApiUrl("/api/voice-edit", serverUrl), {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: editAuthHeaders,
           body: JSON.stringify({ original: voiceEditOriginal.current, instruction: raw }),
           signal: AbortSignal.timeout(30000),
         })
@@ -1170,9 +1180,12 @@ export function ProjectOverview({
                         <button
                           onClick={async () => {
                             const serverUrl = localStorage.getItem("agentrune_server") || ""
+                            const authToken = localStorage.getItem("agentrune_cloud_token")
+                            const patchHeaders: Record<string, string> = { "Content-Type": "application/json" }
+                            if (authToken) patchHeaders["Authorization"] = `Bearer ${authToken}`
                             try {
                               await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/${auto.id}`, serverUrl), {
-                                method: "PATCH", headers: { "Content-Type": "application/json" },
+                                method: "PATCH", headers: patchHeaders,
                                 body: JSON.stringify({ enabled: !auto.enabled }),
                               })
                               setProjectAutomations((prev) => prev.map((a) => a.id === auto.id ? { ...a, enabled: !a.enabled } : a))
@@ -1220,8 +1233,10 @@ export function ProjectOverview({
                         <button
                           onClick={async () => {
                             const serverUrl = localStorage.getItem("agentrune_server") || ""
+                            const authToken = localStorage.getItem("agentrune_cloud_token")
+                            const delHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
                             try {
-                              await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/${auto.id}`, serverUrl), { method: "DELETE" })
+                              await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/${auto.id}`, serverUrl), { method: "DELETE", headers: delHeaders })
                               setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                             } catch {}
                           }}
@@ -1550,10 +1565,13 @@ export function ProjectOverview({
                                 <button onClick={async () => {
                                   const crew = tmpl.crew!
                                   const svr = localStorage.getItem("agentrune_server") || ""
+                                  const authToken = localStorage.getItem("agentrune_cloud_token")
+                                  const fireHeaders: Record<string, string> = { "Content-Type": "application/json" }
+                                  if (authToken) fireHeaders["Authorization"] = `Bearer ${authToken}`
                                   try {
                                     await fetch(buildApiUrl(`/api/automations/${selectedProjectForSessions}/fire`, svr), {
                                       method: "POST",
-                                      headers: { "Content-Type": "application/json" },
+                                      headers: fireHeaders,
                                       body: JSON.stringify({ crew, name: tplName(tmpl) }),
                                     })
                                   } catch { /* ignore */ }

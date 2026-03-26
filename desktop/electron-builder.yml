@@ -12,7 +12,7 @@ extraResources:
   - from: ../cli/dist
     to: cli-dist
     filter: ["**/*"]
-  - from: ../cli/node_modules/node-pty
+  - from: ../node_modules/node-pty
     to: cli-dist/node_modules/node-pty
     filter: ["**/*"]
   - from: ../app/dist

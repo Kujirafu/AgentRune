@@ -175,6 +175,11 @@ function sanitizeResumeSessionId(value?: string | null): string {
   return value && SAFE_RESUME_ID_RE.test(value) ? value : ""
 }
 
+function getEffectiveCodexMode(settings: Pick<NormalizedAgentSettings, "bypass" | "codexMode">): CodexMode {
+  if (settings.bypass) return "danger-full-access"
+  return settings.codexMode
+}
+
 export function normalizeAgentSettings(rawSettings?: AgentSettingsInput): NormalizedAgentSettings {
   const settings = isRecord(rawSettings) ? rawSettings : {}
   return {
@@ -295,17 +300,15 @@ function buildClaudeArgs(settings: NormalizedAgentSettings, options: AgentLaunch
 }
 
 function buildCodexArgs(settings: NormalizedAgentSettings, options: AgentLaunchOptions): string[] {
-  const protocol = buildAgentProtocol(settings.locale, options.projectId)
+  const codexMode = getEffectiveCodexMode(settings)
   const args = ["codex", "--no-alt-screen"]
 
   if (settings.codexModel !== "default") args.push("--model", settings.codexModel)
   if (settings.codexReasoningEffort !== "default") {
     args.push("-c", `model_reasoning_effort="${settings.codexReasoningEffort}"`)
   }
-  if (settings.codexMode === "full-auto") args.push("--full-auto")
-  if (settings.codexMode === "danger-full-access") args.push("--dangerously-bypass-approvals-and-sandbox")
-
-  args.push(protocol.short)
+  if (codexMode === "full-auto") args.push("--full-auto")
+  if (codexMode === "danger-full-access") args.push("--dangerously-bypass-approvals-and-sandbox")
   return args
 }
 

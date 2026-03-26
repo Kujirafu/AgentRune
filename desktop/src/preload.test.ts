@@ -42,7 +42,7 @@ describe("preload", () => {
 
   it("close sends window:close", () => {
     api.close()
-    expect(sendMock).toHaveBeenCalledWith("window:close")
+    expect(sendMock).toHaveBeenCalledWith("window:close", { source: "electronAPI.close" })
   })
 
   it("setTheme sends theme:set with boolean", () => {

@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   platform: "electron" as const,
   minimize: () => ipcRenderer.send("window:minimize"),
   maximize: () => ipcRenderer.send("window:maximize"),
-  close: () => ipcRenderer.send("window:close"),
+  close: () => ipcRenderer.send("window:close", { source: "electronAPI.close" }),
   setTheme: (dark: boolean) => ipcRenderer.send("theme:set", dark),
   // Auto-update IPC
   onUpdateAvailable: (cb: (version: string) => void) => {

@@ -284,6 +284,11 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   requireMergeApproval: false,
 }
 
+export function getEffectiveCodexMode(settings: Pick<ProjectSettings, "bypass" | "codexMode">): CodexMode {
+  if (settings.bypass) return "danger-full-access"
+  return settings.codexMode
+}
+
 // AgentRune Protocol — injected into every agent's system/initial prompt.
 // FULL version for agents with system prompt support (Claude).
 // SHORT version for agents where it goes into visible user prompt (Codex, Gemini).
@@ -350,13 +355,14 @@ export const AGENTS: AgentDef[] = [
     transport: "pty",
     install: { bin: "codex", npm: "@openai/codex" },
     command: (s) => {
+      const codexMode = getEffectiveCodexMode(s)
       let cmd = "codex --no-alt-screen"
       if (s.codexModel !== "default") cmd += ` --model ${s.codexModel}`
       if (s.codexReasoningEffort !== "default") {
         cmd += ` -c 'model_reasoning_effort="${s.codexReasoningEffort}"'`
       }
-      if (s.codexMode === "full-auto") cmd += " --full-auto"
-      if (s.codexMode === "danger-full-access") {
+      if (codexMode === "full-auto") cmd += " --full-auto"
+      if (codexMode === "danger-full-access") {
         cmd += " --dangerously-bypass-approvals-and-sandbox"
       }
       cmd += ` "${buildProtocol(s.locale).short}"`

@@ -32,6 +32,10 @@ vi.mock("electron", () => ({
   nativeImage: mockNativeImage,
 }))
 
+vi.mock("./runtime-log.js", () => ({
+  logRuntime: vi.fn(),
+}))
+
 /* ── Tests ───────────────────────────────────────────────────── */
 
 import { setupTray } from "./tray.js"

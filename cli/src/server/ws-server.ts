@@ -49,6 +49,7 @@ import {
   isSessionPromptReady,
   type QueuedSessionTextMode,
 } from "./session-command-dispatch.js"
+import { MAX_SESSION_EVENT_HISTORY, mergeSessionRecentEvents, normalizeSessionRecentEvents } from "./session-event-buffer.js"
 import { log } from "../shared/logger.js"
 import { initCliTelemetry, captureCliEvent } from "./telemetry.js"
 import type { AgentEvent, TaskStore, PrdItem, PrdPriority, Project } from "../shared/types.js"
@@ -266,7 +267,7 @@ function getEventsDir(): string {
 
 function persistEvents(sessionId: string, events: AgentEvent[]) {
   try {
-    const capped = events.slice(-200)
+    const capped = normalizeSessionRecentEvents(events).slice(-MAX_SESSION_EVENT_HISTORY)
     // Cap diff data to avoid huge JSON (50KB per field)
     const MAX_DIFF = 50000
     const safeCapped = capped.map(e => {
@@ -794,6 +795,7 @@ export function createServer(portOverride?: number) {
     text: string
     mode: QueuedSessionTextMode
     source: string
+    userEvent?: AgentEvent
   }
   const sessionTextQueues = new Map<string, QueuedSessionTextInput[]>()
   const sessionTextQueueTimers = new Map<string, ReturnType<typeof setInterval>>()
@@ -803,6 +805,91 @@ export function createServer(portOverride?: number) {
     if (timer) clearInterval(timer)
     sessionTextQueueTimers.delete(sessionId)
     sessionTextQueues.delete(sessionId)
+  }
+
+  function buildQueuedUserMessageEvent(text: string): AgentEvent {
+    const normalized = text.trim()
+    const chainMatch = normalized.match(/\[AgentLore Skill Chain:\s*(\S+)/i)
+    const firstLine = normalized.replace(/\r?\n.*/s, "").trim()
+    const title = chainMatch
+      ? `/${chainMatch[1]}`
+      : (firstLine.length > 60 ? `${firstLine.slice(0, 60)}...` : firstLine)
+
+    return {
+      id: `usr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      type: "user_message",
+      status: "completed",
+      title: title || normalized.slice(0, 60) || "User message",
+      detail: chainMatch || normalized.includes("\n") || normalized.length > 60 ? normalized : undefined,
+    }
+  }
+
+  function persistInlineImages(
+    sessionId: string,
+    images: string[] | undefined,
+    source: string,
+  ): string[] {
+    if (!images || images.length === 0) return []
+
+    const session = sessions.get(sessionId)
+    const cwd = session?.project.cwd || homedir()
+    const uploadDir = join(cwd, ".agentrune", "uploads")
+    mkdirSync(uploadDir, { recursive: true })
+
+    const savedPaths: string[] = []
+    for (const imgData of images) {
+      try {
+        const base64Data = imgData.replace(/^data:image\/\w+;base64,/, "")
+        const ext = imgData.match(/^data:image\/(\w+)/)?.[1] || "png"
+        const filePath = join(uploadDir, `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`)
+        writeFileSync(filePath, Buffer.from(base64Data, "base64"))
+        savedPaths.push(filePath)
+        log.info(`[${source}] saved inline image: ${filePath}`)
+      } catch (err) {
+        log.error(`[${source}] failed to save inline image: ${err}`)
+      }
+    }
+    return savedPaths
+  }
+
+  function appendInlineImagePaths(input: string, savedPaths: string[]): string {
+    if (savedPaths.length === 0) return input
+
+    const hasTrailingR = input.endsWith("\r")
+    const hasTrailingN = input.endsWith("\n")
+    const baseText = (hasTrailingR || hasTrailingN) ? input.slice(0, -1) : input
+    const imagePaths = savedPaths.join(" ")
+    const withImages = baseText.trim()
+      ? `${baseText} [Attached images — please read these files:] ${imagePaths}`
+      : `[Attached images — please read these files:] ${imagePaths}`
+
+    if (hasTrailingR) return `${withImages}\r`
+    if (hasTrailingN) return `${withImages}\n`
+    return withImages
+  }
+
+  function prepareSessionInputText(
+    sessionId: string,
+    input: string,
+    images: string[] | undefined,
+    source: string,
+  ): string {
+    const savedPaths = persistInlineImages(sessionId, images, source)
+    return appendInlineImagePaths(input, savedPaths)
+  }
+
+  function persistSessionEvent(sessionId: string, event: AgentEvent, broadcast: boolean = false) {
+    const next = mergeSessionRecentEvents(sessionRecentEvents.get(sessionId), [event])
+    sessionRecentEvents.set(sessionId, next)
+    persistEvents(sessionId, next)
+
+    if (!broadcast) return
+    for (const [client, csid] of clientSessions) {
+      if (csid === sessionId && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: "event", sessionId, event }))
+      }
+    }
   }
 
   function dispatchQueuedSessionText(sessionId: string) {
@@ -831,7 +918,12 @@ export function createServer(portOverride?: number) {
 
       const payload = buildQueuedSessionTextPayload(current.agentId, current.text, current.mode)
       sessions.write(sessionId, payload)
-      setTimeout(() => sessions.write(sessionId, "\r"), getQueuedSessionSubmitDelayMs(current.text))
+      setTimeout(() => {
+        sessions.write(sessionId, "\r")
+        if (current.userEvent) {
+          persistSessionEvent(sessionId, current.userEvent, true)
+        }
+      }, getQueuedSessionSubmitDelayMs(current.text, current.agentId))
       log.info(`[session-text] Dispatched ${current.source} to ${sessionId.slice(0, 8)}`)
 
       queue.shift()
@@ -860,6 +952,7 @@ export function createServer(portOverride?: number) {
     text: string,
     mode: QueuedSessionTextMode,
     source: string,
+    userEvent?: AgentEvent,
   ) {
     if (!text) return
     if (isImmediateSessionInput(text)) {
@@ -877,6 +970,10 @@ export function createServer(portOverride?: number) {
     if (queue.some((entry) => entry.text === normalizedText && entry.mode === mode)) {
       log.info(`[session-text] Skipping duplicate queued input for ${sessionId.slice(0, 8)} (${source})`)
       return
+    }
+
+    if (userEvent) {
+      persistSessionEvent(sessionId, userEvent, true)
     }
 
     queue.push({ agentId, text: normalizedText, mode, source })
@@ -1182,6 +1279,8 @@ export function createServer(portOverride?: number) {
   // --- First-launch pairing code (6 digits, shown in CLI) ---
   let pairingCode: string | null = null
   let pairingCodeExpiry = 0
+  let globalPairFailures = 0 // Global cap — expires with the pairing code
+  const GLOBAL_PAIR_FAIL_LIMIT = 15 // Max total failed attempts before code is burned
 
   function generatePairingCode(): string {
     pairingCode = String(randomInt(100000, 1000000))
@@ -1265,8 +1364,6 @@ export function createServer(portOverride?: number) {
 
   // Rate limiter for pairing attempts (brute-force protection)
   const pairAttempts = new Map<string, { count: number; resetAt: number }>()
-  let globalPairFailures = 0 // Global cap — expires with the pairing code
-  const GLOBAL_PAIR_FAIL_LIMIT = 15 // Max total failed attempts before code is burned
 
   // Cleanup stale rate-limit entries every 5 minutes
   setInterval(() => {
@@ -1834,8 +1931,7 @@ export function createServer(portOverride?: number) {
     let sent = 0
     for (const [client, sid] of clientSessions) {
       if (client.readyState === WebSocket.OPEN) {
-        const list = sessionRecentEvents.get(sid)
-        if (list) { list.push(event); persistEvents(sid, list) }
+        persistSessionEventsBatch(sid, [event])
         client.send(JSON.stringify({ type: "event", sessionId: sid, event }))
         sent++
       }
@@ -3853,6 +3949,21 @@ export function createServer(portOverride?: number) {
   // Global sandbox monitors for regular sessions (not automations — those have their own)
   const sessionSandboxMonitors = new Map<string, SkillMonitor>()
 
+  function persistSessionEventsBatch(sessionId: string, events: AgentEvent[]): AgentEvent[] {
+    if (events.length === 0) return sessionRecentEvents.get(sessionId) || []
+    const next = mergeSessionRecentEvents(sessionRecentEvents.get(sessionId), events)
+    sessionRecentEvents.set(sessionId, next)
+    persistEvents(sessionId, next)
+    return next
+  }
+
+  function replaceSessionEvents(sessionId: string, events: AgentEvent[]): AgentEvent[] {
+    const next = normalizeSessionRecentEvents(events)
+    sessionRecentEvents.set(sessionId, next)
+    persistEvents(sessionId, next)
+    return next
+  }
+
   // Common callback factory for JSONL watchers: store events, send to clients, broadcast activity.
   // Defined at module scope so both "attach" and "request_events" handlers can use it.
   const makeWatcherCallback = (sid: string) => (events: AgentEvent[]) => {
@@ -3883,8 +3994,9 @@ export function createServer(portOverride?: number) {
     crashRestartCount.delete(sid)
     crashPushCooldown.delete(sid)
 
-    const list = sessionRecentEvents.get(sid)
-    if (list) {
+    persistSessionEventsBatch(sid, filtered)
+    const list: AgentEvent[] = []
+    if (false) {
       list.push(...filtered)
       // Remove token_usage from stored list — they take 60%+ space but add no value to events view
       const meaningful = list.filter(e => e.type !== "token_usage")
@@ -4063,8 +4175,9 @@ export function createServer(portOverride?: number) {
         case "attach": {
           const projectId = msg.projectId as string
           const initialCommand = (msg.initialCommand as string) || ""
+          const initialImages = msg.initialImages as string[] | undefined
           const project = projects.find((p) => p.id === projectId)
-          log.info(`[attach] projectId=${projectId} found=${!!project} agentId=${msg.agentId} sessionId=${msg.sessionId || "new"}${initialCommand ? ` initialCommand="${initialCommand.slice(0, 60)}..."` : ""}`)
+          log.info(`[attach] projectId=${projectId} found=${!!project} agentId=${msg.agentId} sessionId=${msg.sessionId || "new"}${initialCommand ? ` initialCommand="${initialCommand.slice(0, 60)}..."` : ""}${initialImages?.length ? ` initialImages=${initialImages.length}` : ""}`)
           if (!project) {
             ws.send(JSON.stringify({ type: "error", message: "Project not found" }))
             return
@@ -4554,8 +4667,7 @@ export function createServer(portOverride?: number) {
                     client.send(JSON.stringify({ type: "init_status", phase: "injecting" }))
                   }
                 }
-                const list = sessionRecentEvents.get(session.id)
-                if (list) list.push(initEvent)
+                persistSessionEventsBatch(session.id, [initEvent])
 
                 // Write text first, then send Enter separately (Claude Code TUI needs \r)
                 sessions.write(session.id, instruction)
@@ -4581,11 +4693,7 @@ export function createServer(portOverride?: number) {
                   } else {
                     stableCount++
                   }
-                  // Also check for prompt as a fast-path
-                  const stripped = sb2.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-                  const lines = stripped.split("\n").filter(l => l.trim())
-                  const lastLine = lines[lines.length - 1] || ""
-                  const backToPrompt = /[\u276f\u203a>$%#]\s*$/.test(lastLine)
+                  const backToPrompt = isSessionPromptReady(sb2, session.agentId)
                   // Done when: prompt detected OR output stabilized for STABLE_THRESHOLD polls
                   const isDone = backToPrompt || (stableCount >= STABLE_THRESHOLD && doneAttempts > 10)
                   if (!isDone && doneAttempts < 300) return // poll every 500ms, max 2.5min
@@ -4605,8 +4713,14 @@ export function createServer(portOverride?: number) {
                       client.send(JSON.stringify({ type: "init_status", phase: "done" }))
                     }
                   }
-                  const list2 = sessionRecentEvents.get(session.id)
-                  if (list2) {
+                  const updatedInitEvents = (sessionRecentEvents.get(session.id) || []).map((event) =>
+                    event.id === initEvent.id
+                      ? { ...event, status: "completed" as const, title: doneEvent.title }
+                      : event,
+                  )
+                  replaceSessionEvents(session.id, [...updatedInitEvents, doneEvent])
+                  const list2: AgentEvent[] = []
+                  if (false) {
                     // Update the in_progress init event to completed
                     const idx = list2.findIndex(e => e.id === initEvent.id)
                     if (idx !== -1) list2[idx] = { ...list2[idx], status: "completed", title: "初始化完成" }
@@ -4614,8 +4728,14 @@ export function createServer(portOverride?: number) {
                   }
                   log.info(`Init done for session ${session.id} (after ${doneAttempts * 500}ms)`)
 
-                  // Forward initial command if one was queued (from desktop "no session" flow)
-                  if (initialCommand) {
+                  // Forward initial command/images if one was queued (from desktop "no session" flow)
+                  if (initialCommand || (initialImages && initialImages.length > 0)) {
+                    const preparedInitialInput = prepareSessionInputText(
+                      session.id,
+                      initialCommand,
+                      initialImages,
+                      "attach:initial",
+                    )
                     // Extract short task title from command for session card display
                     const chainMatch = initialCommand.match(/\[AgentLore Skill Chain:\s*(\S+)/i)
                     const taskTitle = chainMatch
@@ -4630,17 +4750,37 @@ export function createServer(portOverride?: number) {
                         }
                       }
                     }
-                    queueSessionTextInput(session.id, session.agentId, initialCommand, "initial", "initialCommand")
-                    log.info(`[attach] Queued initialCommand for session ${session.id}: "${initialCommand.slice(0, 80)}"`)
+                    queueSessionTextInput(
+                      session.id,
+                      session.agentId,
+                      preparedInitialInput,
+                      "initial",
+                      "initialCommand",
+                      buildQueuedUserMessageEvent(preparedInitialInput),
+                    )
+                    log.info(`[attach] Queued initial input for session ${session.id}: "${preparedInitialInput.slice(0, 80)}"`)
                   }
                 }, 500)
               }, 200)
             } else {
               log.info(`[attach] Skipping rules/memory injection for resumed session ${session.id}`)
-              // For resumed sessions, still forward initialCommand if present
-              if (initialCommand) {
-                queueSessionTextInput(session.id, session.agentId, initialCommand, "initial", "initialCommand(resumed)")
-                log.info(`[attach] Queued initialCommand for resumed session ${session.id}: "${initialCommand.slice(0, 80)}"`)
+              // For resumed sessions, still forward initialCommand/initialImages if present
+              if (initialCommand || (initialImages && initialImages.length > 0)) {
+                const preparedInitialInput = prepareSessionInputText(
+                  session.id,
+                  initialCommand,
+                  initialImages,
+                  "attach:initial(resumed)",
+                )
+                queueSessionTextInput(
+                  session.id,
+                  session.agentId,
+                  preparedInitialInput,
+                  "initial",
+                  "initialCommand(resumed)",
+                  buildQueuedUserMessageEvent(preparedInitialInput),
+                )
+                log.info(`[attach] Queued initial input for resumed session ${session.id}: "${preparedInitialInput.slice(0, 80)}"`)
               }
             }
           }
@@ -4732,13 +4872,14 @@ export function createServer(portOverride?: number) {
             }
 
             // If images are attached, save to disk and append paths to input text
-            if (inlineImages && inlineImages.length > 0) {
-              const session = sessions.get(sessionId)
+            if (false) {
+              const inlineImagesSafe = inlineImages || []
+              const session = sessions.get(sessionId!)
               const cwd = session?.project.cwd || homedir()
               const uploadDir = join(cwd, ".agentrune", "uploads")
               mkdirSync(uploadDir, { recursive: true })
               const savedPaths: string[] = []
-              for (const imgData of inlineImages) {
+              for (const imgData of inlineImagesSafe) {
                 try {
                   const base64Data = imgData.replace(/^data:image\/\w+;base64,/, "")
                   const ext = imgData.match(/^data:image\/(\w+)/)?.[1] || "png"
@@ -4761,6 +4902,8 @@ export function createServer(portOverride?: number) {
                 inputStr = hasTrailingR ? withImages + "\r" : withImages
               }
             }
+
+            inputStr = prepareSessionInputText(sessionId, inputStr, inlineImages, "input")
 
             // Reset resume state when user types /resume (allows new resume decision)
             if (/\/resume\b/i.test(inputStr)) {
@@ -4799,6 +4942,7 @@ export function createServer(portOverride?: number) {
           const targetId = msg.sessionId as string
           let inputStr = msg.data as string
           const sessionImages = msg.images as string[] | undefined
+          const persistUserEvent = msg.persistUserEvent === true
           // Security: verify the requesting client owns this session (prevent cross-session injection)
           const clientOwnedSid = clientSessions.get(ws)
           const sessionExists = !!sessions.get(targetId)
@@ -4808,13 +4952,14 @@ export function createServer(portOverride?: number) {
           }
           if (targetId && sessionExists && (clientOwnedSid === targetId || isLocal)) {
             // Handle inline images (same logic as "input" handler)
-            if (sessionImages && sessionImages.length > 0) {
+            if (false) {
+              const sessionImagesSafe = sessionImages || []
               const targetSession = sessions.get(targetId)
               const cwd = targetSession?.project?.cwd || homedir()
               const uploadDir = join(cwd, ".agentrune", "uploads")
               mkdirSync(uploadDir, { recursive: true })
               const savedPaths: string[] = []
-              for (const imgData of sessionImages) {
+              for (const imgData of sessionImagesSafe) {
                 try {
                   const base64Data = imgData.replace(/^data:image\/\w+;base64,/, "")
                   const ext = imgData.match(/^data:image\/(\w+)/)?.[1] || "png"
@@ -4837,6 +4982,7 @@ export function createServer(portOverride?: number) {
                 inputStr = hasTrailingR ? withImages + "\r" : hasTrailingN ? withImages + "\n" : withImages
               }
             }
+            inputStr = prepareSessionInputText(targetId, inputStr, sessionImages, "session_input")
             if (inputStr) {
               if (/\/resume\b/i.test(inputStr)) {
                 resumeDecisionDone.delete(targetId)
@@ -4848,7 +4994,14 @@ export function createServer(portOverride?: number) {
                 const commandPrompt = getCommandPrompt(cmdMatch[1])
                 if (commandPrompt) {
                   const targetAgentId = sessions.get(targetId)?.agentId || "claude"
-                  queueSessionTextInput(targetId, targetAgentId, commandPrompt, "regular", `session_input:${cmdMatch[1]}`)
+                  queueSessionTextInput(
+                    targetId,
+                    targetAgentId,
+                    commandPrompt,
+                    "regular",
+                    `session_input:${cmdMatch[1]}`,
+                    persistUserEvent ? buildQueuedUserMessageEvent(inputStr) : undefined,
+                  )
                   log.info(`Batch: injected /${cmdMatch[1]} for session ${targetId}`)
                   break
                 }
@@ -4866,7 +5019,14 @@ export function createServer(portOverride?: number) {
                 }
               }
               const targetAgentId = sessions.get(targetId)?.agentId || "claude"
-              queueSessionTextInput(targetId, targetAgentId, inputStr, "regular", "session_input")
+              queueSessionTextInput(
+                targetId,
+                targetAgentId,
+                inputStr,
+                "regular",
+                "session_input",
+                persistUserEvent ? buildQueuedUserMessageEvent(inputStr) : undefined,
+              )
               log.info(`Batch input sent to session ${targetId.slice(0, 8)}`)
             }
           }
@@ -5018,16 +5178,7 @@ export function createServer(portOverride?: number) {
           // Cap field sizes to prevent memory/disk abuse
           if (storeEvt.title && typeof storeEvt.title === "string" && storeEvt.title.length > 500) storeEvt.title = storeEvt.title.slice(0, 500)
           if (storeEvt.detail && typeof storeEvt.detail === "string" && storeEvt.detail.length > 5000) storeEvt.detail = storeEvt.detail.slice(0, 5000)
-          const list = sessionRecentEvents.get(storeSid)
-          if (list) {
-            list.push(storeEvt)
-            if (list.length > 200) list.splice(0, list.length - 200)
-            persistEvents(storeSid, list)
-          } else {
-            const newList = [storeEvt]
-            sessionRecentEvents.set(storeSid, newList)
-            persistEvents(storeSid, newList)
-          }
+          persistSessionEventsBatch(storeSid, [storeEvt])
           break
         }
 
@@ -5136,12 +5287,7 @@ export function createServer(portOverride?: number) {
               }
 
               if (allEvents.length > 0) {
-                const list = sessionRecentEvents.get(sid)
-                if (list) {
-                  list.push(...allEvents)
-                  if (list.length > 200) list.splice(0, list.length - 200)
-                  persistEvents(sid, list)
-                }
+                persistSessionEventsBatch(sid, allEvents)
                 for (const event of allEvents) {
                   ws.send(JSON.stringify({ type: "event", sessionId: sid, event }))
                 }
@@ -5592,8 +5738,9 @@ export function createServer(portOverride?: number) {
         if (e.type === "command_run") return true
         // Skip file edit/create (JSONL watcher provides these with diff data)
         if (e.type === "file_edit" || e.type === "file_create") return false
-        // Skip parse engine's response text (JSONL watcher has full text)
-        if (e.type === "info" && /^Claude responded/i.test(e.title || "")) return false
+        // Keep parse-engine response fallback alive here.
+        // The app now semantically dedups equivalent watcher/parse events, and dropping
+        // this fallback too early was leaving some assistant output visible only in terminal.
         // Keep tool activity info (Reading, Bash, etc.) — desktop needs these
         // Only skip noisy repeated ones
         // Keep everything else (compaction, token usage, thinking, etc.)
@@ -5677,12 +5824,7 @@ export function createServer(portOverride?: number) {
           const resumeEvent = jsonlWatcher.buildResumeOptions?.()
           if (resumeEvent) {
             resumeDecisionDone.add(sessionId)
-            const list = sessionRecentEvents.get(sessionId)
-            if (list) {
-              list.push(resumeEvent)
-              if (list.length > 200) list.splice(0, list.length - 200)
-              persistEvents(sessionId, list)
-            }
+            persistSessionEventsBatch(sessionId, [resumeEvent])
             for (const [client, attachedSet] of clientAttachedSessions) {
               if (attachedSet.has(sessionId) && client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify({ type: "event", sessionId, event: resumeEvent }))
@@ -5730,12 +5872,7 @@ export function createServer(portOverride?: number) {
           engine.setResumeCursorOffset(finalOffset)
           const delayedEvents = engine.feed("")
           if (delayedEvents.length > 0) {
-            const list = sessionRecentEvents.get(sessionId)
-            if (list) {
-              list.push(...delayedEvents)
-              if (list.length > 200) list.splice(0, list.length - 200)
-              persistEvents(sessionId, list)
-            }
+            persistSessionEventsBatch(sessionId, delayedEvents)
             for (const [client, attachedSet] of clientAttachedSessions) {
               if (attachedSet.has(sessionId) && client.readyState === WebSocket.OPEN) {
                 for (const event of delayedEvents) {
@@ -5891,12 +6028,7 @@ export function createServer(portOverride?: number) {
 
     // Store events + persist to disk
     if (events.length > 0) {
-      const list = sessionRecentEvents.get(sessionId)
-      if (list) {
-        list.push(...events)
-        if (list.length > 200) list.splice(0, list.length - 200)
-        persistEvents(sessionId, list)
-      }
+      persistSessionEventsBatch(sessionId, events)
     }
 
     // Send to connected clients (use multi-session set for desktop support)

@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Terminal as XTerm } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
-import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, ProjectSettings, SmartAction } from "../types"
-import { AGENTS } from "../types"
+import { AGENTS, getEffectiveCodexMode } from "../types"
 import { getSettings, saveSettings, addRecentCommand, getRecentCommands, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../lib/storage"
 import { detectPromptActions, isIdle, isMobile } from "../lib/detect"
 import { commandSent } from "../lib/command-sent"
@@ -17,6 +16,7 @@ import { DetailPanel } from "./DetailPanel"
 import { FileBrowser } from "./FileBrowser"
 import { useLocale } from "../lib/i18n/index.js"
 import { buildSessionAttachMessage } from "../lib/session-attach"
+import { shouldUseXtermWebgl } from "../lib/terminal-renderer"
 
 interface TerminalViewProps {
   project: Project
@@ -88,7 +88,7 @@ export function TerminalView({
   const codexRecoverLaunchAtRef = useRef<Record<string, number>>({})
 
   const agent = AGENTS.find((a) => a.id === agentId)
-  const showDangerBadge = (agentId === "claude" && settings.bypass) || (agentId === "codex" && settings.codexMode === "danger-full-access")
+  const showDangerBadge = (agentId === "claude" && settings.bypass) || (agentId === "codex" && getEffectiveCodexMode(settings) === "danger-full-access")
 
   const launchAgentCommand = useCallback((force: boolean = false) => {
     if (!agent || !sessionId) return
@@ -336,18 +336,21 @@ export function TerminalView({
     term.loadAddon(fit)
     term.open(termRef.current)
 
-    // WebGL renderer ??significantly faster scrolling and rendering
-    let webglAddon: WebglAddon | null = null
-    try {
-      webglAddon = new WebglAddon()
-      webglAddon.onContextLoss(() => { try { webglAddon?.dispose() } catch {} })
-      term.loadAddon(webglAddon)
-    } catch {
-      webglAddon = null
-      // WebGL not available ??falls back to canvas 2D
+    let disposed = false
+    ;(term as any)._webglAddon = null
+    if (shouldUseXtermWebgl()) {
+      void import("@xterm/addon-webgl")
+        .then(({ WebglAddon }) => {
+          if (disposed) return
+          const webglAddon = new WebglAddon()
+          webglAddon.onContextLoss(() => { try { webglAddon.dispose() } catch {} })
+          term.loadAddon(webglAddon)
+          ;(term as any)._webglAddon = webglAddon
+        })
+        .catch(() => {
+          ;(term as any)._webglAddon = null
+        })
     }
-    // Store ref for safe cleanup
-    ;(term as any)._webglAddon = webglAddon
 
     requestAnimationFrame(() => {
       fit.fit()
@@ -436,6 +439,7 @@ export function TerminalView({
       el.addEventListener("touchend", onTouchEnd, { passive: true })
 
       return () => {
+        disposed = true
         stopMomentum()
         resizeObs.disconnect()
         el.removeEventListener("touchstart", onTouchStart)
@@ -448,6 +452,7 @@ export function TerminalView({
     }
 
     return () => {
+      disposed = true
       resizeObs.disconnect()
       try { (term as any)._webglAddon?.dispose() } catch {}
       try { term.dispose() } catch {}

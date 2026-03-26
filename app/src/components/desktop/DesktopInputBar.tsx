@@ -13,8 +13,10 @@ export interface DesktopInputBarProps {
   sessionOrdinals: Map<string, number>
   digests: Map<string, SessionDecisionDigest>
   targetSessionId: string | null
+  pendingNewSession?: boolean
   onChangeTarget: (sessionId: string | null) => void
   onNewSession: () => void
+  onArmFreshSession: () => void
   onCycleSession?: () => void
   theme: "light" | "dark"
   t: (key: string) => string
@@ -62,8 +64,8 @@ const XIcon = ({ size = 10 }: { size?: number }) => (
 )
 
 export function DesktopInputBar({
-  onSend, onRawSend, sessions, sessionOrdinals, digests, targetSessionId,
-  onChangeTarget, onNewSession, onCycleSession, theme, t, locale,
+  onSend, onRawSend, sessions, sessionOrdinals, digests, targetSessionId, pendingNewSession = false,
+  onChangeTarget, onNewSession, onArmFreshSession, onCycleSession, theme, t, locale,
   apiBase, projects, selectedProjectId,
 }: DesktopInputBarProps) {
   const dark = theme === "dark"
@@ -111,7 +113,9 @@ export function DesktopInputBar({
   }, [projects, selectedProjectId])
 
   // ── Target session ──
-  const targetLabel = targetSessionId
+  const targetLabel = pendingNewSession
+    ? (locale === "zh-TW" ? "新增" : "New")
+    : targetSessionId
     ? `#${sessionOrdinals.get(targetSessionId) ?? "?"}`
     : "Auto"
 
@@ -602,7 +606,7 @@ export function DesktopInputBar({
               fontSize: 12, fontWeight: 600, padding: "4px 10px",
               borderRadius: 6, border: `1px solid ${border}`,
               background: "transparent", cursor: "pointer",
-              color: targetSessionId ? "#37ACC0" : textSecondary,
+              color: (targetSessionId || pendingNewSession) ? "#37ACC0" : textSecondary,
               whiteSpace: "nowrap", fontFamily: "inherit",
             }}
           >
@@ -620,13 +624,25 @@ export function DesktopInputBar({
                 onClick={() => { onChangeTarget(null); setShowTargetMenu(false) }}
                 style={{
                   padding: "5px 10px", fontSize: 12, cursor: "pointer", borderRadius: 5,
-                  color: !targetSessionId ? "#37ACC0" : textSecondary,
-                  fontWeight: !targetSessionId ? 600 : 400,
+                  color: (!targetSessionId && !pendingNewSession) ? "#37ACC0" : textSecondary,
+                  fontWeight: (!targetSessionId && !pendingNewSession) ? 600 : 400,
                   background: "transparent", border: "none", width: "100%", textAlign: "left",
                   fontFamily: "inherit", display: "block",
                 }}
               >
                 Auto
+              </button>
+              <button
+                onClick={() => { onArmFreshSession(); setShowTargetMenu(false) }}
+                style={{
+                  padding: "5px 10px", fontSize: 12, cursor: "pointer", borderRadius: 5,
+                  color: pendingNewSession ? "#37ACC0" : textSecondary,
+                  fontWeight: pendingNewSession ? 600 : 400,
+                  background: "transparent", border: "none", width: "100%", textAlign: "left",
+                  fontFamily: "inherit", display: "block",
+                }}
+              >
+                {locale === "zh-TW" ? "新增" : "New"}
               </button>
               {sessions.map((s) => {
                 const d = digests.get(s.id)

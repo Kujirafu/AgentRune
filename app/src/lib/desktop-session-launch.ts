@@ -1,11 +1,22 @@
 import type { AppSession } from "../types"
+import type { SessionAttachMessage } from "./session-attach"
+import { buildSessionAttachMessage } from "./session-attach"
 import { getSessionOrderTimestamp } from "./session-ordinals"
+import { getAutoSaveKeysEnabled, getAutoSaveKeysPath, getSettings } from "./storage"
 
 export interface ResolveDesktopLaunchAgentOptions {
   targetSessionId: string | null
   expandedSessionIds?: Iterable<string>
   sessions: AppSession[]
   selectedProjectId: string | null
+}
+
+export interface BuildDesktopLaunchAttachOptions {
+  projectId: string
+  agentId: string
+  sessionId: string
+  locale: string
+  resumeAgentSessionId?: string
 }
 
 function sortNewestFirst(sessions: AppSession[]): AppSession[] {
@@ -33,4 +44,24 @@ export function resolveDesktopLaunchAgentId({
   if (expandedSession?.agentId) return expandedSession.agentId
 
   return projectSessions[0]?.agentId || sortNewestFirst(sessions)[0]?.agentId || "claude"
+}
+
+export function buildDesktopLaunchAttachMessage({
+  projectId,
+  agentId,
+  sessionId,
+  locale,
+  resumeAgentSessionId,
+}: BuildDesktopLaunchAttachOptions): SessionAttachMessage {
+  return buildSessionAttachMessage({
+    projectId,
+    agentId,
+    sessionId,
+    autoSaveKeys: getAutoSaveKeysEnabled(),
+    autoSaveKeysPath: getAutoSaveKeysPath(),
+    shouldResumeAgent: !!resumeAgentSessionId,
+    claudeSessionId: resumeAgentSessionId,
+    settings: getSettings(projectId),
+    locale,
+  })
 }

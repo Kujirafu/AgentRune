@@ -22,6 +22,7 @@ import {
   buildAutomationReport,
   getAutomationResultStatusLabel,
 } from "../lib/automation-report"
+import { normalizeAutomationList, normalizeAutomationSchedule } from "../lib/automation-normalize"
 import {
   buildProjectDecisionSummary,
   buildProjectSummarySignature,
@@ -357,10 +358,12 @@ export function UnifiedPanel({
   useEffect(() => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
     if (!canUseApi(serverUrl) || projects.length === 0) return
+    const countToken = localStorage.getItem("agentrune_cloud_token")
+    const countHeaders: Record<string, string> = countToken ? { Authorization: `Bearer ${countToken}` } : {}
     const counts = new Map<string, number>()
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl), { headers: countHeaders })
         if (res.ok) {
           const autos: { enabled: boolean }[] = await res.json()
           const enabled = autos.filter((a) => a.enabled).length
@@ -376,11 +379,13 @@ export function UnifiedPanel({
     const serverUrl = localStorage.getItem("agentrune_server") || ""
     if (!canUseApi(serverUrl)) return
     setAutomationsLoading(true)
-    // Fetch for all projects
+    // Fetch for all projects (with auth token for tunnel access)
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const authHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     Promise.all(projects.map(async (p) => {
       try {
-        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl))
-        if (res.ok) return { projectId: p.id, items: await res.json() }
+        const res = await fetch(buildApiUrl(`/api/automations/${p.id}`, serverUrl), { headers: authHeaders })
+        if (res.ok) return { projectId: p.id, items: normalizeAutomationList<typeof projectAutomations[number]>(await res.json()) }
       } catch {}
       return { projectId: p.id, items: [] }
     })).then((results) => {
@@ -514,9 +519,12 @@ export function UnifiedPanel({
 
     setSummaryLoading(prev => new Set(prev).add(projectId))
     try {
+      const summaryAuthToken = localStorage.getItem("agentrune_cloud_token")
+      const summaryHeaders: Record<string, string> = { "content-type": "application/json" }
+      if (summaryAuthToken) summaryHeaders["Authorization"] = `Bearer ${summaryAuthToken}`
       const res = await fetch(buildApiUrl("/api/project-summary", serverUrl), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: summaryHeaders,
         body: JSON.stringify({ projectId, locale: reportLocale, sessionIds }),
         signal: AbortSignal.timeout(15000),
       })
@@ -698,10 +706,13 @@ export function UnifiedPanel({
 
   const callCleanupAPI = async (text: string, aid: string): Promise<string> => {
     const serverUrl = localStorage.getItem("agentrune_server") || ""
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const cleanupHeaders: Record<string, string> = { "content-type": "application/json" }
+    if (authToken) cleanupHeaders["Authorization"] = `Bearer ${authToken}`
     try {
       const res = await fetch(buildApiUrl("/api/voice-cleanup", serverUrl), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: cleanupHeaders,
         body: JSON.stringify({ text, agentId: aid }),
         signal: AbortSignal.timeout(15000),
       })
@@ -724,10 +735,13 @@ export function UnifiedPanel({
     const isEdit = !!voiceEditOriginal.current
     if (isEdit) {
       const serverUrl = localStorage.getItem("agentrune_server") || ""
+      const editAuthToken = localStorage.getItem("agentrune_cloud_token")
+      const editHeaders: Record<string, string> = { "content-type": "application/json" }
+      if (editAuthToken) editHeaders["Authorization"] = `Bearer ${editAuthToken}`
       try {
         const res = await fetch(buildApiUrl("/api/voice-edit", serverUrl), {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: editHeaders,
           body: JSON.stringify({ original: voiceEditOriginal.current, instruction: raw }),
           signal: AbortSignal.timeout(30000),
         })
@@ -1654,9 +1668,10 @@ export function UnifiedPanel({
               )}
 
               {!automationsLoading && projectAutomations.map((auto) => {
-                const scheduleLabel = auto.schedule.type === "daily"
-                  ? `${auto.schedule.timeOfDay || "09:00"} ${(auto.schedule.weekdays || []).map((d: number) => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(" ")}`
-                  : `${t("automation.every")} ${auto.schedule.intervalMinutes || 30} ${t("automation.minutes")}`
+                const schedule = normalizeAutomationSchedule(auto.schedule)
+                const scheduleLabel = schedule.type === "daily"
+                  ? `${schedule.timeOfDay || "09:00"} ${(schedule.weekdays || []).map((d: number) => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(" ")}`
+                  : `${t("automation.every")} ${schedule.intervalMinutes || 30} ${t("automation.minutes")}`
                 // Countdown to next trigger
                 let countdown = ""
                 if (auto.enabled && auto.nextRunAt) {
@@ -1685,9 +1700,12 @@ export function UnifiedPanel({
                       <button
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
+                          const authToken = localStorage.getItem("agentrune_cloud_token")
+                          const patchHeaders: Record<string, string> = { "Content-Type": "application/json" }
+                          if (authToken) patchHeaders["Authorization"] = `Bearer ${authToken}`
                           try {
                             await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), {
-                              method: "PATCH", headers: { "Content-Type": "application/json" },
+                              method: "PATCH", headers: patchHeaders,
                               body: JSON.stringify({ enabled: !auto.enabled }),
                             })
                             setProjectAutomations((prev) => prev.map((a) => a.id === auto.id ? { ...a, enabled: !a.enabled } : a))
@@ -1728,8 +1746,10 @@ export function UnifiedPanel({
                       <button
                         onClick={async () => {
                           const serverUrl = localStorage.getItem("agentrune_server") || ""
+                          const authToken = localStorage.getItem("agentrune_cloud_token")
+                          const delHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
                           try {
-                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), { method: "DELETE" })
+                            await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}`, serverUrl), { method: "DELETE", headers: delHeaders })
                             setProjectAutomations((prev) => prev.filter((a) => a.id !== auto.id))
                           } catch {}
                         }}
@@ -1760,8 +1780,10 @@ export function UnifiedPanel({
                             // Fetch results if not cached
                             if (!resultsData.has(auto.id)) {
                               const serverUrl = localStorage.getItem("agentrune_server") || ""
+                              const authToken = localStorage.getItem("agentrune_cloud_token")
+                              const resHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
                               try {
-                                const res = await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}/results`, serverUrl))
+                                const res = await fetch(buildApiUrl(`/api/automations/${auto.projectId}/${auto.id}/results`, serverUrl), { headers: resHeaders })
                                 if (res.ok) {
                                   const data = await res.json()
                                   setResultsData(prev => new Map(prev).set(auto.id, data))
@@ -2559,10 +2581,13 @@ export function UnifiedPanel({
               onKeyDown={async (e) => {
                 if (e.key === "Enter" && projectRenameValue.trim()) {
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
+                  const authToken = localStorage.getItem("agentrune_cloud_token")
+                  const renameHeaders: Record<string, string> = { "Content-Type": "application/json" }
+                  if (authToken) renameHeaders["Authorization"] = `Bearer ${authToken}`
                   try {
                     await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
+                      headers: renameHeaders,
                       body: JSON.stringify({ name: projectRenameValue.trim() }),
                     })
                     // Update local projects array
@@ -2595,10 +2620,13 @@ export function UnifiedPanel({
                 onClick={async () => {
                   if (!projectRenameValue.trim()) return
                   const serverUrl = localStorage.getItem("agentrune_server") || ""
+                  const authToken = localStorage.getItem("agentrune_cloud_token")
+                  const renameHeaders: Record<string, string> = { "Content-Type": "application/json" }
+                  if (authToken) renameHeaders["Authorization"] = `Bearer ${authToken}`
                   try {
                     await fetch(buildApiUrl(`/api/projects/${renamingProjectId}`, serverUrl), {
                       method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
+                      headers: renameHeaders,
                       body: JSON.stringify({ name: projectRenameValue.trim() }),
                     })
                     const proj = projects.find(p => p.id === renamingProjectId)

@@ -136,4 +136,17 @@ describe("resolveDesktopSessionTarget", () => {
     })
     expect(sessionId).toBeNull()
   })
+
+  it("returns null when the desktop UI explicitly requested a brand-new session", () => {
+    const sessionId = resolveDesktopSessionTarget({
+      text: "start a new android release checklist",
+      forceNewSession: true,
+      targetSessionId: "s1",
+      expandedSessionIds: new Set(["s2"]),
+      sessions,
+      digests: makeDigests(),
+      sessionEvents: makeEvents(),
+    })
+    expect(sessionId).toBeNull()
+  })
 })

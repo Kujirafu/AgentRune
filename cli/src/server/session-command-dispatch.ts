@@ -2,6 +2,15 @@ const CSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g
 const OSC_RE = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g
 const CONTROL_RE = /[\x00-\x08\x0b-\x1f]/g
 const PROMPT_RE = /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/
+const CODEX_SEPARATOR_CLASS = "[\\u00B7\\u2022\\u2027\\u2219\\u25CF\\u30FB]"
+const CODEX_STATUS_RE = new RegExp(
+  `gpt-[\\w.-]+(?:\\s+\\w+)?\\s+${CODEX_SEPARATOR_CLASS}\\s+\\d+%\\s+left\\s+${CODEX_SEPARATOR_CLASS}`,
+  "i",
+)
+const CODEX_WORKING_RE = new RegExp(
+  `(?:^|${CODEX_SEPARATOR_CLASS})\\s*Working\\b|\\besc to interrupt\\b`,
+  "i",
+)
 
 export type QueuedSessionTextMode = "initial" | "regular"
 
@@ -12,12 +21,22 @@ function stripAnsiForPromptDetection(text: string): string {
     .replace(CONTROL_RE, "")
 }
 
-export function isSessionPromptReady(scrollback: string, _agentId: string): boolean {
+export function isSessionPromptReady(scrollback: string, agentId: string): boolean {
   const stripped = stripAnsiForPromptDetection(scrollback)
   const lines = stripped
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)
+  if (lines.length === 0) return false
+
+  if (agentId === "codex") {
+    const tail = lines.slice(-8).map((line) => line.trim())
+    const hasStatusLine = tail.some((line) => CODEX_STATUS_RE.test(line))
+    const hasWorkingLine = tail.some((line) => CODEX_WORKING_RE.test(line))
+    const lastLine = tail[tail.length - 1] || ""
+    return (hasStatusLine && !hasWorkingLine) || PROMPT_RE.test(lastLine)
+  }
+
   const lastLine = lines[lines.length - 1]?.trim() || ""
   if (!lastLine) return false
   return PROMPT_RE.test(lastLine)
@@ -40,9 +59,10 @@ export function isImmediateSessionInput(input: string): boolean {
 export function buildQueuedSessionTextPayload(
   agentId: string,
   text: string,
-  mode: QueuedSessionTextMode,
+  _mode: QueuedSessionTextMode,
 ): string {
-  if (mode === "initial" && agentId === "claude" && text.includes("\n")) {
+  const supportsBracketPaste = agentId === "claude" || agentId === "codex"
+  if (supportsBracketPaste && text.includes("\n")) {
     return `\x1b[200~${text}\x1b[201~`
   }
   return text
@@ -50,6 +70,10 @@ export function buildQueuedSessionTextPayload(
 
 export function getQueuedSessionSubmitDelayMs(
   text: string,
+  agentId?: string,
 ): number {
+  if (agentId === "codex" && text.includes("\n")) {
+    return Math.max(5000, Math.min(12000, 3000 + Math.ceil(text.length / 2)))
+  }
   return text.trimStart().startsWith("/") ? 300 : 500
 }

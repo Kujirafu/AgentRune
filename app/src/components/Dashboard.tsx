@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, Suspense } from "react"
+import React, { useState, useCallback, useEffect, Suspense } from "react"
 import type { Project, AppSession, AgentEvent } from "../types"
 import { AGENTS } from "../types"
 import { DesktopOnboarding } from "./desktop/DesktopOnboarding"
@@ -90,7 +90,6 @@ export function Dashboard({
     results?: AutomationResult[]
     selectedResultId?: string
   } | null>(null)
-  const [expandSessionId, setExpandSessionId] = useState<string | null>(null)
   const [showChainBuilder, setShowChainBuilder] = useState(false)
   const [chainBuilderSlug, setChainBuilderSlug] = useState<string | undefined>(undefined)
   const [showOnboarding, setShowOnboarding] = useState(() => {
@@ -98,18 +97,6 @@ export function Dashboard({
     const isDesktop = !!(window as any).electronAPI
     return isDesktop && !localStorage.getItem("desktop_onboarding_seen")
   })
-
-  // Auto-expand new sessions
-  const prevSessionIdsRef = useRef(new Set(activeSessions.map(s => s.id)))
-  useEffect(() => {
-    const prevIds = prevSessionIdsRef.current
-    const newSession = activeSessions.find(s => !prevIds.has(s.id) && s.status !== "recoverable")
-    prevSessionIdsRef.current = new Set(activeSessions.map(s => s.id))
-    if (newSession) {
-      console.log("[Dashboard] New session detected, expanding:", newSession.id)
-      setExpandSessionId(newSession.id)
-    }
-  }, [activeSessions])
 
   // Ensure selected project is valid
   const selectedProject = selectedProjectId
@@ -187,7 +174,6 @@ export function Dashboard({
         onNewSession={() => setShowQuickLaunch(true)}
         onLaunch={onLaunch}
         onOpenBuilder={() => { setChainBuilderSlug(undefined); setShowChainBuilder(true) }}
-        expandSessionId={expandSessionId}
         onOpenChainEditor={(slug: string) => { setChainBuilderSlug(slug); setShowChainBuilder(true) }}
         pendingPhaseGate={pendingPhaseGate}
         pendingReauthQueue={pendingReauthQueue}
@@ -287,7 +273,7 @@ export function Dashboard({
         selectedProjectId={selectedProjectId}
         theme={theme}
         t={t}
-        onLaunch={(pid, aid) => { onLaunch(pid, aid); setShowQuickLaunch(false) }}
+        onLaunch={(pid, aid, resumeSessionId) => { onLaunch(pid, aid, resumeSessionId); setShowQuickLaunch(false) }}
         onClose={() => setShowQuickLaunch(false)}
       />
 

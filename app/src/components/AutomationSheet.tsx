@@ -14,6 +14,7 @@ import {
   buildAutomationReport,
   getAutomationResultStatusLabel,
 } from "../lib/automation-report"
+import { normalizeAutomationConfigs, normalizeAutomationSchedule } from "../lib/automation-normalize"
 import { buildApiUrl, canUseApi } from "../lib/storage"
 import type { ReactNode } from "react"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
@@ -450,9 +451,11 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const fetchAutomations = useCallback(async () => {
     if (!projectId || !canUseApi(serverUrl)) return
     setLoading(true)
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const fetchHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     try {
-      const res = await fetch(apiUrl(`/api/automations/${projectId}`))
-      if (res.ok) setAutomations(await res.json())
+      const res = await fetch(apiUrl(`/api/automations/${projectId}`), { headers: fetchHeaders })
+      if (res.ok) setAutomations(normalizeAutomationConfigs(await res.json()))
     } catch { /* ignore */ }
     setLoading(false)
   }, [apiUrl, projectId, serverUrl])
@@ -461,15 +464,16 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     if (open) {
       fetchAutomations()
       if (initialEdit) {
+        const initialSchedule = normalizeAutomationSchedule(initialEdit.schedule)
         setEditId(initialEdit.id)
         setFormName(initialEdit.name)
         setFormPrompt(initialEdit.prompt || "")
         setFormSkill(initialEdit.skill || "")
         setFormTemplateId(initialEdit.templateId || null)
-        setFormScheduleType((initialEdit.schedule.type as "daily" | "interval") || "daily")
-        setFormTimeOfDay(initialEdit.schedule.timeOfDay || "09:00")
-        setFormWeekdays(initialEdit.schedule.weekdays || [1, 2, 3, 4, 5])
-        setFormInterval(String(initialEdit.schedule.intervalMinutes || 30))
+        setFormScheduleType(initialSchedule.type)
+        setFormTimeOfDay(initialSchedule.timeOfDay || "09:00")
+        setFormWeekdays(initialSchedule.weekdays || [1, 2, 3, 4, 5])
+        setFormInterval(String(initialSchedule.intervalMinutes || 30))
         setFormRunMode((initialEdit.runMode as "local" | "worktree") || "local")
         setFormAgentId(initialEdit.agentId || "claude")
         setFormModel((initialEdit as any).model || "")
@@ -520,9 +524,12 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   // --- Handlers ---
 
   const handleToggle = async (id: string, enabled: boolean) => {
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const toggleHeaders: Record<string, string> = { "Content-Type": "application/json" }
+    if (authToken) toggleHeaders["Authorization"] = `Bearer ${authToken}`
     try {
       await fetch(apiUrl(`/api/automations/${projectId}/${id}`), {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
+        method: "PATCH", headers: toggleHeaders,
         body: JSON.stringify({ enabled }),
       })
       setAutomations((prev) => prev.map((a) => a.id === id ? { ...a, enabled } : a))
@@ -533,8 +540,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   const handleTrigger = async (id: string) => {
     setTriggeringId(id)
     trackAutomationTrigger(id, "manual")
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const triggerHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     try {
-      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/trigger`), { method: "POST" })
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/trigger`), { method: "POST", headers: triggerHeaders })
       if (res.ok) {
         showToast(t("automation.triggered") || "Triggered")
       } else {
@@ -548,8 +557,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   // Scan prompt for sandbox conflicts
   const handleScan = async (autoId: string, level: string) => {
     setScanning(true)
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const scanHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     try {
-      const res = await fetch(apiUrl(`/api/automations/${projectId}/${autoId}/scan-conflicts?level=${level}`))
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${autoId}/scan-conflicts?level=${level}`), { headers: scanHeaders })
       if (res.ok) {
         const data = await res.json()
         setScanResult(data)
@@ -559,8 +570,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
   }
 
   const handleDelete = async (id: string) => {
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const deleteHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     try {
-      await fetch(apiUrl(`/api/automations/${projectId}/${id}`), { method: "DELETE" })
+      await fetch(apiUrl(`/api/automations/${projectId}/${id}`), { method: "DELETE", headers: deleteHeaders })
       setAutomations((prev) => prev.filter((a) => a.id !== id))
       if (expandedId === id) setExpandedId(null)
     } catch { /* ignore */ }
@@ -570,8 +583,10 @@ export function AutomationSheet({ open, projectId, serverUrl, onClose, initialEd
     if (expandedId === id) { setExpandedId(null); return }
     setExpandedId(id)
     setLoadingResults(true)
+    const authToken = localStorage.getItem("agentrune_cloud_token")
+    const resultHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {}
     try {
-      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/results`))
+      const res = await fetch(apiUrl(`/api/automations/${projectId}/${id}/results`), { headers: resultHeaders })
       if (res.ok) setResults(await res.json())
       else setResults([])
     } catch { setResults([]) }

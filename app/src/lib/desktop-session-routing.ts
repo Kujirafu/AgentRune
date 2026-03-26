@@ -72,6 +72,7 @@ function scoreTaskTitleMatch(text: string, session: AppSession): number {
 
 export interface ResolveDesktopSessionTargetOptions {
   text: string
+  forceNewSession?: boolean
   targetSessionId: string | null
   expandedSessionIds?: Iterable<string>
   sessions: AppSession[]
@@ -81,12 +82,14 @@ export interface ResolveDesktopSessionTargetOptions {
 
 export function resolveDesktopSessionTarget({
   text,
+  forceNewSession = false,
   targetSessionId,
   expandedSessionIds,
   sessions,
   digests,
   sessionEvents,
 }: ResolveDesktopSessionTargetOptions): string | null {
+  if (forceNewSession) return null
   if (targetSessionId) return targetSessionId
 
   const expandedSet = new Set(expandedSessionIds || [])

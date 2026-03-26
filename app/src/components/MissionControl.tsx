@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { createPortal } from "react-dom"
 import type { Project, ProjectSettings, AppSession } from "../types"
 import type { AgentEvent } from "../types"
-import { AGENTS } from "../types"
+import { AGENTS, getEffectiveCodexMode } from "../types"
 import { getSettings, saveSettings, addRecentCommand, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath, buildApiUrl } from "../lib/storage"
 import { EventCard } from "./EventCard"
 import { ProgressCard } from "./ProgressCard"
@@ -472,7 +472,7 @@ export function MissionControl({
   }
 
   const agent = AGENTS.find((a) => a.id === agentId)
-  const showDangerBadge = (agentId === "claude" && settings.bypass) || (agentId === "codex" && settings.codexMode === "danger-full-access")
+  const showDangerBadge = (agentId === "claude" && settings.bypass) || (agentId === "codex" && getEffectiveCodexMode(settings) === "danger-full-access")
 
   // Reset events when switching sessions
   useEffect(() => {

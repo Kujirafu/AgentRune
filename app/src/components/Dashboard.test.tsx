@@ -102,4 +102,47 @@ describe("Dashboard — Command Center layout", () => {
     const dot = container.querySelector('[style*="background:"]')
     expect(dot).toBeTruthy()
   })
+
+  it("does not auto-expand unrelated new sessions that appear from outside the desktop flow", async () => {
+    const view = renderDashboard()
+    await screen.findByText("AgentRune")
+    expect(screen.queryByTitle("Events")).not.toBeInTheDocument()
+
+    const externalSession: AppSession = {
+      id: "s3",
+      projectId: "p1",
+      agentId: "codex",
+      createdAt: Date.now(),
+    }
+
+    view.rerender(
+      <LocaleProvider>
+        <Dashboard
+          projects={mockProjects}
+          activeSessions={[...mockSessions, externalSession]}
+          sessionEvents={makeEvents()}
+          send={vi.fn(() => true)}
+          on={vi.fn(() => () => {})}
+          sessionToken="test-token"
+          wsConnected={true}
+          apiBase=""
+          theme="dark"
+          toggleTheme={vi.fn()}
+          onSelectSession={vi.fn()}
+          onNewSession={vi.fn()}
+          onLaunch={vi.fn()}
+          onOpenBuilder={vi.fn()}
+          pendingPhaseGate={null}
+          pendingReauthQueue={[]}
+          onPhaseGateRespond={vi.fn()}
+          onReauth={vi.fn()}
+          onKillSession={vi.fn(async () => {})}
+          onNewProject={vi.fn(async () => {})}
+          onDeleteProject={vi.fn(async () => {})}
+        />
+      </LocaleProvider>,
+    )
+
+    expect(screen.queryByTitle("Events")).not.toBeInTheDocument()
+  })
 })

@@ -1,12 +1,14 @@
 import React, { useState } from "react"
 import type { AutomationConfig, AutomationResult, AutomationSchedule } from "../../../data/automation-types"
 import type { Project } from "../../../types"
+import { normalizeAutomationSchedule } from "../../../lib/automation-normalize"
 import { ConfirmDialog } from "../ConfirmDialog"
 
 function formatSchedule(s: AutomationSchedule): string {
-  if (s.type === "interval" && s.intervalMinutes) return `Every ${s.intervalMinutes}m`
-  if (s.type === "daily" && s.timeOfDay) return `Daily ${s.timeOfDay}`
-  return s.type
+  const schedule = normalizeAutomationSchedule(s)
+  if (schedule.type === "interval" && schedule.intervalMinutes) return `Every ${schedule.intervalMinutes}m`
+  if (schedule.type === "daily" && schedule.timeOfDay) return `Daily ${schedule.timeOfDay}`
+  return schedule.type
 }
 
 interface SchedulesToolProps {

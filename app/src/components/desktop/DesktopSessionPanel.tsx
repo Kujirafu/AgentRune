@@ -2,8 +2,11 @@ import React, { useState, useMemo, useRef, useEffect, Suspense } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AppSession, AgentEvent } from "../../types"
+import { isNoisyFallbackResponseEvent } from "../../lib/event-noise"
 import type { SessionDecisionDigest } from "../../lib/session-summary"
-import { getSettings } from "../../lib/storage"
+import { buildSessionAttachMessage } from "../../lib/session-attach"
+import { mergeAgentEventLists } from "../../lib/session-events"
+import { getSettings, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../../lib/storage"
 import { lazyRetry } from "../../lib/lazy-retry"
 
 const DesktopTerminalPanel = lazyRetry(() =>
@@ -227,34 +230,39 @@ export function DesktopSessionPanel({
   const textSecondary = dark ? "#94a3b8" : "#64748b"
   const borderClr = dark ? "rgba(148,163,184,0.08)" : "rgba(148,163,184,0.12)"
 
-  // Request events + auto-resume recoverable sessions on mount
+  // Request events for every expanded panel, but only auto-attach recoverable sessions.
+  // Active sessions are already running; re-attaching them here can steal focus and
+  // replay duplicate events from unrelated sessions in the same project.
   useEffect(() => {
+    const attach = () => send(buildSessionAttachMessage({
+      projectId: session.projectId,
+      agentId: session.agentId,
+      sessionId: session.id,
+      autoSaveKeys: getAutoSaveKeysEnabled(),
+      autoSaveKeysPath: getAutoSaveKeysPath(),
+      shouldResumeAgent: session.status === "recoverable",
+      settings: getSettings(session.projectId),
+      locale,
+    }))
+
     send({ type: "request_events", sessionId: session.id, agentId: session.agentId })
     // Auto-resume recoverable sessions — don't require user to click terminal tab
-    if (session.status === "recoverable") {
-      send({
-        type: "attach",
-        projectId: session.projectId,
-        agentId: session.agentId,
-        sessionId: session.id,
-        isAgentResume: true,
-        settings: getSettings(session.projectId),
-      })
-    }
+    if (session.status === "recoverable") attach()
     const unsub = on("__ws_open__", () => {
       send({ type: "request_events", sessionId: session.id, agentId: session.agentId })
+      if (session.status === "recoverable") attach()
     })
     return unsub
-  }, [send, on, session.id])
+  }, [send, on, session.id, session.agentId, session.projectId, session.status, locale])
 
   // Filter out noise events + dedup decision_requests + hide waiting decisions (shown in banner)
   const visibleEvents = useMemo(() => {
     const seen = new Set<string>()
-    return events
+    const filtered = events
       .filter(e => {
         if (e.type === "token_usage") return false
+        if (isNoisyFallbackResponseEvent(e)) return false
         // Filter ParseEngine's "X responded" — raw PTY garbage, JSONL watcher has clean version
-        if (e.type === "info" && /^(?:Claude|Codex|Cursor|Gemini|Aider) responded/i.test(e.title || "")) return false
         // Filter Claude CLI status spinners (not agent content)
         if (e.type === "info" && /^(?:Thinking|Beboppin|Ionizing|Saut[ée]ing|Crunching|Orchestrating|Brewing|Moonwalking|plan mode|bypass permissions)/i.test(e.title || "")) return false
         if (e.type === "response" && (e.detail || e.title)) return true
@@ -267,7 +275,7 @@ export function DesktopSessionPanel({
         }
         return true
       })
-      .sort((a, b) => a.timestamp - b.timestamp)
+    return mergeAgentEventLists([], filtered).sort((a, b) => a.timestamp - b.timestamp)
   }, [events])
 
   // Auto-scroll to bottom when new events arrive

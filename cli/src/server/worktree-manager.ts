@@ -1,7 +1,7 @@
 // server/worktree-manager.ts
 // Manages git worktrees for session isolation
 import { execFileSync } from "node:child_process"
-import { copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { log } from "../shared/logger.js"
 
@@ -153,6 +153,41 @@ export class WorktreeManager {
         log.dim(`[Worktree] Synced project memory -> ${worktreeDir}`)
       } catch (error) {
         log.warn(`[Worktree] Failed to sync project memory: ${error instanceof Error ? error.message : "unknown"}`)
+      }
+    }
+
+    // Sync agent config directories to worktree
+    // These contain MCP settings, permissions, project-level config that agents need
+    const INHERIT_DIRS = [".claude", ".codex", ".gemini", ".cursor"]
+    const INHERIT_FILES = [".mcp.json", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "CODEX.md"]
+    for (const dir of INHERIT_DIRS) {
+      const src = join(this.projectCwd, dir)
+      const dst = join(worktreeDir, dir)
+      if (existsSync(src) && !existsSync(dst)) {
+        try {
+          mkdirSync(dst, { recursive: true })
+          for (const f of readdirSync(src)) {
+            const srcFile = join(src, f)
+            if (statSync(srcFile).isFile()) {
+              copyFileSync(srcFile, join(dst, f))
+            }
+          }
+          log.dim(`[Worktree] Synced ${dir}/ -> ${worktreeDir}`)
+        } catch (error) {
+          log.warn(`[Worktree] Failed to sync ${dir}/: ${error instanceof Error ? error.message : "unknown"}`)
+        }
+      }
+    }
+    for (const file of INHERIT_FILES) {
+      const src = join(this.projectCwd, file)
+      const dst = join(worktreeDir, file)
+      if (existsSync(src) && !existsSync(dst)) {
+        try {
+          copyFileSync(src, dst)
+          log.dim(`[Worktree] Synced ${file} -> ${worktreeDir}`)
+        } catch (error) {
+          log.warn(`[Worktree] Failed to sync ${file}: ${error instanceof Error ? error.message : "unknown"}`)
+        }
       }
     }
 

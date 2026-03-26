@@ -52,6 +52,16 @@ describe("agent-launch", () => {
     expect(launch.command).not.toContain("rm -rf")
   })
 
+  it("treats global bypass as danger-full-access for Codex", () => {
+    const launch = buildAgentLaunch("codex", {
+      bypass: true,
+      codexMode: "default",
+    })
+
+    expect(launch.args).toContain("--dangerously-bypass-approvals-and-sandbox")
+    expect(launch.args).not.toContain("--full-auto")
+  })
+
   it("accepts safe custom Codex model ids such as gpt-5.4", () => {
     const launch = buildAgentLaunch("codex", {
       codexModel: "gpt-5.4",
@@ -78,17 +88,14 @@ describe("agent-launch", () => {
     ])
   })
 
-  it("tells fresh sessions to use the memory index and read only relevant sections", () => {
+  it("does not send the memory protocol as Codex's first user prompt", () => {
     const launch = buildAgentLaunch("codex", {
       locale: "zh-TW",
     }, {
       projectId: "demo",
     })
 
-    const protocolArg = launch.args.at(-1) || ""
-    expect(protocolArg).toContain("project memory index")
-    expect(protocolArg).toContain("Do not read every section by default")
-    expect(protocolArg).toContain("Search the structured memory sections")
+    expect(launch.args).toEqual(["codex", "--no-alt-screen"])
   })
 
   it("quotes shell arguments safely for POSIX shells", () => {

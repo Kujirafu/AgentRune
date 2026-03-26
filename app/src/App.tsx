@@ -22,8 +22,10 @@ import { Browser } from "@capacitor/browser"
 import { useLocale } from "./lib/i18n/index.js"
 import { buildSessionCompletionNotice } from "./lib/session-completion"
 import { getSessionActivityNotificationId, getSessionActivityNotificationKey } from "./lib/session-activity"
-import { buildSessionActivityEventId, mergeAgentEventLists, upsertAgentEvent } from "./lib/session-events"
+import { buildSessionActivityEventId, MAX_SESSION_EVENT_HISTORY, mergeAgentEventLists, upsertAgentEvent } from "./lib/session-events"
 import { buildSessionOrdinalMap, extractSessionTimestamp } from "./lib/session-ordinals"
+import { buildDesktopLaunchAttachMessage } from "./lib/desktop-session-launch"
+import { isGenericAgentResponseTitle, isNoisyFallbackResponseEvent } from "./lib/event-noise"
 import { isSummaryNoise } from "./lib/session-summary"
 // framer-motion deferred to lazy-loaded components only (saves ~133 KB initial load)
 import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch, trackOnboardingSkip, trackOnboardingComplete, trackConnectStep, trackConnectEscape } from "./lib/analytics"
@@ -1440,7 +1442,7 @@ export function App() {
   const activeSessionsRef = useRef<AppSession[]>([])
   const sessionEventsMapRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const completionStatusRef = useRef<Map<string, AppSession["lastAgentStatus"]>>(new Map())
-  const completionNoticeIdsRef = useRef<Set<string>>(new Set())
+  const completionNoticeIdsRef = useRef<Map<string, number>>(new Map())
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
   )
@@ -1474,9 +1476,10 @@ export function App() {
       locale: summaryLocale,
       sessionIdx,
     })
-    if (!notice || completionNoticeIdsRef.current.has(notice.id)) return
+    const lastNoticeUpdatedAt = completionNoticeIdsRef.current.get(sessionId) || 0
+    if (!notice || notice.updatedAt <= lastNoticeUpdatedAt) return
 
-    completionNoticeIdsRef.current.add(notice.id)
+    completionNoticeIdsRef.current.set(sessionId, notice.updatedAt)
     window.dispatchEvent(new CustomEvent("agentrune_session_completed", { detail: notice }))
 
     if (isCapacitor() && getNotificationsEnabled() && document.visibilityState !== "visible") {
@@ -1556,7 +1559,9 @@ export function App() {
 
   const loadSessionsSnapshot = useCallback((base: string) => {
     const query = locale ? `?locale=${encodeURIComponent(locale)}` : ""
-    fetch(`${base}/api/sessions${query}`)
+    const token = wsTokenRef.current
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+    fetch(`${base}/api/sessions${query}`, { headers })
       .then((r) => r.json())
       .then((data: SessionSnapshot[] | unknown) => {
         if (!Array.isArray(data)) return
@@ -1612,8 +1617,10 @@ export function App() {
     const base = getApiBase() || serverUrl
     // base="" is valid for same-origin browser access (relative URL)
     if (isCapacitor() && !base) return
+    const token = wsTokenRef.current
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
     console.log(`[App] Loading projects: base=${base} wsConnected=${wsConnected} isAuthed=${isAuthed}`)
-    fetch(`${base}/api/projects`)
+    fetch(`${base}/api/projects`, { headers })
       .then((r) => r.ok ? r.json() : Promise.reject(r.status))
       .then((data) => {
         if (!Array.isArray(data)) return
@@ -1637,7 +1644,9 @@ export function App() {
     return on("__ws_open__", () => {
       const base = getApiBase()
       if (!base && isCapacitor()) return
-      fetch(`${base}/api/projects`)
+      const token = wsTokenRef.current
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+      fetch(`${base}/api/projects`, { headers })
         .then((r) => r.ok ? r.json() : Promise.reject(r.status))
         .then((data) => {
           if (!Array.isArray(data)) return
@@ -1719,8 +1728,57 @@ export function App() {
     })
   }, [on])
 
+  // Cloud mode auto-connect: when we have a phone token but no server URL,
+  // fetch the tunnel URL from AgentLore and set it up automatically.
+  // If the phone token is expired or no device is ONLINE, reset to ConnectScreen.
+  useEffect(() => {
+    if (!isCapacitor() || !isCloudMode || getServerUrl()) return
+    let cancelled = false
+    refreshTunnelUrl().then(async (device) => {
+      if (cancelled) return
+      if (!device?.url) {
+        // Phone token expired or no ONLINE device — reset to ConnectScreen
+        localStorage.removeItem("agentrune_phone_token")
+        localStorage.removeItem("agentrune_cloud_token")
+        setIsCloudMode(false)
+        setCloudSessionToken(null)
+        setServerReady(false)
+        return
+      }
+      localStorage.setItem("agentrune_server", device.url)
+      setServerUrl(device.url)
+      let csToken = device.sessionToken
+      if (!csToken) {
+        const phoneToken = localStorage.getItem("agentrune_phone_token")
+        if (phoneToken) {
+          try {
+            const authRes = await fetch(`${device.url}/api/auth/cloud`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ phoneToken }),
+            })
+            if (authRes.ok) {
+              const authData = await authRes.json()
+              csToken = authData.sessionToken
+            }
+          } catch {}
+        }
+      }
+      if (csToken) {
+        localStorage.setItem("agentrune_cloud_token", csToken)
+        setCloudSessionToken(csToken)
+      }
+      recheckAuth()
+    })
+    return () => { cancelled = true }
+  }, [isCloudMode, recheckAuth])
+
   // Connect WS after auth — use cloudSessionToken (from Quick Connect) or local sessionToken
   const wsToken = cloudSessionToken || sessionToken
+  // Keep a ref so fetch calls inside effects/callbacks can read the current token
+  // without adding wsToken to their dependency arrays.
+  const wsTokenRef = useRef(wsToken)
+  wsTokenRef.current = wsToken
   useEffect(() => {
     if (!isAuthed || !wsToken) return
     // In Capacitor, don't attempt WS if no server URL is configured (fresh install)
@@ -2118,7 +2176,7 @@ export function App() {
         agentStatus,
       })
       if (!sid) return
-      if (!title || isSummaryNoise(title)) return
+      if (!title || isSummaryNoise(title) || isGenericAgentResponseTitle(title)) return
       if (!eventId) return
       const now = Date.now()
       const normalizedAgentStatus = normalizeSessionAgentStatus(agentStatus)
@@ -2145,7 +2203,7 @@ export function App() {
               : "in_progress",
           title: title || "",
         }
-        const updated = upsertAgentEvent(events, event).slice(-200)
+        const updated = upsertAgentEvent(events, event).slice(-MAX_SESSION_EVENT_HISTORY)
         next.set(sid, updated)
         return next
       })
@@ -2159,14 +2217,14 @@ export function App() {
       const sid = (msg.sessionId as string) || ""
       if (!sid) return
       if (event.type === "token_usage") return // skip noise
+      if (isNoisyFallbackResponseEvent(event)) return
       // Skip ParseEngine's "Claude responded" — JSONL watcher provides cleaner response events
-      if (event.type === "info" && /^(Claude|Codex|Cursor|Gemini|Aider) responded/i.test(event.title || "")) return
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
         const mergedEvents = upsertAgentEvent(events, event)
         if (mergedEvents === events) return prev
-        next.set(sid, mergedEvents.slice(-200))
+        next.set(sid, mergedEvents.slice(-MAX_SESSION_EVENT_HISTORY))
         return next
       })
     }))
@@ -2179,6 +2237,7 @@ export function App() {
       const filtered = replayed.filter(e => {
         if (e.type === "token_usage") return false
         if (e.type === "decision_request" && e.status !== "waiting") return false
+        if (isNoisyFallbackResponseEvent(e)) return false
         return true
       })
       if (filtered.length === 0) return
@@ -2187,7 +2246,7 @@ export function App() {
         const existing = next.get(sid) || []
         const mergedEvents = mergeAgentEventLists(existing, filtered)
         if (mergedEvents === existing) return prev
-        next.set(sid, mergedEvents.slice(-200))
+        next.set(sid, mergedEvents.slice(-MAX_SESSION_EVENT_HISTORY))
         return next
       })
     }))
@@ -2203,7 +2262,7 @@ export function App() {
       setSessionEventsMap(prev => {
         const next = new Map(prev)
         const events = next.get(sid) || []
-        next.set(sid, upsertAgentEvent(events, event).slice(-500))
+        next.set(sid, upsertAgentEvent(events, event).slice(-MAX_SESSION_EVENT_HISTORY))
         return next
       })
     }
@@ -2411,6 +2470,7 @@ export function App() {
   // Launch handler — creates a new session
   // Optional resumeAgentSessionId: Claude Code session ID to resume (--resume <id>)
   const handleLaunch = (projectId: string, agentId: string, resumeAgentSessionId?: string) => {
+    const shouldResumeAgent = !!resumeAgentSessionId
     trackSessionStart(agentId, projectId)
     trackAgentLaunch(agentId, projectId)
     sessionStartTimeRef.current = Date.now()
@@ -2419,7 +2479,7 @@ export function App() {
     setActiveAgentId(agentId)
     setCurrentSessionId(sessionId)
     setResumeSessionId(resumeAgentSessionId)
-    setShouldResumeCurrentSession(false)
+    setShouldResumeCurrentSession(shouldResumeAgent)
     saveLastProject(projectId)
     setActiveSessions((prev) => [...prev, {
       id: sessionId,
@@ -2427,6 +2487,15 @@ export function App() {
       agentId,
       createdAt: extractSessionTimestamp(sessionId) ?? Date.now(),
     }])
+    if (isDesktop) {
+      send(buildDesktopLaunchAttachMessage({
+        projectId,
+        agentId,
+        sessionId,
+        locale,
+        resumeAgentSessionId,
+      }))
+    }
     if (!isDesktop) { setScreen("session"); setViewMode("board") }
   }
 
@@ -2482,16 +2551,23 @@ export function App() {
       setShouldResumeCurrentSession(false)
     }
     try {
-      await fetch(`${getApiBase()}/api/sessions/${sessionId}/kill`, { method: "POST" })
+      const token = wsTokenRef.current
+      await fetch(`${getApiBase()}/api/sessions/${sessionId}/kill`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
     } catch { }
   }
 
   // New project handler
   const handleNewProject = async (name: string, cwd: string) => {
     try {
+      const token = wsTokenRef.current
+      const headers: Record<string, string> = { "Content-Type": "application/json" }
+      if (token) headers.Authorization = `Bearer ${token}`
       const res = await fetch(`${getApiBase()}/api/projects`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ name, cwd }),
       })
       if (res.ok) {
@@ -2504,7 +2580,11 @@ export function App() {
 
   const handleDeleteProject = async (projectId: string) => {
     try {
-      const res = await fetch(`${getApiBase()}/api/projects/${projectId}`, { method: "DELETE" })
+      const token = wsTokenRef.current
+      const res = await fetch(`${getApiBase()}/api/projects/${projectId}`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       if (res.ok) {
         setProjects((prev) => {
           const next = prev.filter((p) => p.id !== projectId)
