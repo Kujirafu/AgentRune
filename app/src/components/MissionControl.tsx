@@ -1075,23 +1075,17 @@ export function MissionControl({
       // Delay to let TUI process the Esc before sending text
       setTimeout(() => {
         sendInput(text)
-        setTimeout(() => sendInput("\r"), 30)
       }, 300)
       // Continue to add user event below (don't return)
     }
 
-    // Send text and \r as TWO separate WS messages.
-    // This matches the pattern that works reliably (e.g., claude --resume sends
-    // text and \r as separate messages, and PTY processes both correctly).
     const isSlash = text.startsWith("/")
     let sent: boolean
     if (!pendingFreeText && wsImages) {
       // WS fallback: send text + images (server saves images, appends paths)
       sent = send({ type: "input", data: text, images: wsImages })
-      if (sent && !isSlash) setTimeout(() => sendInput("\r"), 500)
     } else if (!pendingFreeText) {
       sent = sendInput(text)
-      if (sent && !isSlash) setTimeout(() => sendInput("\r"), 500)
     } else {
       sent = true
     }
@@ -1106,10 +1100,6 @@ export function MissionControl({
       }])
       return
     }
-    if (!pendingFreeText && isSlash) {
-      setTimeout(() => sendInput("\r"), 300)
-    }
-
     // Track message/slash command
     if (isSlash) {
       trackSlashCommand(text.split(" ")[0])

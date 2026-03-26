@@ -1,0 +1,102 @@
+# Changelog
+
+## 2026-03-24
+- Fixed desktop auto-dispatch for short follow-up replies: `好`, `繼續`, `continue`, and similar acknowledgements now route back to the focused or live session instead of silently spawning a new session.
+- 修正桌面 session 事件流與編號穩定性：
+- `session_activity` 改為使用穩定 `eventId` upsert，不再因 `activity_${Date.now()}` 造成重複事件。
+- `session_activity` / `event` / `events_replay` 現在會合併同 ID 事件，rich event 可覆蓋簡版 activity。
+- 桌面 session `#` 改為 creation-order stable ordinal，卡片、展開面板、輸入列 target、message center 不再跟著排序交換。
+- `MissionControl` 的跨 session activity unread 也加入 stable key dedup。
+- Desktop sidebar bottom widget now behaves like a message center: Inbox stays focused on approvals, and completed sessions auto-open Recent with summary + next step.
+- Desktop completion notifications now also trigger from explicit idle/end signals instead of only `digest.status === "done"`, so sessions that finish inside an open shell still surface in the message center and background notifications.
+- Systemized the index-first project memory workflow: daemon-side auto-init now ensures `.agentrune` exists before worktree/session use, MCP memory tools read and write the local project directly, worktree memory files are shared instead of one-time copies, and `agentrune memory ...` exposes init/index/sections/read/search/route commands for installed users.
+- 修正多 session / 多 agent / 跨裝置同步主幹：
+- Claude `claudeSessionId` 會正確回寫，不再因空 mapping 卡住對話映射。
+- recoverable / crashed session 的 resume cooldown 改成 per-session。
+- `request_events` 不再停掉同 project 的其他 Claude watcher。
+- 修正 CLI daemon 安全問題：
+- `/api/auth/new-code` 改為受 auth 保護。
+- HTTP / WebSocket localhost bypass 改為 trusted-local 判定。
+- memory section 讀寫改用固定 allowlist，封住 Windows 路徑穿越。
+- 更新 desktop 依賴到安全版本，並新增 `rebuild-pty` smoke test。
+- 補齊 Dashboard / PRD E2E 相容調整：
+- 新增穩定的 desktop `data-testid`
+- 補 `All Projects` 入口
+- legacy tasks API 會回填最新 PRD
+- App Playwright 回到 `48/48 passed`
+- 修正 `AutomationSheet` 編輯既有 automation 時未回填 `enabled` 的問題。
+- `.worktrees/` 加入 `.gitignore`，避免污染工作樹。
+- 專案記憶從單一 `agentlore.md` 重整為 `agentlore.md + context/*.md` 分類結構。
+- 新增公開文件 [docs/project-memory-policy.md](C:/Users/agres/Documents/Test/AgentRune-New/docs/project-memory-policy.md)，明確區分 AGPL repo 的公開文件與本機 `.agentrune` 專案記憶。
+- 更新 `.agentrune/rules.md`，要求 agent 將可公開的長期文件寫入 tracked docs，而不是把所有內容都塞進私有記憶。
+- 新增本地 prototype：`/api/memory/route`、`/api/memory/search`、MCP memory section tools、worktree `context/` 同步，以及「索引優先、只讀相關 section」的 agent prompt。
+
+## 2026-03-25
+- 修正 Codex 的 bypass/trust 對齊：CLI launch 現在會把全域 `bypass` 視為 Codex 的有效 `danger-full-access`，不再出現 UI 已開 bypass 但 Codex 仍跳 approval 的錯位。
+- 補齊 session attach 設定傳遞：mobile / desktop / terminal attach helper 現在會一併送出 `sandboxLevel`、`requirePlanReview`、`requireMergeApproval`，讓 daemon 端的 `SkillMonitor` / `AuthorityMap` 在 reconnect / reattach 後仍能正確執行沙盒限制。
+- 恢復 desktop 新 session 的 agent 繼承邏輯，不再因暫時修補而硬編成 `claude`，避免初始訊息 dispatch 修好後又把 agent 選擇帶歪。
+
+- Desktop expanded session panels now auto-attach with the full terminal attach payload on mount, so brand-new sessions start immediately from the Events view instead of waiting for a manual switch into Terminal.
+- Desktop `+` and `Ctrl+N` now arm a true "new session on next send" state instead of just falling back to auto-routing, so sending after clicking `+` no longer jumps back into an older actionable session by mistake.
+- Desktop input-bar new-session intent now stays inside `CommandCenter` instead of opening Quick Launch, and `expandSessionId` / unrelated `attached` updates no longer clear that pending fresh-session state before the first send.
+- Desktop fresh-session creation now keeps a pending handshake after the first `attach`: stale `expandSessionId` updates are ignored until the matching new `sessionId` responds with `attached`, preventing the input target from snapping back to an older session and resuming it.
+- Desktop "create from input bar" launches now reuse `buildSessionAttachMessage(...)`, keeping locale and sandbox/trust fields aligned with terminal attach behavior.
+- Queued desktop `session_input` now persists its `user_message` event when the input is accepted into the queue, so the Events feed reflects the send immediately even if actual PTY submit still waits for prompt readiness.
+- Codex queued input readiness now matches the real `· 100% left ·` status separator and falls back to a plain prompt, preventing desktop `initialCommand` from hanging in queue just because the status-line regex missed the actual banner.
+- Electron xterm panels now skip `@xterm/addon-webgl`, which was the most likely shared renderer-crash path when desktop users switched Codex or Claude sessions into terminal view.
+- Desktop fresh-session sends now keep targeting the same `pendingNewSessionId` after the first attach, so follow-up input becomes `session_input` for the new session instead of silently spawning another attach or snapping back to an older expanded session.
+- Desktop event merging now folds generic fallback replies like `Codex responded` into the later structured `response` event, and the Events panel keeps that fallback visible until a richer reply arrives, reducing duplicate output and terminal-only replies.
+- Electron now writes renderer load/crash diagnostics to `logs/desktop-runtime.log` under userData, so future desktop flash-crash reports have a concrete trace instead of only the generic `tsup && electron .` lifecycle failure.
+- Electron now logs secondary-instance handoff, `child-process-gone`, and process exit lifecycle, and a denied single-instance lock exits with code `0` instead of looking like a desktop dev failure.
+- Electron quit tracing now records explicit quit sources and `window:close` sender metadata in `desktop-runtime.log`, and the tray quit handler no longer trips over a JavaScript ASI edge case during tests.
+- Mobile/desktop schedule UIs now normalize automation `schedule` payloads before rendering or editing them, preventing malformed legacy automation records from blanking the schedules page.
+- Desktop dashboard no longer auto-expands every newly observed active session, so external Codex/CLI sessions in the same project stop hijacking the desktop panel.
+- Desktop session panels now auto-attach only recoverable sessions; active panels stay on `request_events` to avoid duplicate watcher replays and focus-stealing attach churn.
+- Desktop fresh-session routing now keeps a ref-backed pending handshake in `CommandCenter`, so unrelated `attached` events cannot snap the input target back to an older session while the new session is still materializing.
+- Desktop `+` / `Ctrl+N` now open the Quick Launch session launcher again, while the explicit fresh-session arm moved to the target menu's `New` option so launcher features are not lost.
+- Desktop Quick Launch resume now forwards `resumeSessionId` through `Dashboard`, fixing the regression where choosing a past session in the launcher still started a brand-new one.
+- Daemon session events now use a shared persistence buffer so watcher/PTy/live events create and update `sessionRecentEvents` even when the buffer did not exist yet; this closes a replay gap where terminal output could be visible but Events stayed empty after reconnect or restart.
+- Session event replay history is now aligned to `500` entries across daemon persistence and desktop `sessionEventsMap`, reducing long-session cases where terminal scrollback outlived the replayable Events history.
+- Project-memory init events, stored client events, resume-option events, and delayed PTY reparse events now all go through the same persistence path instead of several ad-hoc `list.push(...)` branches.
+## 2026-03-26
+- Release line now advances to `0.3.5`: npm already has `0.3.2` and `0.3.4`, so the hotfixes in this batch cannot safely reuse the `0.3.1` numbering branch.
+- Desktop `0.3.5` NSIS packaging plus Android `assembleRelease` / `bundleRelease` now complete successfully from this workspace, so both release artifact paths are validated before publish.
+- Shared queued terminal input now dispatches as soon as scrollback has stabilized for a few polls, instead of waiting only for an explicit prompt marker or the old 20s timeout fallback.
+- Queued submit delays are now much shorter (`/slash` and normal text near-immediate, Codex multiline capped around 1.6s instead of 5-12s), and mobile terminal paths no longer add their own extra delayed `\r` on top of daemon-side queue submission.
+- Desktop Quick Launch now sends `attach` immediately when it creates a desktop session, so a second session no longer sits idle until the user manually opens Terminal.
+- Desktop launch-created sessions now carry `isAgentResume` plus saved project settings through that same immediate attach path, so the first `/qa` / `/secure` command is not dropped on a server-side missing session.
+- 修正 Claude Code 桌面 Events fallback 污染：當 PTY fallback event 帶有 `Vibing...`、`thinking with max effort`、token/status footer 這類狀態列殘渣時，App 現在會在 `session_activity`、live `event`、`events_replay` 與 session digest 摘要層一併過濾，只保留 JSONL watcher 的正式 `response`。
+- 移除 Claude / Cursor PTY fallback 回覆的 3000 字硬上限，`Claude responded (detailed)`、`Cursor responded (detailed)` 與 `Plan ready` 這類 fallback/info event 現在會保留完整 detail，不再因事件層裁切造成長回覆消失。
+## Validation Snapshot (2026-03-25)
+- `npm run test -w cli -- agent-launch.test.ts session-command-dispatch.test.ts codex.test.ts`: pass
+- `npm run test -w app -- desktop-session-launch.test.ts session-attach.test.ts`: pass
+- `npm run test -w app -- src/components/desktop/DesktopSessionPanel.test.tsx src/lib/automation-normalize.test.ts src/lib/terminal-renderer.test.ts src/lib/desktop-session-launch.test.ts src/lib/session-attach.test.ts`: pass
+- `npm run test -w app -- src/lib/desktop-session-routing.test.ts src/lib/desktop-session-launch.test.ts src/components/desktop/DesktopSessionPanel.test.tsx src/lib/automation-normalize.test.ts src/lib/terminal-renderer.test.ts src/lib/session-attach.test.ts`: pass
+- `npm run test -w app -- src/components/desktop/CommandCenter.test.tsx src/components/desktop/DesktopSessionPanel.test.tsx src/lib/desktop-session-routing.test.ts src/lib/session-attach.test.ts`: pass
+- `npm run test -w app -- src/components/desktop/CommandCenter.test.tsx src/components/desktop/DesktopSessionPanel.test.tsx src/lib/desktop-session-routing.test.ts src/lib/session-attach.test.ts`: pass (fresh-attach stale-expand regression)
+- `npm run test -w app -- src/components/desktop/CommandCenter.test.tsx src/lib/session-events.test.ts`: pass
+- `npm run test -w app -- src/components/desktop/DesktopSessionPanel.test.tsx src/lib/desktop-session-routing.test.ts src/lib/session-attach.test.ts`: pass
+- `npm run test -w app -- src/components/desktop/CommandCenter.test.tsx src/components/desktop/DesktopSessionPanel.test.tsx src/components/Dashboard.test.tsx src/lib/session-events.test.ts src/lib/desktop-session-routing.test.ts src/lib/session-attach.test.ts`: pass
+- `npm run test -w app -- src/lib/session-summary.test.ts src/components/desktop/DesktopSessionPanel.test.tsx`: pass
+- `npm run typecheck -w app`: pass
+- `npm run test -w cli -- src/adapters/claude-code-response.test.ts src/adapters/cursor-response.test.ts`: pass
+- `npm run build -w desktop`: pass
+- `npm run typecheck -w cli`: pass
+- `npm run typecheck -w app`: pass
+- `npm run test -w cli -- session-command-dispatch.test.ts`: pass
+- `npm run test -w desktop`: pass
+- `npm run build -w desktop`: pass
+- `npm run dev -w desktop`: stayed alive in smoke check, no immediate lifecycle failure reproduced locally
+
+## Validation Snapshot
+- `npm run typecheck -w app`: pass
+- `npm run test -w app -- --run src/lib/session-events.test.ts src/lib/session-ordinals.test.ts src/lib/session-activity.test.ts`: pass
+- `npm run typecheck -w app`: pass
+- `npm run test -w app`: pass
+- `npm run build -w app`: pass
+- `npm run test:e2e -w app`: pass, `48/48`
+- `npm run typecheck -w cli`: pass
+- `npm run test -w cli`: pass
+- `npm run build -w cli`: pass
+- `npm run build -w desktop`: pass
+- `npm run rebuild-pty -w desktop`: pass

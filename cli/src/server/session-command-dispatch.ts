@@ -3,6 +3,7 @@ const OSC_RE = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g
 const CONTROL_RE = /[\x00-\x08\x0b-\x1f]/g
 const PROMPT_RE = /(?:[$%>#]|[\u203A\u276F\u00BB])\s*$/
 const CODEX_SEPARATOR_CLASS = "[\\u00B7\\u2022\\u2027\\u2219\\u25CF\\u30FB]"
+const STABLE_SCROLLBACK_TAIL = 800
 const CODEX_STATUS_RE = new RegExp(
   `gpt-[\\w.-]+(?:\\s+\\w+)?\\s+${CODEX_SEPARATOR_CLASS}\\s+\\d+%\\s+left\\s+${CODEX_SEPARATOR_CLASS}`,
   "i",
@@ -42,6 +43,26 @@ export function isSessionPromptReady(scrollback: string, agentId: string): boole
   return PROMPT_RE.test(lastLine)
 }
 
+export function getQueuedSessionScrollbackSignature(scrollback: string): string {
+  const normalized = stripAnsiForPromptDetection(scrollback).replace(/\r/g, "")
+  if (!normalized.trim()) return ""
+  const tail = normalized.slice(-STABLE_SCROLLBACK_TAIL)
+  return `${normalized.length}:${tail}`
+}
+
+export function getQueuedSessionStablePollThreshold(agentId?: string): number {
+  return agentId === "codex" ? 4 : 3
+}
+
+export function isQueuedSessionScrollbackStable(
+  scrollback: string,
+  agentId: string,
+  stablePolls: number,
+): boolean {
+  if (stablePolls < getQueuedSessionStablePollThreshold(agentId)) return false
+  return getQueuedSessionScrollbackSignature(scrollback).length > 0
+}
+
 export function isImmediateSessionInput(input: string): boolean {
   if (!input) return true
   if (input === "\r" || input === "\n") return true
@@ -73,7 +94,7 @@ export function getQueuedSessionSubmitDelayMs(
   agentId?: string,
 ): number {
   if (agentId === "codex" && text.includes("\n")) {
-    return Math.max(5000, Math.min(12000, 3000 + Math.ceil(text.length / 2)))
+    return Math.max(450, Math.min(1600, 350 + Math.ceil(text.length / 20)))
   }
-  return text.trimStart().startsWith("/") ? 300 : 500
+  return text.trimStart().startsWith("/") ? 180 : 220
 }

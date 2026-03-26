@@ -232,12 +232,7 @@ export function TerminalView({
     }
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
     if (!text.trim()) return  // Don't send empty commands
-    // Send text first, then Enter separately after a delay.
-    // TUI apps like Claude Code process input as a stream ??if text+\r arrives
-    // as one chunk, \r gets treated as a newline in the input buffer instead of
-    // triggering submission. Splitting them ensures \r is handled as Enter.
     sendInput(text)
-    setTimeout(() => sendInput("\r"), 30)
     addRecentCommand(project.id, text)
   }, [sendInput, project.id])
 

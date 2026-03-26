@@ -44,7 +44,9 @@ import { buildProjectSummaryResponse, buildSessionDigest } from "./project-summa
 import { loadProjectsFromDisk, saveProjectsToDisk } from "./project-registry.js"
 import {
   buildQueuedSessionTextPayload,
+  getQueuedSessionScrollbackSignature,
   getQueuedSessionSubmitDelayMs,
+  isQueuedSessionScrollbackStable,
   isImmediateSessionInput,
   isSessionPromptReady,
   type QueuedSessionTextMode,
@@ -951,6 +953,8 @@ export function createServer(portOverride?: number) {
     const current = queue[0]
     let attempts = 0
     const maxAttempts = 100
+    let lastScrollbackSignature = ""
+    let stablePolls = 0
 
     const tryDispatch = () => {
       if (!sessions.get(sessionId)) {
@@ -958,12 +962,21 @@ export function createServer(portOverride?: number) {
         return true
       }
 
-      const ready = isSessionPromptReady(sessions.getScrollback(sessionId) || "", current.agentId)
-      if (!ready && attempts < maxAttempts) {
+      const scrollback = sessions.getScrollback(sessionId) || ""
+      const ready = isSessionPromptReady(scrollback, current.agentId)
+      const scrollbackSignature = getQueuedSessionScrollbackSignature(scrollback)
+      if (scrollbackSignature && scrollbackSignature === lastScrollbackSignature) stablePolls++
+      else stablePolls = 0
+      lastScrollbackSignature = scrollbackSignature
+      const stableEnough = isQueuedSessionScrollbackStable(scrollback, current.agentId, stablePolls)
+
+      if (!ready && !stableEnough && attempts < maxAttempts) {
         return false
       }
 
-      if (!ready) {
+      if (!ready && stableEnough) {
+        log.info(`[session-text] Scrollback stabilized for ${sessionId.slice(0, 8)} (${current.source}); dispatching without explicit prompt marker`)
+      } else if (!ready) {
         log.warn(`[session-text] Prompt not detected in time for ${sessionId.slice(0, 8)} (${current.source}); sending anyway`)
       }
 
