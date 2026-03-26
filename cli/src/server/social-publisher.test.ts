@@ -12,7 +12,7 @@ vi.mock("./vault-keys.js", () => ({
 }))
 
 import { loadNamedVaultSecrets } from "./vault-keys.js"
-import { publishSocialPost, solveMoltbookChallenge } from "./social-publisher.js"
+import { publishSocialPost, solveMoltbookChallenge, splitThreadsText } from "./social-publisher.js"
 
 describe("social-publisher", () => {
   afterEach(() => {
@@ -29,11 +29,63 @@ describe("social-publisher", () => {
     })
   })
 
-  it("rejects Threads posts longer than 500 chars", async () => {
-    await expect(publishSocialPost({ platform: "threads", text: "a".repeat(501) })).resolves.toEqual({
-      success: false,
-      platform: "threads",
-      error: "Threads post exceeds 500 characters",
+  it("auto-splits long Threads posts into reply chain", async () => {
+    vi.useFakeTimers()
+    vi.mocked(loadNamedVaultSecrets).mockReturnValue({
+      THREADS_USER_ID: "12345678901234567",
+      THREADS_ACCESS_TOKEN: "threads-access-token",
+    })
+
+    // 2 segments = 4 fetch calls (create+publish for each)
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "container-1" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "root-post" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "container-2" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "reply-post" }) })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const longText = "A".repeat(400) + "\n\n" + "B".repeat(400)
+    const promise = publishSocialPost({ platform: "threads", text: longText })
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result.success).toBe(true)
+    expect(result.postId).toBe("root-post")
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    // Third call (reply container) should include reply_to_id
+    const replyBody = fetchMock.mock.calls[2]?.[1]?.body as URLSearchParams
+    expect(replyBody.get("reply_to_id")).toBe("root-post")
+  })
+
+  describe("splitThreadsText", () => {
+    it("returns single segment for short text", () => {
+      expect(splitThreadsText("hello")).toEqual(["hello"])
+    })
+
+    it("splits at paragraph break", () => {
+      const text = "A".repeat(400) + "\n\n" + "B".repeat(400)
+      const segments = splitThreadsText(text)
+      expect(segments.length).toBe(2)
+      expect(segments[0]).toBe("A".repeat(400))
+      expect(segments[1]).toBe("B".repeat(400))
+      segments.forEach((s) => expect(s.length).toBeLessThanOrEqual(500))
+    })
+
+    it("splits at explicit --- separator", () => {
+      const text = "A".repeat(300) + "\n---\n" + "B".repeat(300) + "\n---\n" + "C".repeat(100)
+      const segments = splitThreadsText(text)
+      expect(segments.length).toBe(3)
+      expect(segments[0]).toBe("A".repeat(300))
+      expect(segments[1]).toBe("B".repeat(300))
+      expect(segments[2]).toBe("C".repeat(100))
+    })
+
+    it("hard-cuts when no natural break exists", () => {
+      const text = "A".repeat(1200)
+      const segments = splitThreadsText(text)
+      expect(segments.length).toBeGreaterThan(1)
+      segments.forEach((s) => expect(s.length).toBeLessThanOrEqual(500))
+      expect(segments.join("")).toBe(text)
     })
   })
 

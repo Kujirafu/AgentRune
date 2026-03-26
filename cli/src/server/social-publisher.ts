@@ -134,10 +134,83 @@ export async function publishSocialPost(request: SocialPublishRequest): Promise<
 function validateText(platform: SocialPublishPlatform, text: string): string | null {
   const trimmed = text.trim()
   if (!trimmed) return "Post text is empty"
-  if (platform === "threads" && trimmed.length > THREADS_MAX_LENGTH) {
-    return `Threads post exceeds ${THREADS_MAX_LENGTH} characters`
-  }
+  // Threads: no hard reject — long posts are auto-split into reply chain
   return null
+}
+
+/**
+ * Split long text into segments that fit within Threads' 500-char limit.
+ * Priority: explicit `\n---\n` separators > paragraph breaks > sentence breaks > hard cut.
+ */
+export function splitThreadsText(text: string): string[] {
+  const trimmed = text.trim()
+  if (trimmed.length <= THREADS_MAX_LENGTH) return [trimmed]
+
+  // If explicit separators exist, use them (same convention as X)
+  if (trimmed.includes("\n---\n")) {
+    const explicit = trimmed.split("\n---\n").map((s) => s.trim()).filter(Boolean)
+    // Re-split any segment that still exceeds the limit
+    const result: string[] = []
+    for (const seg of explicit) {
+      if (seg.length <= THREADS_MAX_LENGTH) {
+        result.push(seg)
+      } else {
+        result.push(...splitLongSegment(seg))
+      }
+    }
+    return result
+  }
+
+  return splitLongSegment(trimmed)
+}
+
+function splitLongSegment(text: string): string[] {
+  const segments: string[] = []
+  let remaining = text
+
+  while (remaining.length > THREADS_MAX_LENGTH) {
+    const chunk = remaining.slice(0, THREADS_MAX_LENGTH)
+
+    // Try paragraph break
+    const paraBreak = chunk.lastIndexOf("\n\n")
+    if (paraBreak > THREADS_MAX_LENGTH * 0.3) {
+      segments.push(remaining.slice(0, paraBreak).trimEnd())
+      remaining = remaining.slice(paraBreak).trimStart()
+      continue
+    }
+
+    // Try sentence break (. ! ? followed by space or end)
+    const sentenceMatch = chunk.match(/^([\s\S]{1,}[.!?])(?:\s)/s)
+    if (sentenceMatch && sentenceMatch[1].length > THREADS_MAX_LENGTH * 0.3) {
+      const cutAt = sentenceMatch[1].length
+      segments.push(remaining.slice(0, cutAt).trimEnd())
+      remaining = remaining.slice(cutAt).trimStart()
+      continue
+    }
+
+    // Try line break
+    const lineBreak = chunk.lastIndexOf("\n")
+    if (lineBreak > THREADS_MAX_LENGTH * 0.3) {
+      segments.push(remaining.slice(0, lineBreak).trimEnd())
+      remaining = remaining.slice(lineBreak).trimStart()
+      continue
+    }
+
+    // Try word break (space)
+    const spaceBreak = chunk.lastIndexOf(" ")
+    if (spaceBreak > THREADS_MAX_LENGTH * 0.3) {
+      segments.push(remaining.slice(0, spaceBreak).trimEnd())
+      remaining = remaining.slice(spaceBreak).trimStart()
+      continue
+    }
+
+    // Hard cut
+    segments.push(chunk)
+    remaining = remaining.slice(THREADS_MAX_LENGTH).trimStart()
+  }
+
+  if (remaining) segments.push(remaining)
+  return segments
 }
 
 function validateMoltbookPost(title: string, text: string): string | null {
@@ -163,14 +236,52 @@ async function publishThreadsPost(request: SocialPublishRequest): Promise<Social
     return { success: false, platform: "threads", error: "Threads credentials not available in key vault" }
   }
 
+  const segments = splitThreadsText(request.text)
+
+  // Post the first segment as root
+  const rootResult = await publishSingleThread(userId, accessToken, segments[0])
+  if (!rootResult.success) return rootResult
+
+  // If single segment, done
+  if (segments.length === 1) return rootResult
+
+  // Post remaining segments as replies
+  let previousId = rootResult.postId!
+  for (let i = 1; i < segments.length; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 2500))
+    const replyResult = await publishSingleThread(userId, accessToken, segments[i], previousId)
+    if (!replyResult.success) {
+      log.warn(`[Threads] Reply segment ${i + 1}/${segments.length} failed: ${replyResult.error}`)
+      return {
+        success: true,
+        platform: "threads",
+        postId: rootResult.postId,
+        error: `Thread partially posted (${i}/${segments.length} segments). Segment ${i + 1} failed: ${replyResult.error}`,
+      }
+    }
+    previousId = replyResult.postId!
+  }
+
+  return { success: true, platform: "threads", postId: rootResult.postId }
+}
+
+async function publishSingleThread(
+  userId: string,
+  accessToken: string,
+  text: string,
+  replyToId?: string,
+): Promise<SocialPublishResult> {
+  const params: Record<string, string> = {
+    media_type: "TEXT",
+    text,
+    access_token: accessToken,
+  }
+  if (replyToId) params.reply_to_id = replyToId
+
   const createRes = await fetch(`https://graph.threads.net/v1.0/${userId}/threads`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      media_type: "TEXT",
-      text: request.text.trim(),
-      access_token: accessToken,
-    }),
+    body: new URLSearchParams(params),
   })
 
   const createData = await safeJson(createRes)
@@ -204,11 +315,7 @@ async function publishThreadsPost(request: SocialPublishRequest): Promise<Social
     return { success: false, platform: "threads", error: "Threads publish response missing post id" }
   }
 
-  return {
-    success: true,
-    platform: "threads",
-    postId,
-  }
+  return { success: true, platform: "threads", postId }
 }
 
 async function publishMoltbookPost(request: SocialPublishRequest): Promise<SocialPublishResult> {
