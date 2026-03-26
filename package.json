@@ -3,6 +3,9 @@
   "private": true,
   "workspaces": ["cli", "app", "desktop"],
   "scripts": {
+    "test": "npm run test -w cli && npm run test -w app && npm run test -w desktop",
+    "test:coverage": "npm run test:coverage -w cli && npm run test:coverage -w app && npm run test:coverage -w desktop",
+    "typecheck": "npm run typecheck -w cli && npm run typecheck -w app && npm run typecheck -w desktop",
     "build:desktop": "npm run build -w app && npm run build -w cli && npm run build -w desktop && npm run package -w desktop"
   }
 }

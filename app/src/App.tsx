@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, Suspense, Component, type ErrorInfo, type ReactNode } from "react"
+import { useState, useEffect, useRef, useCallback, Suspense, Component, Fragment, type ErrorInfo, type ReactNode } from "react"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, AppSession, AgentEvent } from "./types"
 import type { PhaseGateRequest, PhaseGateAction, PendingReauthRequest } from "./data/automation-types"
@@ -776,7 +776,7 @@ function ConnectScreen({ onConnected, onLogin }: { onConnected: () => void; onLo
       const pairCode = url.searchParams.get("pair")
       // server URL = origin (e.g. http://192.168.1.5:3456)
       const server = url.origin
-      return { serverUrl: server, pairCode: pairCode && /^\d{6}$/.test(pairCode) ? pairCode : null }
+      return { serverUrl: server, pairCode: pairCode && /^[A-Za-z0-9]{6,8}$/.test(pairCode) ? pairCode : null }
     } catch {
       return null
     }
@@ -1211,21 +1211,25 @@ function AuthScreen({
   error: string
   onTotp: (code: string) => void
 }) {
+  const isPairing = mode === "pairing"
+  const codeLen = isPairing ? 8 : 6
   const [code, setCode] = useState("")
   const inputRefs = useRef<(HTMLInputElement | null)[]>([])
 
   const handleDigitChange = (index: number, value: string) => {
-    if (!/^\d?$/.test(value)) return
+    const charPattern = isPairing ? /^[A-Za-z0-9]?$/ : /^\d?$/
+    if (!charPattern.test(value)) return
+    const upper = isPairing ? value.toUpperCase() : value
     const newCode = code.split("")
-    newCode[index] = value
-    const joined = newCode.join("").slice(0, 6)
+    newCode[index] = upper
+    const joined = newCode.join("").slice(0, codeLen)
     setCode(joined)
 
-    if (value && index < 5) {
+    if (upper && index < codeLen - 1) {
       inputRefs.current[index + 1]?.focus()
     }
 
-    if (joined.length === 6) {
+    if (joined.length === codeLen) {
       onTotp(joined)
     }
   }
@@ -1241,12 +1245,13 @@ function AuthScreen({
 
   const handlePaste = (e: React.ClipboardEvent) => {
     e.preventDefault()
-    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6)
-    setCode(pasted)
-    if (pasted.length === 6) {
-      onTotp(pasted)
+    const raw = e.clipboardData.getData("text").replace(/[-\s]/g, "")
+    const filtered = isPairing ? raw.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, codeLen) : raw.replace(/\D/g, "").slice(0, codeLen)
+    setCode(filtered)
+    if (filtered.length === codeLen) {
+      onTotp(filtered)
     } else {
-      inputRefs.current[pasted.length]?.focus()
+      inputRefs.current[filtered.length]?.focus()
     }
   }
 
@@ -1275,31 +1280,34 @@ function AuthScreen({
 
         <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 28, lineHeight: 1.5, opacity: 0.8 }}>
           {mode === "pairing"
-            ? "Enter the 6-digit pairing code shown on your computer"
+            ? "Enter the 8-character pairing code shown on your computer"
             : "Enter the 6-digit code from Google Authenticator"}
         </div>
 
-        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }} onPaste={handlePaste}>
-          {Array.from({ length: 6 }).map((_, i) => (
-            <input
-              key={i}
-              ref={(el) => { inputRefs.current[i] = el }}
-              type="text"
-              inputMode="numeric"
-              maxLength={1}
-              value={code[i] || ""}
-              onChange={(e) => handleDigitChange(i, e.target.value)}
-              onKeyDown={(e) => handleKeyDown(i, e)}
-              autoFocus={i === 0}
-              style={{
-                width: 44, height: 56, textAlign: "center",
-                fontSize: 24, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
-                borderRadius: 14,
-                border: code[i] ? "2px solid rgba(59,130,246,0.4)" : "1px solid var(--glass-border)",
-                background: code[i] ? "rgba(59,130,246,0.06)" : "var(--icon-bg)",
-                color: "var(--text-primary)", outline: "none", transition: "all 0.2s",
-              }}
-            />
+        <div style={{ display: "flex", gap: isPairing ? 6 : 8, justifyContent: "center", marginBottom: 20, flexWrap: "wrap" }} onPaste={handlePaste}>
+          {Array.from({ length: codeLen }).map((_, i) => (
+            <Fragment key={i}>
+              {isPairing && i === 4 && <span style={{ alignSelf: "center", fontSize: 20, color: "var(--text-secondary)", opacity: 0.4 }}>-</span>}
+              <input
+                ref={(el) => { inputRefs.current[i] = el }}
+                type="text"
+                inputMode={isPairing ? "text" : "numeric"}
+                maxLength={1}
+                value={code[i] || ""}
+                onChange={(e) => handleDigitChange(i, e.target.value)}
+                onKeyDown={(e) => handleKeyDown(i, e)}
+                autoFocus={i === 0}
+                style={{
+                  width: isPairing ? 38 : 44, height: 56, textAlign: "center",
+                  fontSize: isPairing ? 20 : 24, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
+                  borderRadius: 14,
+                  border: code[i] ? "2px solid rgba(59,130,246,0.4)" : "1px solid var(--glass-border)",
+                  background: code[i] ? "rgba(59,130,246,0.06)" : "var(--icon-bg)",
+                  color: "var(--text-primary)", outline: "none", transition: "all 0.2s",
+                  textTransform: isPairing ? "uppercase" : "none",
+                }}
+              />
+            </Fragment>
           ))}
         </div>
 

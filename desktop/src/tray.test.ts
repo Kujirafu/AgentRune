@@ -13,7 +13,7 @@ const { mockTrayInstance, mockApp, MockTray, mockMenu, mockNativeImage } =
     return {
       mockTrayInstance,
       mockApp: { isQuitting: false, quit: vi.fn() },
-      MockTray: vi.fn(() => mockTrayInstance),
+      MockTray: vi.fn(function () { return mockTrayInstance }),
       mockMenu: { buildFromTemplate: vi.fn((t: unknown[]) => ({ items: t })) },
       mockNativeImage: {
         createFromPath: vi.fn(() => ({

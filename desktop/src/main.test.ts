@@ -65,7 +65,7 @@ const {
     },
     mockSession: { defaultSession: { clearCache: vi.fn(() => Promise.resolve()) } },
     mockWin,
-    MockBrowserWindow: vi.fn(() => mockWin),
+    MockBrowserWindow: vi.fn(function () { return mockWin }),
     mockSetupTray: vi.fn(),
     mockSetupAutoUpdate: vi.fn(),
   }

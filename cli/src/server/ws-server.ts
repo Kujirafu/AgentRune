@@ -705,11 +705,62 @@ export function createServer(portOverride?: number) {
   // Apply auth middleware to all /api/* routes (before route handlers)
   app.use("/api", requireAuth)
 
+  // Simple per-IP rate limiter for API endpoints
+  const apiRateLimit = new Map<string, { count: number; resetAt: number }>()
+  const API_RATE_WINDOW = 60_000 // 1 minute
+  const API_RATE_MAX = 120 // 120 requests per minute
+
+  function rateLimitMiddleware(req: any, res: any, next: any) {
+    // Skip rate limiting for trusted local requests
+    if (isTrustedLocalRequest(req)) return next()
+
+    const ip = getRequestClientIp(req) || req.socket?.remoteAddress || "unknown"
+    const now = Date.now()
+    const entry = apiRateLimit.get(ip)
+
+    if (!entry || entry.resetAt <= now) {
+      apiRateLimit.set(ip, { count: 1, resetAt: now + API_RATE_WINDOW })
+      return next()
+    }
+
+    entry.count++
+    if (entry.count > API_RATE_MAX) {
+      return res.status(429).json({
+        error: "Too many requests",
+        retryAfter: Math.ceil((entry.resetAt - now) / 1000),
+      })
+    }
+
+    return next()
+  }
+
+  app.use("/api", rateLimitMiddleware)
+
+  // Periodically clean up stale rate-limit entries
+  setInterval(() => {
+    const now = Date.now()
+    for (const [ip, entry] of apiRateLimit) {
+      if (entry.resetAt <= now) apiRateLimit.delete(ip)
+    }
+  }, 5 * 60 * 1000)
+
   const server = createHttpServer(app)
+
+  // Per-IP WebSocket connection limiting
+  const wsConnectionsPerIp = new Map<string, number>()
+  const WS_MAX_CONNECTIONS_PER_IP = 20
+
   const wss = new WebSocketServer({
     server,
     maxPayload: 1_048_576,
     verifyClient: ({ req }: { req: import("node:http").IncomingMessage }) => {
+      // Check per-IP connection limit
+      const ip = getRequestClientIp(req) || req.socket.remoteAddress || "unknown"
+      const currentCount = wsConnectionsPerIp.get(ip) || 0
+      if (currentCount >= WS_MAX_CONNECTIONS_PER_IP) {
+        return false
+      }
+
       const origin = req.headers.origin
       // Allow connections with no origin (non-browser clients, Electron, CLI tools)
       if (!origin) return true
@@ -1276,17 +1327,22 @@ export function createServer(portOverride?: number) {
 
   // --- Auth endpoints ---
 
-  // --- First-launch pairing code (6 digits, shown in CLI) ---
+  // --- First-launch pairing code (8 alphanumeric chars, shown in CLI) ---
   let pairingCode: string | null = null
   let pairingCodeExpiry = 0
   let globalPairFailures = 0 // Global cap — expires with the pairing code
   const GLOBAL_PAIR_FAIL_LIMIT = 15 // Max total failed attempts before code is burned
 
   function generatePairingCode(): string {
-    pairingCode = String(randomInt(100000, 1000000))
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // exclude I/O/0/1 to avoid confusion
+    let code = ""
+    for (let i = 0; i < 8; i++) {
+      code += chars[randomInt(0, chars.length)]
+    }
+    pairingCode = code
     pairingCodeExpiry = Date.now() + 5 * 60 * 1000 // 5 min expiry
     globalPairFailures = 0 // Reset global failure counter for new code
-    log.info(`\n  Pairing code: ${pairingCode}\n  (expires in 5 minutes)\n`)
+    log.info(`\n  Pairing code: ${pairingCode.slice(0, 4)}-${pairingCode.slice(4)}\n  (expires in 5 minutes)\n`)
     return pairingCode
   }
 
@@ -1403,8 +1459,8 @@ export function createServer(portOverride?: number) {
     }
 
     // Timing-safe comparison to prevent timing attacks on the pairing code
-    const codeA = Buffer.from(String(code).padEnd(6, "\0"))
-    const codeB = Buffer.from(String(pairingCode).padEnd(6, "\0"))
+    const codeA = Buffer.from(String(code).toUpperCase().padEnd(8, "\0"))
+    const codeB = Buffer.from(String(pairingCode).padEnd(8, "\0"))
     if (codeA.length !== codeB.length || !timingSafeEqual(codeA, codeB)) {
       globalPairFailures++
       return res.status(401).json({ error: "Invalid or expired code" })
@@ -2019,9 +2075,21 @@ export function createServer(portOverride?: number) {
 
   app.post("/api/voice-transcribe", async (req, res) => {
     // Accepts raw audio body (webm/ogg from MediaRecorder)
+    const MAX_AUDIO_SIZE = 10 * 1024 * 1024 // 10 MB
     const chunks: Buffer[] = []
-    req.on("data", (chunk: Buffer) => chunks.push(chunk))
+    let totalSize = 0
+    let aborted = false
+    req.on("data", (chunk: Buffer) => {
+      totalSize += chunk.length
+      if (totalSize > MAX_AUDIO_SIZE) {
+        aborted = true
+        req.destroy()
+        return res.status(413).json({ error: "Audio too large (max 10 MB)" })
+      }
+      chunks.push(chunk)
+    })
     req.on("end", async () => {
+      if (aborted) return
       const audioBuffer = Buffer.concat(chunks)
       if (audioBuffer.length < 100) {
         return res.status(400).json({ error: "No audio data" })
@@ -2055,18 +2123,29 @@ export function createServer(portOverride?: number) {
         if (rawText.trim()) {
           try {
             const { cleanupVoiceText } = await import("./voice-cleanup.js")
-            // Pass API keys directly (no process.env mutation — prevents race conditions)
-            const filteredKeys2: Record<string, string> = {}
-            const rawKeys = req.headers["x-api-keys"] as string
-            if (rawKeys) {
-              try {
-                const parsed = JSON.parse(rawKeys)
-                for (const [k, v] of Object.entries(parsed)) {
-                  if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
-                    filteredKeys2[k] = v
+            // Prefer vault keys (loaded from encrypted local storage) over HTTP headers.
+            // This avoids transmitting API keys in headers where they can be logged
+            // by proxies, reverse-proxies, and access logs.
+            const transcribeCfg = loadConfig()
+            const vaultApiKeys = loadVaultKeys({
+              vaultPath: transcribeCfg.vaultPath || undefined,
+              keyVaultPath: transcribeCfg.keyVaultPath || undefined,
+            })
+            const filteredKeys2: Record<string, string> = { ...vaultApiKeys }
+            // DEPRECATED: Fall back to X-Api-Keys header only for keys not in vault.
+            // This header path should be removed once all clients migrate to vault-based keys.
+            if (Object.keys(filteredKeys2).length === 0) {
+              const rawKeys = req.headers["x-api-keys"] as string
+              if (rawKeys) {
+                try {
+                  const parsed = JSON.parse(rawKeys)
+                  for (const [k, v] of Object.entries(parsed)) {
+                    if (ALLOWED_ENV_KEYS.has(k) && typeof v === "string" && v) {
+                      filteredKeys2[k] = v
+                    }
                   }
-                }
-              } catch {}
+                } catch {}
+              }
             }
             const cleanup = await cleanupVoiceText(rawText, agentId, filteredKeys2)
             cleaned = cleanup.cleaned
@@ -4081,6 +4160,9 @@ export function createServer(portOverride?: number) {
     const requestClientIp = getRequestClientIp(req) || req.socket.remoteAddress || "unknown"
     log.info(`WS connection from ${requestClientIp} authenticated=${!!(new URL(req.url || "/", "http://localhost").searchParams.get("token"))}`)
 
+    // Track per-IP connection count
+    wsConnectionsPerIp.set(requestClientIp, (wsConnectionsPerIp.get(requestClientIp) || 0) + 1)
+
     // Push CLI update notification to app
     if (updateInfo) {
       ws.send(JSON.stringify({ type: "cli_update_available", latest: updateInfo.latest, current: updateInfo.current, changelog: updateInfo.changelog }))
@@ -4164,7 +4246,7 @@ export function createServer(portOverride?: number) {
         }
         case "set_fcm_token": {
           const token = msg.token as string
-          if (token && typeof token === "string" && token.length > 10) {
+          if (token && typeof token === "string" && token.length > 10 && token.length < 500 && /^[A-Za-z0-9_:.+/=-]+$/.test(token)) {
             const fcmPath = join(getConfigDir(), "fcm-token")
             writeFileSync(fcmPath, token, { encoding: "utf-8" })
             log.info(`[FCM] Token saved (${token.slice(0, 12)}...)`)
@@ -5679,6 +5761,14 @@ export function createServer(portOverride?: number) {
     })
 
     ws.on("close", () => {
+      // Decrement per-IP connection count
+      const currentIpCount = wsConnectionsPerIp.get(requestClientIp) || 0
+      if (currentIpCount <= 1) {
+        wsConnectionsPerIp.delete(requestClientIp)
+      } else {
+        wsConnectionsPerIp.set(requestClientIp, currentIpCount - 1)
+      }
+
       const esId = clientEventSessions.get(ws)
       if (esId) eventStore.endSession(esId)
       clientEventSessions.delete(ws)
