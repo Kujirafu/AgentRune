@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-04
+- Fixed double-tap-to-send when picking images from gallery: `InputBar` now tracks active `FileReader` instances via `fileLoadingCountRef`. Tapping Send while the reader is still loading sets `pendingSendRef = true` and auto-fires `handleSendInner` once all readers complete, so the image is always sent in a single tap.
+- Improved image instruction sent to agent: `appendInlineImagePaths` now uses a clearer "Please use your View/Read tool to open this image file before responding:" format and converts Windows backslash paths to forward slashes inside the instruction, so Claude Code reliably invokes the View tool.
+- Improved FileBrowser error handling: network/timeout errors now show the localized `file.loadError` message, while unexpected server errors show the raw message, making it easier to diagnose 401 vs. network issues.
+- BUG-001 safe area fix: SettingsSheet, FileBrowser header, InsightSheet header, and LaunchPad main header now use `calc(env(safe-area-inset-top, 0px) + Npx)` so content is not hidden behind the status bar on edge-to-edge Android devices.
+- QA report v0.2.24 triage: BUG-003 (create project), BUG-004 (folder browser auth), BUG-005 (new folder), BUG-006+IMP-001 (system theme) were confirmed fixed in the 2026-03-28 session. BUG-001 fixed today. BUG-002 (Seasons) does not exist in the current codebase.
+- All 432 app tests, 760 CLI tests, and 54 E2E tests pass. APK built and ready for install.
+
 ## 2026-03-24
 - Fixed desktop auto-dispatch for short follow-up replies: `好`, `繼續`, `continue`, and similar acknowledgements now route back to the focused or live session instead of silently spawning a new session.
 - 修正桌面 session 事件流與編號穩定性：
@@ -100,3 +108,23 @@
 - `npm run build -w cli`: pass
 - `npm run build -w desktop`: pass
 - `npm run rebuild-pty -w desktop`: pass
+
+## 2026-03-28
+- Fixed the mobile image-send pipeline at the source: `MissionControl` and `TerminalView` no longer pre-upload images or stuff temporary file paths into the terminal input. Images now travel with the actual send payload, which removes the double-submit behavior and keeps image references valid for the receiving agent.
+- Normalized app REST auth around `agentrune_api_token`. WebSocket pairing/session tokens are now mirrored into storage on connect and refresh, and `authedFetch()` prefers that token before falling back to `agentrune_cloud_token`.
+- Reworked mobile file browsing to use authenticated API calls rather than treating a missing base URL as "computer disconnected". `FileBrowser` now loads directories via `buildApiUrl(...)` plus `authedFetch(...)`, keeps inline error state, and reports server failures instead of only showing a generic offline message.
+- Added `POST /api/mkdir` to the daemon as the single folder-creation backend. The route validates names, confines writes to the home tree, handles existing-path conflicts explicitly, and gives the app a real success/error contract for "New Folder".
+- Project creation now propagates backend errors through `App.tsx`, `LaunchPad`, and `NewSessionSheet`, so invalid paths or other server failures keep the create form open with a visible error instead of failing silently.
+- Theme preference now supports `system` in addition to `light` and `dark`, with resolved-theme tracking wired into the app root plus mobile/desktop settings controls.
+- Added regression coverage for the new auth and file-browser paths: `src/components/FileBrowser.test.tsx`, `src/lib/storage.test.ts`, and `e2e/mobile-daemon-regressions.spec.ts`.
+
+## Validation Snapshot (2026-03-28)
+- `C:\\Program Files\\Git\\bin\\bash.exe cli/safe-restart.sh`: pass
+- `npm run typecheck -w app`: pass
+- `npm run typecheck -w cli`: pass
+- `npm run typecheck -w desktop`: pass
+- `npm run test -w cli`: pass (`760` tests)
+- `npm run test -w app`: pass (`432` tests)
+- `npm run test -w desktop`: pass (`45` tests)
+- `npm run test:e2e -w app`: pass (`54/54`)
+- Real daemon WebSocket smoke: pass (`session_input` with inline base64 image created a persisted upload path and matching `user_message` event on first send)

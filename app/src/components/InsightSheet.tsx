@@ -89,7 +89,7 @@ export function InsightSheet({ open, onClose, apiBase, projectId, sessionId }: I
     }}>
       {/* Header */}
       <div style={{
-        padding: "48px 20px 16px",
+        padding: "calc(env(safe-area-inset-top, 0px) + 48px) 20px 16px",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",

@@ -26,7 +26,7 @@ interface LaunchPadProps {
   onLaunch: (projectId: string, agentId: string) => void
   onResume: (sessionId: string) => void
   onKill: (sessionId: string) => void
-  onNewProject: (name: string, cwd: string) => void
+  onNewProject: (name: string, cwd: string) => Promise<void>
   selectedProject: string | null
   onSelectProject: (id: string) => void
   theme: "light" | "dark"
@@ -113,11 +113,16 @@ export function LaunchPad({
   onCloudConnect,
 }: LaunchPadProps) {
   const { t } = useLocale()
+  const themePreference = typeof window !== "undefined"
+    ? ((localStorage.getItem("agentrune_theme") as "light" | "dark" | "system" | null) || "system")
+    : "system"
   const [showNewForm, setShowNewForm] = useState(false)
   const [newName, setNewName] = useState("")
   const [newCwd, setNewCwd] = useState("")
   const [showBrowser, setShowBrowser] = useState(false)
   const [cloudDevices, setCloudDevices] = useState<CloudDevice[]>([])
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState("")
 
   useEffect(() => {
     const token = localStorage.getItem("agentrune_phone_token")
@@ -128,12 +133,20 @@ export function LaunchPad({
       .catch(() => {})
   }, [])
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!newName.trim() || !newCwd.trim()) return
-    onNewProject(newName.trim(), newCwd.trim())
-    setNewName("")
-    setNewCwd("")
-    setShowNewForm(false)
+    setCreating(true)
+    setCreateError("")
+    try {
+      await onNewProject(newName.trim(), newCwd.trim())
+      setNewName("")
+      setNewCwd("")
+      setShowNewForm(false)
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Failed to create project")
+    } finally {
+      setCreating(false)
+    }
   }
 
   const projectSessions = selectedProject
@@ -148,7 +161,7 @@ export function LaunchPad({
     }}>
       {/* Header / Logo Component */}
       <div style={{
-        padding: "48px 20px 32px",
+        padding: "calc(env(safe-area-inset-top, 0px) + 48px) 20px 32px",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -179,9 +192,14 @@ export function LaunchPad({
             transition: "all 0.3s ease",
             zIndex: 10,
           }}
-          aria-label="Toggle theme"
+          aria-label={themePreference === "system" ? "System theme" : "Toggle theme"}
         >
-          {theme === "light" ? (
+          {themePreference === "system" ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M12 3a9 9 0 0 1 0 18V3z"></path>
+            </svg>
+          ) : theme === "light" ? (
             // Moon icon for switching to dark
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
@@ -432,7 +450,7 @@ export function LaunchPad({
 
           {/* + New button */}
           <button
-            onClick={() => setShowNewForm(true)}
+            onClick={() => { setShowNewForm(true); setCreateError("") }}
             style={{
               flexShrink: 0,
               minWidth: 64,
@@ -471,14 +489,14 @@ export function LaunchPad({
         }}>
           <input
             value={newName}
-            onChange={(e) => setNewName(e.target.value)}
+            onChange={(e) => { setNewName(e.target.value); if (createError) setCreateError("") }}
             placeholder={t("launchpad.projectName")}
             style={inputStyle}
           />
           <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
             <input
               value={newCwd}
-              onChange={(e) => setNewCwd(e.target.value)}
+              onChange={(e) => { setNewCwd(e.target.value); if (createError) setCreateError("") }}
               placeholder={t("launchpad.projectPath")}
               style={{ ...inputStyle, flex: 1 }}
             />
@@ -508,6 +526,7 @@ export function LaunchPad({
           <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
             <button
               onClick={handleCreate}
+              disabled={!newName.trim() || !newCwd.trim() || creating}
               style={{
                 flex: 1,
                 padding: "12px",
@@ -517,13 +536,14 @@ export function LaunchPad({
                 color: "#ffffff",
                 fontWeight: 600,
                 fontSize: 14,
-                cursor: "pointer",
+                cursor: !newName.trim() || !newCwd.trim() || creating ? "default" : "pointer",
+                opacity: !newName.trim() || !newCwd.trim() || creating ? 0.6 : 1,
               }}
             >
-              {t("launchpad.create")}
+              {creating ? "Creating..." : t("launchpad.create")}
             </button>
             <button
-              onClick={() => setShowNewForm(false)}
+              onClick={() => { setShowNewForm(false); setCreateError("") }}
               style={{
                 padding: "12px 20px",
                 borderRadius: 12,
@@ -538,6 +558,20 @@ export function LaunchPad({
               {t("launchpad.cancel")}
             </button>
           </div>
+          {createError && (
+            <div style={{
+              marginTop: 12,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(248,113,113,0.24)",
+              background: "rgba(248,113,113,0.08)",
+              color: "#f87171",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}>
+              {createError}
+            </div>
+          )}
         </div>
       )}
 

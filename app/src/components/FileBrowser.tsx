@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react"
-import { getApiBase } from "../lib/storage"
+import { authedFetch, buildApiUrl } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import { PathBadge } from "./PathBadge"
 import { SpringOverlay } from "./SpringOverlay"
@@ -25,6 +25,7 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
   const [parentPath, setParentPath] = useState("")
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  const [errorMessage, setErrorMessage] = useState("")
   const [copied, setCopied] = useState("")
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState("")
@@ -36,9 +37,11 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
   useEffect(() => {
     if (open) {
       setLoadError(false)
-      loadDir(currentPath || undefined)
+      setErrorMessage("")
+      setCopied("")
+      loadDir(initialPath || currentPath || undefined)
     }
-  }, [open])
+  }, [open, initialPath])
 
   // Intercept Android hardware back button when overlay is visible
   useEffect(() => {
@@ -52,34 +55,36 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
   }, [open])
 
   const loadDir = async (path?: string) => {
-    const base = getApiBase()
-    if (!base) {
-      setLoadError(true)
-      setLoading(false)
-      return
-    }
     setLoadError(false)
+    setErrorMessage("")
     setLoading(true)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 8000)
     try {
       const url = path
-        ? `${base}/api/browse?path=${encodeURIComponent(path)}`
-        : `${base}/api/browse`
-      const res = await fetch(url, { signal: controller.signal })
+        ? buildApiUrl(`/api/browse?path=${encodeURIComponent(path)}`)
+        : buildApiUrl("/api/browse")
+      const res = await authedFetch(url, { signal: controller.signal })
       if (res.ok) {
         const data = await res.json()
         setCurrentPath(data.path)
         setParentPath(data.parent)
         setEntries(data.entries)
       } else {
+        const data = await res.json().catch(() => null)
+        setErrorMessage(data?.error || t("file.loadError"))
         setLoadError(true)
       }
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : ""
+      // AbortError = timeout, TypeError "Failed to fetch" = network/tunnel down
+      const isNetwork = !msg || msg === "signal is aborted without reason" || msg.includes("Failed to fetch") || msg.includes("aborted")
+      setErrorMessage(isNetwork ? t("file.loadError") : msg)
       setLoadError(true)
+    } finally {
+      clearTimeout(timeout)
+      setLoading(false)
     }
-    clearTimeout(timeout)
-    setLoading(false)
   }
 
   const handleSelect = (path: string) => {
@@ -99,20 +104,24 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim()) return
-    const base = getApiBase()
-    const folderPath = currentPath + "/" + newFolderName.trim()
+    setErrorMessage("")
     try {
-      const res = await fetch(`${base}/api/mkdir`, {
+      const res = await authedFetch(buildApiUrl("/api/mkdir"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: folderPath }),
+        body: JSON.stringify({ parentPath: currentPath, name: newFolderName.trim() }),
       })
       if (res.ok) {
         setNewFolderName("")
         setShowNewFolder(false)
         await loadDir(currentPath)
+        return
       }
-    } catch {}
+      const data = await res.json().catch(() => null)
+      setErrorMessage(data?.error || t("file.loadError"))
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : t("file.loadError"))
+    }
   }
 
   return (
@@ -128,7 +137,7 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
     }}>
       {/* Header — same as LaunchPad header area */}
       <div style={{
-        padding: "48px 20px 16px",
+        padding: "calc(env(safe-area-inset-top, 0px) + 48px) 20px 16px",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -224,6 +233,22 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
             </button>
           </div>
         )}
+        {errorMessage && !loadError && (
+          <div style={{
+            width: "100%",
+            maxWidth: 400,
+            marginTop: 12,
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid rgba(248,113,113,0.24)",
+            background: "rgba(248,113,113,0.08)",
+            color: "#f87171",
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}>
+            {errorMessage}
+          </div>
+        )}
       </div>
 
       {/* Section label + parent nav */}
@@ -279,9 +304,27 @@ export function FileBrowser({ open, onClose, onSelectPath, onPreviewFile, initia
           </div>
         ) : loadError ? (
           <div style={{ textAlign: "center", padding: 40 }}>
-            <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              <div style={{
+                width: 56,
+                height: 56,
+                borderRadius: 18,
+                border: "1px solid rgba(248,113,113,0.2)",
+                background: "rgba(248,113,113,0.08)",
+                color: "#f87171",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </div>
+            </div>
             <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-              {t("file.loadError")}
+              {errorMessage || t("file.loadError")}
             </div>
             <button
               onClick={() => loadDir(currentPath || undefined)}

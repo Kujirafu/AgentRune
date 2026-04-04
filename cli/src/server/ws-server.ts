@@ -912,10 +912,14 @@ export function createServer(portOverride?: number) {
     const hasTrailingR = input.endsWith("\r")
     const hasTrailingN = input.endsWith("\n")
     const baseText = (hasTrailingR || hasTrailingN) ? input.slice(0, -1) : input
-    const imagePaths = savedPaths.join(" ")
+    // Use forward slashes for cross-platform compatibility inside the instruction
+    const imagePaths = savedPaths.map(p => p.replace(/\\/g, "/")).join(" ")
+    const imageInstruction = savedPaths.length === 1
+      ? `Please use your View/Read tool to open this image file before responding: ${imagePaths}`
+      : `Please use your View/Read tool to open each of these image files before responding: ${imagePaths}`
     const withImages = baseText.trim()
-      ? `${baseText} [Attached images — please read these files:] ${imagePaths}`
-      : `[Attached images — please read these files:] ${imagePaths}`
+      ? `${baseText}\n\n${imageInstruction}`
+      : imageInstruction
 
     if (hasTrailingR) return `${withImages}\r`
     if (hasTrailingN) return `${withImages}\n`
@@ -2287,6 +2291,44 @@ export function createServer(portOverride?: number) {
       })
     } catch {
       res.status(500).json({ error: "Cannot read directory" })
+    }
+  })
+
+  app.post("/api/mkdir", (req, res) => {
+    const userHome = process.env.HOME || process.env.USERPROFILE || "."
+    const rawPath = typeof req.body?.path === "string" ? req.body.path : ""
+    const parentPath = typeof req.body?.parentPath === "string" ? req.body.parentPath : ""
+    const rawName = typeof req.body?.name === "string" ? req.body.name.trim() : ""
+
+    if (!rawPath && (!parentPath || !rawName)) {
+      return res.status(400).json({ error: "Missing path or parentPath/name" })
+    }
+
+    if (rawName && (/[\\/]/.test(rawName) || rawName === "." || rawName === "..")) {
+      return res.status(400).json({ error: "Invalid folder name" })
+    }
+
+    const dirPath = normalize(resolve(rawPath || join(parentPath, rawName)))
+    if (!isWithinDir(dirPath, userHome)) {
+      return res.status(403).json({ error: "Access denied: path outside home directory" })
+    }
+
+    if (existsSync(dirPath)) {
+      try {
+        if (statSync(dirPath).isDirectory()) {
+          return res.status(409).json({ error: "Folder already exists" })
+        }
+      } catch {
+        // fall through to the generic create error below
+      }
+      return res.status(400).json({ error: "Path already exists and is not a directory" })
+    }
+
+    try {
+      mkdirSync(dirPath, { recursive: false })
+      res.json({ ok: true, path: dirPath })
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "Cannot create directory" })
     }
   })
 

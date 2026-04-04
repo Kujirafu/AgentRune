@@ -783,6 +783,7 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
   }, [sentHistory.length])
 
   const pendingSendRef = useRef(false)
+  const fileLoadingCountRef = useRef(0)
   const sendFiredRef = useRef(false) // prevent double-fire from touchend + click
   // eslint-disable-next-line @typescript-eslint/no-use-before-define
   const handleSendInnerRef = useRef<() => void>(() => {})
@@ -855,7 +856,7 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
     if (disabled) return
     // Use synchronous ref check (checkUploading) to avoid React state propagation delay
     const uploading = checkUploading ? checkUploading() : isUploadingImage
-    if (uploading) {
+    if (uploading || fileLoadingCountRef.current > 0) {
       pendingSendRef.current = true
       setUploadPendingSend(true)
       return
@@ -908,12 +909,21 @@ export const InputBar = React.memo(function InputBar({ onSend, onImagePaste, onB
     if (!files || files.length === 0) return
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue
+      fileLoadingCountRef.current++
       const reader = new FileReader()
       reader.onload = () => {
+        fileLoadingCountRef.current--
         const base64 = reader.result as string
         setPasteImages(prev => [...prev, base64])
         onImagePaste?.(base64, file.name || `image.${file.type.split("/")[1] || "png"}`)
+        // If the user already pressed Send while the image was loading, fire it now
+        if (pendingSendRef.current && fileLoadingCountRef.current === 0) {
+          pendingSendRef.current = false
+          setUploadPendingSend(false)
+          setTimeout(() => handleSendInnerRef.current(), 0)
+        }
       }
+      reader.onerror = () => { fileLoadingCountRef.current-- }
       reader.readAsDataURL(file)
     }
     // Reset so same file can be picked again

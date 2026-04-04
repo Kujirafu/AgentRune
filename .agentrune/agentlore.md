@@ -62,6 +62,23 @@ AgentRune 是手機與桌面的 AI agent 控制台，負責啟動、監控、恢
 - Session event history is now kept at `500` entries end-to-end instead of mixing `200` on disk with `500` in memory. This reduces the case where long-running or recently restarted sessions still show activity in terminal scrollback but the Events panel can only replay a shorter tail.
 - Init-status events (`Initializing project memory` / completion), queued client-stored events, replayed resume decisions, and delayed PTY-derived events now all flow through the same persistence path, so Events replay after restart is less dependent on which producer created the event.
 
+## 2026-04-04 Update
+- Double-tap-to-send for gallery images is fixed: `InputBar` tracks active `FileReader` instances and defers the send until all images are loaded. Single tap now reliably sends text + images together.
+- Image instruction to agent is now explicit: instead of `[Attached images — please read these files:]`, the PTY input now says `Please use your View/Read tool to open this image file before responding:` with forward-slash paths, so Claude Code reliably invokes View.
+- FileBrowser safe area fixed: header now uses `calc(env(safe-area-inset-top, 0px) + 48px)` so content is not hidden behind the status bar on edge-to-edge Android (BUG-001 from QA report).
+- Same safe area fix applied to SettingsSheet, InsightSheet, and LaunchPad headers.
+- QA report v0.2.24: all actionable bugs confirmed fixed (BUG-001 today, BUG-003/004/005/006/IMP-001 previously). BUG-002 (Seasons) is not a feature in this codebase.
+
+## 2026-03-28 Update
+- Mobile image sends are now single-shot across both `MissionControl` and `TerminalView`: the client no longer pre-uploads images or injects a temporary file path into the terminal input before the real send. Image payloads ride with the actual `input` / `session_input` message, which fixes the "press send twice" regression and avoids stale upload paths that Codex later reports as missing.
+- App-side REST auth is now normalized through `agentrune_api_token`. WebSocket session tokens are mirrored into local storage on connect and refresh, and `authedFetch()` now prefers that token before falling back to the older cloud token. File-browse and project-management flows can therefore authenticate even when there is no separate cloud token in storage.
+- File browsing and folder creation now use authenticated first-party APIs instead of a brittle "connected computer" heuristic. `FileBrowser` builds URLs through `buildApiUrl(...)`, reads directories with `authedFetch(...)`, surfaces real server errors inline, and creates folders through the new daemon route `POST /api/mkdir`.
+- The daemon now owns folder creation through `/api/mkdir`, including path validation, home-directory confinement, and conflict handling. This replaces the old silent failure path from the mobile browser UI and gives the app a single source of truth for directory creation.
+- Project creation errors are no longer swallowed in the app. `App.tsx`, `LaunchPad`, and `NewSessionSheet` now preserve server-side failure details and keep the form open instead of dismissing it on a failed create.
+- Theme preference now supports `system` end-to-end. The app resolves light/dark from `prefers-color-scheme`, persists the explicit preference separately from the resolved theme, and updates mobile/desktop theme toggles to reflect the three-state cycle.
+- The legacy QA report for `0.2.24` was triaged against the current tree. The actionable items were project-create failure handling, file browser/new folder behavior, and system-theme support; the old `Seasons` issue does not map to a current feature in this repository.
+- Validation completed locally after a safe daemon restart: `npm run typecheck -w app`, `npm run typecheck -w cli`, `npm run typecheck -w desktop`, full app/cli/desktop test suites, `npm run test:e2e -w app`, and a real daemon WebSocket smoke that attached a session and sent a single message carrying an inline base64 image payload.
+
 ## How To Maintain
 - 開 session 先讀這份索引，不要預設把所有 context section 一次讀完
 - 依目前任務只打開相關 section，需要時再補讀其他 section
