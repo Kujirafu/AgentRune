@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import { SpringOverlay } from "./SpringOverlay"
 
@@ -24,7 +24,7 @@ export function FilePreview({ open, filePath, onClose }: FilePreviewProps) {
     setLoading(true)
     setError("")
     setContent("")
-    fetch(`${getApiBase()}/api/file?path=${encodeURIComponent(filePath)}`)
+    authedFetch(`${getApiBase()}/api/file?path=${encodeURIComponent(filePath)}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.error) {

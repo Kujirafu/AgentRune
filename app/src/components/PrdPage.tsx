@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { TaskStore, Task, Prd } from "../types"
 import { SpringOverlay } from "./SpringOverlay"
@@ -23,7 +23,7 @@ export function PrdPage({ open, projectId, projectName, onClose, onStartTask, th
 
   const fetchTasks = useCallback(() => {
     setLoading(true)
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`)
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
       .then((data) => { if (data) setStore(data) })
       .catch(() => {})
@@ -46,7 +46,7 @@ export function PrdPage({ open, projectId, projectName, onClose, onStartTask, th
     const task = store.tasks.find((t) => t.id === taskId)
     if (!task) return
     const next = task.status === "pending" ? "in_progress" : task.status === "in_progress" ? "done" : "pending"
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: next }),

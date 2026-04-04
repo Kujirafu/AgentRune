@@ -8,6 +8,7 @@ dist-server/
 
 # APK files (use GitHub Releases, not repo)
 *.apk
+*.aab
 
 # Firebase/Google services config (contains API keys)
 **/google-services.json
@@ -68,3 +69,8 @@ app/test-results/
 cli/coverage/
 .worktrees/
 .agentrune-session.json
+desktop/release/
+desktop/release-build/
+desktop/release-smoke/
+.release-assets/
+*_agentrune_qa_report.pdf

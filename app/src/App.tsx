@@ -31,6 +31,18 @@ import { isSummaryNoise } from "./lib/session-summary"
 import { identifyUser, trackLogin, trackSessionStart, trackSessionEnd, trackScreenView, trackViewModeChange, trackAgentLaunch, trackOnboardingSkip, trackOnboardingComplete, trackConnectStep, trackConnectEscape } from "./lib/analytics"
 import { OnboardingCarousel } from "./components/OnboardingCarousel"
 
+type ThemePreference = "light" | "dark" | "system"
+
+function getSystemTheme(): "light" | "dark" {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return "light"
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+}
+
+function getStoredThemePreference(): ThemePreference {
+  const stored = localStorage.getItem("agentrune_theme")
+  return stored === "light" || stored === "dark" || stored === "system" ? stored : "system"
+}
+
 // ─── Error Boundary ──────────────────────────────────────────
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
@@ -347,6 +359,7 @@ function useWs() {
     }
     connectingRef.current = true
     tokenRef.current = sessionToken
+    localStorage.setItem("agentrune_api_token", sessionToken)
 
     const ws = new WebSocket(`${getWsUrl()}?token=${encodeURIComponent(sessionToken)}`)
     wsRef.current = ws
@@ -416,6 +429,7 @@ function useWs() {
       // Handle token refresh from daemon (e.g. after daemon restart)
       if (msg.type === "token_refresh" && msg.sessionToken) {
         tokenRef.current = msg.sessionToken as string
+        localStorage.setItem("agentrune_api_token", msg.sessionToken as string)
       }
       // Track which daemon we're connected to (dev vs release)
       // Also store tunnel URL and refresh token so we can reconnect after daemon restart
@@ -1451,9 +1465,9 @@ export function App() {
   const sessionEventsMapRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const completionStatusRef = useRef<Map<string, AppSession["lastAgentStatus"]>>(new Map())
   const completionNoticeIdsRef = useRef<Map<string, number>>(new Map())
-  const [theme, setTheme] = useState<"light" | "dark">(
-    () => (localStorage.getItem("agentrune_theme") as "light" | "dark") || "light"
-  )
+  const [themePreference, setThemePreference] = useState<ThemePreference>(getStoredThemePreference)
+  const [systemTheme, setSystemTheme] = useState<"light" | "dark">(getSystemTheme)
+  const theme = themePreference === "system" ? systemTheme : themePreference
   const { connect, send, on, wsConnected } = useWs()
   const [pendingPhaseGate, setPendingPhaseGate] = useState<PhaseGateRequest | null>(null)
   const [pendingReauthQueue, setPendingReauthQueue] = useState<PendingReauthRequest[]>([])
@@ -1748,6 +1762,7 @@ export function App() {
         // Phone token expired or no ONLINE device — reset to ConnectScreen
         localStorage.removeItem("agentrune_phone_token")
         localStorage.removeItem("agentrune_cloud_token")
+        localStorage.removeItem("agentrune_api_token")
         setIsCloudMode(false)
         setCloudSessionToken(null)
         setServerReady(false)
@@ -1787,6 +1802,10 @@ export function App() {
   // without adding wsToken to their dependency arrays.
   const wsTokenRef = useRef(wsToken)
   wsTokenRef.current = wsToken
+  useEffect(() => {
+    if (wsToken) localStorage.setItem("agentrune_api_token", wsToken)
+    else localStorage.removeItem("agentrune_api_token")
+  }, [wsToken])
   useEffect(() => {
     if (!isAuthed || !wsToken) return
     // In Capacitor, don't attempt WS if no server URL is configured (fresh install)
@@ -1855,6 +1874,15 @@ export function App() {
       }
     })
   }, [currentSessionId, on])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return
+    const media = window.matchMedia("(prefers-color-scheme: dark)")
+    const sync = () => setSystemTheme(media.matches ? "dark" : "light")
+    sync()
+    media.addEventListener?.("change", sync)
+    return () => media.removeEventListener?.("change", sync)
+  }, [])
 
   // Theme: apply dark class to <html>
   useEffect(() => {
@@ -2279,11 +2307,13 @@ export function App() {
   }, [])
 
   const toggleTheme = () => {
-    const newTheme = theme === "light" ? "dark" : "light"
-    setTheme(newTheme)
-    localStorage.setItem("agentrune_theme", newTheme)
+    const order: ThemePreference[] = ["system", "light", "dark"]
+    const currentIdx = order.indexOf(themePreference)
+    const nextTheme = order[(currentIdx + 1) % order.length]
+    setThemePreference(nextTheme)
+    localStorage.setItem("agentrune_theme", nextTheme)
     // Notify Electron to update titlebar overlay colors
-    ;(window as any).electronAPI?.setTheme?.(newTheme === "dark")
+    ;(window as any).electronAPI?.setTheme?.((nextTheme === "system" ? systemTheme : nextTheme) === "dark")
   }
 
   // Snapshot event handler — dispatched by ProjectOverview context menu
@@ -2482,7 +2512,8 @@ export function App() {
     trackSessionStart(agentId, projectId)
     trackAgentLaunch(agentId, projectId)
     sessionStartTimeRef.current = Date.now()
-    const sessionId = `${projectId}_${Date.now()}`
+    // Reuse old sessionId when resuming (settings change restart) so server can find claudeSessionId
+    const sessionId = resumeAgentSessionId || `${projectId}_${Date.now()}`
     setSelectedProject(projectId)
     setActiveAgentId(agentId)
     setCurrentSessionId(sessionId)
@@ -2569,21 +2600,22 @@ export function App() {
 
   // New project handler
   const handleNewProject = async (name: string, cwd: string) => {
-    try {
-      const token = wsTokenRef.current
-      const headers: Record<string, string> = { "Content-Type": "application/json" }
-      if (token) headers.Authorization = `Bearer ${token}`
-      const res = await fetch(`${getApiBase()}/api/projects`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ name, cwd }),
-      })
-      if (res.ok) {
-        const project = await res.json()
-        setProjects((prev) => [...prev, project])
-        setSelectedProject(project.id)
-      }
-    } catch { }
+    const token = wsTokenRef.current
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (token) headers.Authorization = `Bearer ${token}`
+
+    const res = await fetch(`${getApiBase()}/api/projects`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name, cwd }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) {
+      throw new Error(data?.error || `Failed to create project (${res.status})`)
+    }
+
+    setProjects((prev) => [...prev, data])
+    setSelectedProject(data.id)
   }
 
   const handleDeleteProject = async (projectId: string) => {

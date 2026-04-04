@@ -1139,9 +1139,17 @@ export function createServer(portOverride?: number) {
     }
   }
 
-  // --- Session-to-Claude mapping (persisted to disk for resume across daemon restarts) ---
+  type PersistedSessionMapping = {
+    claudeSessionId: string
+    projectId: string
+    lastTitle: string
+    cwd?: string
+    codexJsonlPath?: string
+  }
+
+  // --- Session-to-agent mapping (persisted to disk for resume across daemon restarts) ---
   const sessionMapPath = join(getConfigDir(), "session-map.json")
-  const sessionClaudeMap = new Map<string, { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string }>()
+  const sessionClaudeMap = new Map<string, PersistedSessionMapping>()
   const lastResumeTimeBySession = new Map<string, number>()
 
   function loadSessionMap() {
@@ -1149,7 +1157,7 @@ export function createServer(portOverride?: number) {
       if (existsSync(sessionMapPath)) {
         const raw = JSON.parse(readFileSync(sessionMapPath, "utf-8"))
         for (const [k, v] of Object.entries(raw)) {
-          sessionClaudeMap.set(k, v as { claudeSessionId: string; projectId: string; lastTitle: string; cwd?: string })
+          sessionClaudeMap.set(k, v as PersistedSessionMapping)
         }
       }
     } catch { /* ignore */ }
@@ -1161,15 +1169,37 @@ export function createServer(portOverride?: number) {
     } catch { /* ignore */ }
   }
 
-  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string, cwd?: string) {
+  function updateSessionMetadata(
+    agentruneSessionId: string,
+    patch: {
+      claudeSessionId?: string
+      projectId?: string
+      lastTitle?: string
+      cwd?: string
+      codexJsonlPath?: string | null
+    },
+  ) {
     const existing = sessionClaudeMap.get(agentruneSessionId)
-    sessionClaudeMap.set(agentruneSessionId, {
+    const next: PersistedSessionMapping = {
+      claudeSessionId: patch.claudeSessionId ?? existing?.claudeSessionId ?? "",
+      projectId: patch.projectId ?? existing?.projectId ?? "",
+      lastTitle: patch.lastTitle ?? existing?.lastTitle ?? "",
+      cwd: patch.cwd ?? existing?.cwd,
+      codexJsonlPath: Object.prototype.hasOwnProperty.call(patch, "codexJsonlPath")
+        ? (patch.codexJsonlPath || undefined)
+        : existing?.codexJsonlPath,
+    }
+    sessionClaudeMap.set(agentruneSessionId, next)
+    saveSessionMap()
+  }
+
+  function updateSessionMapping(agentruneSessionId: string, claudeSessionId: string, projectId: string, lastTitle?: string, cwd?: string) {
+    updateSessionMetadata(agentruneSessionId, {
       claudeSessionId,
       projectId,
-      lastTitle: lastTitle || existing?.lastTitle || "",
-      cwd: cwd || existing?.cwd,
+      lastTitle,
+      cwd,
     })
-    saveSessionMap()
   }
 
   loadSessionMap()
@@ -4409,16 +4439,26 @@ export function createServer(portOverride?: number) {
           if (!sessionJsonlWatchers.has(session.id)) {
             const sid = session.id
             const baseCb = makeWatcherCallback(sid)
-            // Wrap callback to capture Claude session ID from JSONL watcher path
+            // Wrap callback to capture agent-specific session metadata from watcher paths.
             const cb = (events: AgentEvent[]) => {
               baseCb(events)
-              // Try to extract Claude session ID from watcher's JSONL path
               if (agentId === "claude" && watcher && (watcher as any).jsonlPath) {
                 const jsonlFile = ((watcher as any).jsonlPath as string).split(/[/\\]/).pop()?.replace(/\.jsonl$/, "")
                 const existingMapping = sessionClaudeMap.get(sid)
                 if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
                   updateSessionMapping(sid, jsonlFile, projectId, sessionLastTitle.get(sid), sessionProject.cwd)
                   log.info(`[session-map] Mapped ${sid} → Claude session ${jsonlFile} cwd=${sessionProject.cwd}`)
+                }
+              } else if (agentId === "codex" && watcher && (watcher as any).jsonlPath) {
+                const jsonlPath = (watcher as any).jsonlPath as string
+                const existingMapping = sessionClaudeMap.get(sid)
+                if (jsonlPath && existingMapping?.codexJsonlPath !== jsonlPath) {
+                  updateSessionMetadata(sid, {
+                    projectId,
+                    cwd: sessionProject.cwd,
+                    codexJsonlPath: jsonlPath,
+                  })
+                  log.info(`[session-map] Mapped ${sid} → Codex session ${jsonlPath} cwd=${sessionProject.cwd}`)
                 }
               }
             }
@@ -4436,7 +4476,20 @@ export function createServer(portOverride?: number) {
               watcher = new JsonlWatcher(watcherCwd, cb, claudeSessionId, skipReplay)
               log.info(`[attach] JsonlWatcher created for cwd=${watcherCwd} claudeSessionId=${claudeSessionId || "none"} skipReplay=${skipReplay}`)
             } else if (agentId === "codex") {
-              watcher = new CodexWatcher(sessionProject.cwd, cb)
+              const persistedCodexJsonlPath = alreadyExisted ? sessionClaudeMap.get(session.id)?.codexJsonlPath : undefined
+              const minCodexSessionMtime = alreadyExisted ? undefined : Date.now()
+              if (!alreadyExisted && sessionClaudeMap.get(session.id)?.codexJsonlPath) {
+                updateSessionMetadata(session.id, {
+                  projectId: sessionProject.id,
+                  cwd: sessionProject.cwd,
+                  codexJsonlPath: null,
+                })
+              }
+              watcher = new CodexWatcher(sessionProject.cwd, cb, {
+                preferredPath: persistedCodexJsonlPath,
+                minMtimeMs: minCodexSessionMtime,
+              })
+              log.info(`[attach] CodexWatcher created for cwd=${sessionProject.cwd} preferredPath=${persistedCodexJsonlPath || "none"} minMtimeMs=${minCodexSessionMtime ?? "none"}`)
             } else if (agentId === "gemini") {
               watcher = new GeminiWatcher(sessionProject.cwd, cb)
             }
@@ -4541,15 +4594,11 @@ export function createServer(portOverride?: number) {
           if (agentId !== "terminal") {
             sessionLaunchSettings.set(session.id, { agentId, settings: normalizedSettings, projectId: sessionProject.id })
             saveSessionAgentType(session.id, agentId)
-            // Persist CWD so JSONL watcher can find the right file after daemon restart
-            const existingMapping = sessionClaudeMap.get(session.id)
-            if (existingMapping) {
-              existingMapping.cwd = sessionProject.cwd
-              saveSessionMap()
-            } else {
-              sessionClaudeMap.set(session.id, { claudeSessionId: "", projectId: sessionProject.id, lastTitle: "", cwd: sessionProject.cwd })
-              saveSessionMap()
-            }
+            // Persist CWD so JSONL watchers can find the right file after daemon restart.
+            updateSessionMetadata(session.id, {
+              projectId: sessionProject.id,
+              cwd: sessionProject.cwd,
+            })
           }
 
           const isRecoverable = requestedSessionId && !alreadyExisted && agentId !== "terminal" && msg.isAgentResume
@@ -5759,6 +5808,16 @@ export function createServer(portOverride?: number) {
                   if (jsonlFile && existingMapping?.claudeSessionId !== jsonlFile) {
                     updateSessionMapping(sid, jsonlFile, projId, sessionLastTitle.get(sid), watcherCwd2)
                   }
+                } else if (resolvedAgentType === "codex" && watcher && (watcher as any).jsonlPath) {
+                  const jsonlPath = (watcher as any).jsonlPath as string
+                  const existingMapping = sessionClaudeMap.get(sid)
+                  if (jsonlPath && existingMapping?.codexJsonlPath !== jsonlPath) {
+                    updateSessionMetadata(sid, {
+                      projectId: projId,
+                      cwd: watcherCwd2,
+                      codexJsonlPath: jsonlPath,
+                    })
+                  }
                 }
               }
               let watcher: { stop(): void; rescan?(): void; [key: string]: any } | null = null
@@ -5766,7 +5825,8 @@ export function createServer(portOverride?: number) {
                 const claudeId2 = sessionClaudeMap.get(sid)?.claudeSessionId
                 watcher = new JsonlWatcher(watcherCwd2, cb, claudeId2 || undefined, true)
               } else if (resolvedAgentType === "codex") {
-                watcher = new CodexWatcher(watcherCwd2, cb)
+                const codexJsonlPath = sessionClaudeMap.get(sid)?.codexJsonlPath
+                watcher = new CodexWatcher(watcherCwd2, cb, { preferredPath: codexJsonlPath })
               } else if (resolvedAgentType === "gemini") {
                 watcher = new GeminiWatcher(watcherCwd2, cb)
               }

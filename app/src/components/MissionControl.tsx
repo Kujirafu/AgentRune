@@ -4,7 +4,7 @@ import { createPortal } from "react-dom"
 import type { Project, ProjectSettings, AppSession } from "../types"
 import type { AgentEvent } from "../types"
 import { AGENTS, getEffectiveCodexMode } from "../types"
-import { getSettings, saveSettings, addRecentCommand, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath, buildApiUrl } from "../lib/storage"
+import { getSettings, saveSettings, addRecentCommand, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath, buildApiUrl, authedFetch } from "../lib/storage"
 import { EventCard } from "./EventCard"
 import { ProgressCard } from "./ProgressCard"
 import type { AgentStatus } from "./StatusIndicator"
@@ -58,7 +58,7 @@ interface MissionControlProps {
   onVoice?: () => void
   onRequestVoiceRef?: React.MutableRefObject<((callback: (text: string) => void, label?: string) => void) | null>
   wsConnected?: boolean
-  onLaunchSession?: (projectId: string, agentId: string) => void
+  onLaunchSession?: (projectId: string, agentId: string, resumeSessionId?: string) => void
   onOpenBuilder?: () => void
 }
 
@@ -142,8 +142,6 @@ export function MissionControl({
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const promptReadyRef = useRef(false)
   const scrollbackProcessedRef = useRef(false)
-  const pendingImagePathsRef = useRef<string[]>([])
-  const [hasPendingImages, setHasPendingImages] = useState(false)
 
   // Voice overlay state — Native Speech Recognition (Capacitor plugin)
   const [voicePhase, setVoicePhase] = useState<"preparing" | "recording" | "cleaning" | "result" | null>(null)
@@ -635,7 +633,7 @@ export function MissionControl({
 
   const handleTrustAction = useCallback(async (automationId: string, action: "approve" | "deny", index: number) => {
     try {
-      await fetch(`${getApiBase()}/api/skill-trust/${encodeURIComponent(automationId)}/confirm`, {
+      await authedFetch(`${getApiBase()}/api/skill-trust/${encodeURIComponent(automationId)}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
@@ -860,7 +858,7 @@ export function MissionControl({
           showToast(t("mc.bypassDisabled") || "Bypass disabled — restarting...", 3000)
           onKillSession(sessionId)
           setEvents([])
-          setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+          setTimeout(() => onLaunchSession?.(project.id, agentId, sessionId), 500)
         }
       }
       // Sandbox level change → restart to apply new SkillMonitor
@@ -868,7 +866,7 @@ export function MissionControl({
         showToast(locale.startsWith("zh") ? "沙盒等級已變更，重啟中..." : "Sandbox changed — restarting...", 3000)
         onKillSession(sessionId)
         setEvents([])
-        setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+        setTimeout(() => onLaunchSession?.(project.id, agentId, sessionId), 500)
       }
     }
 
@@ -929,7 +927,7 @@ export function MissionControl({
     if (sessionId) {
       onKillSession(sessionId)
       setEvents([])
-      setTimeout(() => onLaunchSession?.(project.id, agentId), 500)
+      setTimeout(() => onLaunchSession?.(project.id, agentId, sessionId), 500)
     }
   }, [settings, project.id, sessionId, agentId, showToast, t, onKillSession, onLaunchSession])
 
@@ -946,54 +944,6 @@ export function MissionControl({
     return send({ type: "input", data })
   }, [send])
 
-  const uploadingCountRef = useRef(0)
-  const [isUploadingImage, setIsUploadingImage] = useState(false)
-  const checkUploading = useCallback(() => uploadingCountRef.current > 0, [])
-
-  const handleImagePaste = useCallback(async (base64: string, filename: string) => {
-    uploadingCountRef.current++
-    setIsUploadingImage(true)
-    try {
-      const res = await fetch(`${getApiBase()}/api/upload`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: project.id, data: base64, filename }),
-      })
-      if (!res.ok) {
-        const errText = await res.text().catch(() => res.statusText)
-        setEvents(prev => [...prev, {
-          id: `err_${Date.now()}`, timestamp: Date.now(),
-          type: "error" as const, status: "failed" as const,
-          title: t("mc.uploadFailed") || "Image upload failed",
-          detail: `${res.status}: ${errText.slice(0, 200)}`,
-        }].slice(-200))
-        return
-      }
-      const data = await res.json()
-      // Show upload event with image thumbnail
-      setEvents(prev => [...prev, {
-        id: `img_${Date.now()}`, timestamp: Date.now(),
-        type: "info" as const, status: "completed" as const,
-        title: t("mc.imageUploaded") || "Image uploaded",
-        detail: `__IMG__${base64}`,
-        raw: "",
-      }].slice(-200))
-      // Queue the path — will be sent together with the user's next message
-      pendingImagePathsRef.current.push(data.path)
-      setHasPendingImages(true)
-    } catch (err) {
-      setEvents(prev => [...prev, {
-        id: `err_${Date.now()}`, timestamp: Date.now(),
-        type: "error" as const, status: "failed" as const,
-        title: t("mc.uploadFailed") || "Image upload failed",
-        detail: err instanceof Error ? err.message : "Network error",
-      }].slice(-200))
-    } finally {
-      uploadingCountRef.current--
-      if (uploadingCountRef.current === 0) setIsUploadingImage(false)
-    }
-  }, [project.id, sendInput, t, setEvents])
-
   // Queue for commands sent during initialization — forwarded after init completes
   const pendingCommandRef = useRef<{ text: string; flags?: SendFlags; images?: string[] } | null>(null)
 
@@ -1002,7 +952,7 @@ export function MissionControl({
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
 
     // If still initializing, queue the command and send after init completes
-    if (initializing && text.trim()) {
+    if (initializing && (text.trim() || (images && images.length > 0))) {
       pendingCommandRef.current = { text, flags, images }
       return
     }
@@ -1024,7 +974,7 @@ export function MissionControl({
     if (flags?.task) {
       const taskText = text
       // Append to AgentRune task store (Plan panel)
-      fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`)
+      authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`)
         .then(r => r.json())
         .then((store: import("../types").TaskStore | null) => {
           const existing = store?.tasks || []
@@ -1036,7 +986,7 @@ export function MissionControl({
             status: "pending",
             dependsOn: [],
           }
-          return fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`, {
+          return authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(project.id)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tasks: [...existing, newTask] }),
@@ -1045,19 +995,7 @@ export function MissionControl({
         .catch(() => {})
       text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
     }
-    // Grab any pending image paths from successful HTTP uploads
-    const pendingImages = pendingImagePathsRef.current.splice(0)
-    let usedHttpPaths = false
-    if (pendingImages.length > 0) {
-      usedHttpPaths = true
-      setHasPendingImages(false)
-      const imagePaths = pendingImages.join(" ")
-      text = text.trim()
-        ? `${text} [Attached images — please read these files:] ${imagePaths}`
-        : `[Attached images — please read these files:] ${imagePaths}`
-    }
-    // If HTTP upload failed but we have inline images, use WS fallback
-    const wsImages = (!usedHttpPaths && images && images.length > 0) ? images : undefined
+    const wsImages = images && images.length > 0 ? images : undefined
 
     const trimmedInput = text.trim()
     if (!trimmedInput && !wsImages) return
@@ -1119,7 +1057,7 @@ export function MissionControl({
 
     // Insert user message as event for message-output correspondence
     // Include image thumbnails if present (from WS inline or HTTP upload)
-    const eventImages = images && images.length > 0 ? images : undefined
+    const eventImages = wsImages
     const userEvent = {
       id: `usr_${Date.now()}`,
       timestamp: Date.now(),
@@ -2134,7 +2072,6 @@ return (
             {/* QuickActions removed — toolbar integrated into InputBar */}
             <InputBar
               onSend={handleSendCommand}
-              onImagePaste={handleImagePaste}
               onVoice={mcStartVoice}
               onInsight={openInsight}
               autoFocus={false}
@@ -2147,9 +2084,6 @@ return (
               onRemoveFile={removeFile}
               disabled={initializing}
               disabledHint={t("mc.initializing") || "初始化中，請稍候…"}
-              isUploadingImage={isUploadingImage}
-              checkUploading={checkUploading}
-              hasPendingImages={hasPendingImages}
               onOpenBuilder={onOpenBuilder}
             />
           </div>

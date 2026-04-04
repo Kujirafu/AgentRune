@@ -10,6 +10,7 @@ vi.mock("./StandardsPage", () => ({
 // Mock getApiBase
 vi.mock("../lib/storage", () => ({
   getApiBase: () => "",
+  authedFetch: (...args: Parameters<typeof fetch>) => fetch(...args),
 }))
 
 // Mock analytics

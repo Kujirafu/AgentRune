@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import type { Project, ProjectSettings, SmartAction } from "../types"
 import { AGENTS, getEffectiveCodexMode } from "../types"
-import { getSettings, saveSettings, addRecentCommand, getRecentCommands, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath } from "../lib/storage"
+import { getSettings, saveSettings, addRecentCommand, getRecentCommands, getApiBase, getAutoSaveKeysEnabled, getAutoSaveKeysPath, authedFetch } from "../lib/storage"
 import { detectPromptActions, isIdle, isMobile } from "../lib/detect"
 import { commandSent } from "../lib/command-sent"
 import { AnsiParser } from "../lib/ansi-parser"
@@ -12,6 +12,7 @@ import { SettingsSheet } from "./SettingsSheet"
 import { SmartSuggestions } from "./SmartSuggestions"
 import { QuickActions } from "./QuickActions"
 import { InputBar } from "./InputBar"
+import type { SendFlags } from "./InputBar"
 import { DetailPanel } from "./DetailPanel"
 import { FileBrowser } from "./FileBrowser"
 import { useLocale } from "../lib/i18n/index.js"
@@ -28,7 +29,7 @@ interface TerminalViewProps {
   send: (msg: Record<string, unknown>) => boolean
   on: (type: string, handler: (msg: Record<string, unknown>) => void) => (() => void)
   onBack: () => void
-  onLaunchSession?: (projectId: string, agentId: string) => void
+  onLaunchSession?: (projectId: string, agentId: string, resumeSessionId?: string) => void
   onKillSession?: (sessionId: string) => void
 }
 
@@ -164,7 +165,7 @@ export function TerminalView({
     const relaunchSession = () => {
       if (!sessionId || !onKillSession || !onLaunchSession) return false
       onKillSession(sessionId)
-      setTimeout(() => onLaunchSession(project.id, agentId), 500)
+      setTimeout(() => onLaunchSession(project.id, agentId, sessionId), 500)
       return true
     }
 
@@ -225,32 +226,30 @@ export function TerminalView({
     }, 200)
   }, [send])
 
-  const handleSendCommand = useCallback((text: string) => {
+  const handleSendCommand = useCallback((text: string, flags?: SendFlags, images?: string[]) => {
     if (text === "\x03") {
       sendInput(text)
       return
     }
     if (text === "\r") { sendInput(text); return } // Enter key for TUI navigation
-    if (!text.trim()) return  // Don't send empty commands
-    sendInput(text)
-    addRecentCommand(project.id, text)
-  }, [sendInput, project.id])
+    if (flags?.interrupt) {
+      sendInput("\x03")
+      setTimeout(() => handleSendCommand(text, undefined, images), 300)
+      return
+    }
+    if (flags?.task && text.trim()) {
+      text = `[TASK] Add the following to your task list (use TodoWrite), then confirm: ${text}`
+    }
 
-  // Image paste handler
-  const handleImagePaste = useCallback(async (base64: string, filename: string) => {
-    try {
-      const res = await fetch(`${getApiBase()}/api/upload`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: project.id, data: base64, filename }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        // Paste the file path into terminal
-        sendInput(data.path)
-      }
-    } catch {}
-  }, [project.id, sendInput])
+    if (!text.trim() && !(images && images.length > 0)) return
+
+    const sent = images && images.length > 0
+      ? send({ type: "input", data: text, images })
+      : sendInput(text)
+    if (sent && text.trim()) {
+      addRecentCommand(project.id, text)
+    }
+  }, [sendInput, send, project.id])
 
   const buildIdleSuggestions = useCallback(async () => {
     const suggestions: IdleSuggestion[] = []
@@ -263,7 +262,7 @@ export function TerminalView({
     }
 
     try {
-      const res = await fetch(`${getApiBase()}/api/projects/${project.id}/scripts`)
+      const res = await authedFetch(`${getApiBase()}/api/projects/${project.id}/scripts`)
       if (res.ok) {
         const data = await res.json()
         const scripts = data.scripts || {}
@@ -745,7 +744,6 @@ export function TerminalView({
       {/* Input bar with image paste, voice, browse */}
       <InputBar
         onSend={handleSendCommand}
-        onImagePaste={handleImagePaste}
         onBrowse={() => setShowBrowser(true)}
         autoFocus={isMobile}
         slashCommands={agent?.slashCommands}

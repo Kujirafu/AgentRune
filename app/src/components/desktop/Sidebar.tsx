@@ -120,6 +120,14 @@ export function Sidebar({
   onJumpToSession, onResolvePermission,
 }: SidebarProps) {
   const dark = theme === "dark"
+  const themePreference = typeof window !== "undefined"
+    ? ((localStorage.getItem("agentrune_theme") as "light" | "dark" | "system" | null) || "system")
+    : "system"
+  const nextThemePreference = themePreference === "system"
+    ? "light"
+    : themePreference === "light"
+      ? "dark"
+      : "system"
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null)
   const [permPanel, setPermPanel] = useState(false)
   const [permTab, setPermTab] = useState<"inbox" | "recent">("inbox")
@@ -541,16 +549,21 @@ export function Sidebar({
         </button>
         {/* Theme toggle */}
         <button
-          onClick={() => { trackDesktopThemeToggle(dark ? "light" : "dark"); toggleTheme() }}
+          onClick={() => { trackDesktopThemeToggle(nextThemePreference); toggleTheme() }}
           style={{
             width: 28, height: 28, borderRadius: 6, border: "none",
             background: "transparent", cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center",
             color: textSecondary,
           }}
-          title={dark ? "Light mode" : "Dark mode"}
+          title={themePreference === "system" ? "System theme" : dark ? "Light mode" : "Dark mode"}
         >
-          {dark ? (
+          {themePreference === "system" ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 3a9 9 0 0 1 0 18V3z" />
+            </svg>
+          ) : dark ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>

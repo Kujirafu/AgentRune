@@ -29,6 +29,11 @@ export function codexSessionCwdMatchesProject(sessionCwd: string | null, project
     || normalizedProject.startsWith(`${normalizedSession}/`)
 }
 
+export function codexSessionCwdEqualsProject(sessionCwd: string | null, projectCwd: string): boolean {
+  if (!sessionCwd) return false
+  return normalizeComparablePath(sessionCwd) === normalizeComparablePath(projectCwd)
+}
+
 export function readCodexSessionCwd(sessionPath: string): string | null {
   let fd: number | null = null
   try {
@@ -60,10 +65,28 @@ export function readCodexSessionCwd(sessionPath: string): string | null {
   return null
 }
 
-/** Find the most recently modified rollout .jsonl for the same project cwd. */
-function findActiveCodexSession(projectCwd: string): string | null {
-  const sessionsDir = join(homedir(), ".codex", "sessions")
+interface ResolveCodexSessionOptions {
+  sessionsDir?: string
+  preferredPath?: string | null
+  minMtimeMs?: number
+}
+
+/** Find the most recently modified rollout .jsonl for the exact session cwd. */
+export function findActiveCodexSession(projectCwd: string, options: ResolveCodexSessionOptions = {}): string | null {
+  const sessionsDir = options.sessionsDir || join(homedir(), ".codex", "sessions")
   try {
+    const preferredPath = options.preferredPath || null
+    if (preferredPath) {
+      try {
+        statSync(preferredPath)
+        if (codexSessionCwdEqualsProject(readCodexSessionCwd(preferredPath), projectCwd)) {
+          return preferredPath
+        }
+      } catch {
+        // Fall through to a fresh scan if the preferred path disappeared.
+      }
+    }
+
     const candidates: { path: string; mtime: number }[] = []
     for (const year of readdirSync(sessionsDir).filter(f => /^\d{4}$/.test(f))) {
       const yearDir = join(sessionsDir, year)
@@ -77,8 +100,10 @@ function findActiveCodexSession(projectCwd: string): string | null {
                 for (const file of readdirSync(dayDir).filter(f => f.startsWith("rollout-") && f.endsWith(".jsonl"))) {
                   const full = join(dayDir, file)
                   try {
-                    if (!codexSessionCwdMatchesProject(readCodexSessionCwd(full), projectCwd)) continue
-                    candidates.push({ path: full, mtime: statSync(full).mtimeMs })
+                    const stat = statSync(full)
+                    if (typeof options.minMtimeMs === "number" && stat.mtimeMs < options.minMtimeMs) continue
+                    if (!codexSessionCwdEqualsProject(readCodexSessionCwd(full), projectCwd)) continue
+                    candidates.push({ path: full, mtime: stat.mtimeMs })
                   } catch {}
                 }
               } catch {}
@@ -203,6 +228,11 @@ export function codexLineToEvents(line: CodexLine): AgentEvent[] {
 
 export type CodexEventCallback = (events: AgentEvent[]) => void
 
+interface CodexWatcherOptions {
+  preferredPath?: string | null
+  minMtimeMs?: number
+}
+
 export class CodexWatcher {
   private projectCwd: string
   private jsonlPath: string | null = null
@@ -213,10 +243,14 @@ export class CodexWatcher {
   private lastCheck = 0
   private seenPayloadIds = new Set<string>()
   private seenResponseKeys = new Set<string>()
+  private preferredPath: string | null
+  private minMtimeMs?: number
 
-  constructor(projectCwd: string, callback: CodexEventCallback) {
+  constructor(projectCwd: string, callback: CodexEventCallback, options: CodexWatcherOptions = {}) {
     this.projectCwd = projectCwd
     this.callback = callback
+    this.preferredPath = options.preferredPath || null
+    this.minMtimeMs = options.minMtimeMs
   }
 
   start(): void {
@@ -231,12 +265,17 @@ export class CodexWatcher {
   }
 
   private findAndWatch(): void {
-    const active = findActiveCodexSession(this.projectCwd)
+    const active = findActiveCodexSession(this.projectCwd, {
+      preferredPath: this.preferredPath,
+      minMtimeMs: this.minMtimeMs,
+    })
     if (!active) return
 
     if (active !== this.jsonlPath) {
       if (this.watcher) { this.watcher.close(); this.watcher = null }
       this.jsonlPath = active
+      this.preferredPath = active
+      this.minMtimeMs = undefined
       this.seenPayloadIds.clear()
       this.seenResponseKeys.clear()
       // Start from end (don't replay history)

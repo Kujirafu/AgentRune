@@ -4,7 +4,7 @@
 AgentRune 是手機與桌面的 AI agent 控制台，負責啟動、監控、恢復與排程多個 agent session。專案採 monorepo，核心重點是手機與桌面可對同一批 session / agent 無縫切換，並透過 CLI daemon 提供 WebSocket、REST API、PTY 管理與 AgentLore 整合。
 
 ## Current Snapshot
-- Release target is `0.3.5`, not `0.3.1.x`: npm already published `0.3.2` and `0.3.4`, and the current desktop plus Android release artifacts have both been validated locally for the next patch publish.
+- Release target is `0.3.6`, not `0.3.5`: `v0.3.5` is already tagged on an older commit, so the current desktop plus Android bugfix batch must ship under the next patch version.
 - Shared terminal input is now less latent across desktop and mobile: daemon-side queued sends can fall back to stabilized scrollback instead of waiting for a strict prompt marker, Codex multiline submit delay is much shorter, and mobile no longer stacks an extra client-side delayed Enter on top.
 - Desktop Quick Launch now attaches new sessions immediately, so opening a second desktop session no longer waits for a manual Terminal click before its first `/qa` or skill-chain command can start.
 - Desktop left-bottom widget is now a message center, not a permission-only shield: use it for approvals plus completed-session summaries and next steps.
@@ -68,6 +68,11 @@ AgentRune 是手機與桌面的 AI agent 控制台，負責啟動、監控、恢
 - FileBrowser safe area fixed: header now uses `calc(env(safe-area-inset-top, 0px) + 48px)` so content is not hidden behind the status bar on edge-to-edge Android (BUG-001 from QA report).
 - Same safe area fix applied to SettingsSheet, InsightSheet, and LaunchPad headers.
 - QA report v0.2.24: all actionable bugs confirmed fixed (BUG-001 today, BUG-003/004/005/006/IMP-001 previously). BUG-002 (Seasons) is not a feature in this codebase.
+- Codex session binding is stricter now: fresh AgentRune Codex launches no longer attach to the most recently modified Codex JSONL from the same project tree. New watchers wait for a JSONL created after the fresh launch window, and resumed/live sessions reuse a persisted `codexJsonlPath` so mobile does not accidentally mirror an older desktop Codex run.
+- Mobile `SettingsSheet` now gives Gemini and Cursor the same preset-first model UX as Codex. Common model IDs are tappable cards, while manual typing remains available as an advanced fallback for custom IDs.
+- Desktop Windows packaging now avoids stale `release/win-unpacked` lock failures by building into `desktop/release-build` first and then mirroring the top-level installer artifacts back into `desktop/release`. Keep using `npm run package -w desktop`; do not switch back to a direct `electron-builder --win` call unless the old locked-output issue is re-audited.
+- Release staging now has a root `npm run release:assets` step that copies both updater-native desktop files using the exact `latest.yml` names (`AgentRune-Setup-<version>.exe` + `.blockmap`) and website-friendly aliases (`agentrune-desktop.exe`, `agentrune.apk`, `agentrune.aab`) into `.release-assets`, so AgentLore can keep using its fixed `releases/latest/download/...` links without extra website changes.
+- Desktop packaging now launches `electron-builder` through an explicit `cmd.exe /c` wrapper on Windows instead of `shell: true`, which removes the Node child-process safety warning from release builds.
 
 ## 2026-03-28 Update
 - Mobile image sends are now single-shot across both `MissionControl` and `TerminalView`: the client no longer pre-uploads images or injects a temporary file path into the terminal input before the real send. Image payloads ride with the actual `input` / `session_input` message, which fixes the "press send twice" regression and avoids stale upload paths that Codex later reports as missing.

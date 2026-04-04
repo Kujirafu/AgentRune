@@ -4,6 +4,7 @@ import { StandardsContent } from "./StandardsPage"
 
 vi.mock("../lib/storage", () => ({
   getApiBase: () => "",
+  authedFetch: (...args: Parameters<typeof fetch>) => fetch(...args),
 }))
 
 const mockStandards = {

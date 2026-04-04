@@ -6,6 +6,12 @@ function isNativeCapacitor(): boolean {
     (window as any).Capacitor.isNativePlatform?.() === true
 }
 
+export function getApiAuthToken(): string {
+  return localStorage.getItem("agentrune_api_token")
+    || localStorage.getItem("agentrune_cloud_token")
+    || ""
+}
+
 export function getSettings(projectId: string): ProjectSettings {
   try {
     const raw = localStorage.getItem(`agentrune_settings_${projectId}`)
@@ -90,6 +96,16 @@ export function buildApiUrl(path: string, serverUrl = ""): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`
   const base = isNativeCapacitor() ? (getApiBase() || serverUrl || "").replace(/\/$/, "") : ""
   return `${base}${normalizedPath}`
+}
+
+/** Fetch with auth token automatically attached (for tunnel access) */
+export function authedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const token = getApiAuthToken()
+  const headers = new Headers(init?.headers)
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`)
+  }
+  return fetch(url, { ...init, headers })
 }
 
 export function getVolumeKeysEnabled(): boolean {

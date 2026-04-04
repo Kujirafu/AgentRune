@@ -1,6 +1,6 @@
 // web/components/TaskBoard.tsx
 import { useState, useEffect, useCallback, useRef } from "react"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { Task, TaskStore } from "../types"
 import { SpringOverlay } from "./SpringOverlay"
@@ -40,7 +40,7 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
 
   const fetchTasks = useCallback(() => {
     setLoading(true)
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`)
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
       .then((data) => { if (data) setStore(data) })
       .catch(() => {})
@@ -66,7 +66,7 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
   // Save store to server
   const saveStore = useCallback((newStore: TaskStore) => {
     setStore(newStore)
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`, {
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(newStore),
@@ -128,7 +128,7 @@ export function TaskBoard({ open, projectId, onClose, onStartTask, send }: TaskB
     const task = store.tasks.find((t) => t.id === taskId)
     if (!task) return
     const next = task.status === "pending" ? "in_progress" : task.status === "in_progress" ? "done" : "pending"
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: next }),

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react"
 import type { Project } from "../../types"
 import { AGENTS } from "../../types"
-import { getApiBase } from "../../lib/storage"
+import { getApiBase, authedFetch } from "../../lib/storage"
 
 interface AgentSession {
   sessionId: string
@@ -72,7 +72,7 @@ export function QuickLaunchDialog({
   useEffect(() => {
     if (!previewSession || !projectId) return
     setLoadingPreview(true)
-    fetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}/${previewSession.sessionId}/messages`)
+    authedFetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}/${previewSession.sessionId}/messages`)
       .then(r => r.json())
       .then((data: { role: string; text: string; timestamp?: string }[]) => {
         const all = Array.isArray(data) ? data : []
@@ -115,7 +115,7 @@ export function QuickLaunchDialog({
   useEffect(() => {
     if (!showResume || !projectId || !supportsResume) return
     setLoadingSessions(true)
-    fetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}`)
+    authedFetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}`)
       .then(r => r.json())
       .then((data: AgentSession[]) => setAgentSessions(Array.isArray(data) ? data : []))
       .catch(() => setAgentSessions([]))

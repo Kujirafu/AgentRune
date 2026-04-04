@@ -205,6 +205,18 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
     { value: "yolo", label: "YOLO" },
     { value: "plan", label: "Plan (Read-only)" },
   ] as const
+  const geminiModels = [
+    { value: "", label: t("settings.codexModeDefault") || "Default" },
+    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+  ] as const
+  const cursorModelPresets = [
+    { value: "", label: "Auto" },
+    { value: "claude-4-sonnet-thinking", label: "Claude 4 Sonnet" },
+    { value: "o3", label: "o3" },
+    { value: "claude-4-opus-thinking", label: "Claude 4 Opus" },
+  ] as const
 
   const openExternal = (url: string) => {
     Browser.open({ url }).catch(() => window.open(url, "_blank"))
@@ -793,21 +805,59 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
           </div>
         )}
 
-        {/* Gemini Model (text input) */}
+        {/* Gemini Model */}
         {isGeminiAgent && (
           <div style={{ marginBottom: 24 }}>
             <div style={sectionLabelStyle}>{t("settings.geminiModel")}</div>
             <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
               padding: "16px 20px",
               borderRadius: 20,
               border: "1px solid var(--glass-border)",
               background: "var(--card-bg)",
+              backdropFilter: "blur(20px)",
+              WebkitBackdropFilter: "blur(20px)",
+              boxShadow: "var(--glass-shadow)",
             }}>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                gap: 10,
+              }}>
+                {geminiModels.map((model) => (
+                  <button
+                    key={model.value || "default"}
+                    onClick={() => onChange({ ...settings, geminiModel: model.value })}
+                    style={{
+                      padding: "12px 10px",
+                      borderRadius: 14,
+                      border: settings.geminiModel === model.value
+                        ? "1.5px solid var(--accent-primary)"
+                        : "1px solid var(--glass-border)",
+                      background: settings.geminiModel === model.value
+                        ? "var(--accent-primary-bg)"
+                        : "var(--glass-bg)",
+                      backdropFilter: "blur(12px)",
+                      WebkitBackdropFilter: "blur(12px)",
+                      color: settings.geminiModel === model.value ? "var(--accent-primary)" : "var(--text-secondary)",
+                      fontWeight: settings.geminiModel === model.value ? 700 : 500,
+                      fontSize: 13,
+                      cursor: "pointer",
+                      transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+                      textAlign: "center",
+                    }}
+                  >
+                    {model.label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="text"
                 value={settings.geminiModel}
-                onChange={(e) => onChange({ ...settings, geminiModel: e.target.value })}
-                placeholder="e.g. gemini-2.5-pro"
+                onChange={(e) => onChange({ ...settings, geminiModel: e.target.value.trim() })}
+                placeholder="gemini-2.5-pro"
                 style={{
                   width: "100%",
                   padding: "10px 14px",
@@ -874,21 +924,59 @@ export function SettingsSheet({ open, settings, agentId, onChange, onClose, send
           </div>
         )}
 
-        {/* Cursor Model (text input) */}
+        {/* Cursor Model */}
         {isCursorAgent && (
           <div style={{ marginBottom: 24 }}>
             <div style={sectionLabelStyle}>{t("settings.cursorModel")}</div>
             <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
               padding: "16px 20px",
               borderRadius: 20,
               border: "1px solid var(--glass-border)",
               background: "var(--card-bg)",
+              backdropFilter: "blur(20px)",
+              WebkitBackdropFilter: "blur(20px)",
+              boxShadow: "var(--glass-shadow)",
             }}>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                gap: 10,
+              }}>
+                {cursorModelPresets.map((model) => (
+                  <button
+                    key={model.value || "auto"}
+                    onClick={() => onChange({ ...settings, cursorModel: model.value })}
+                    style={{
+                      padding: "12px 10px",
+                      borderRadius: 14,
+                      border: settings.cursorModel === model.value
+                        ? "1.5px solid var(--accent-primary)"
+                        : "1px solid var(--glass-border)",
+                      background: settings.cursorModel === model.value
+                        ? "var(--accent-primary-bg)"
+                        : "var(--glass-bg)",
+                      backdropFilter: "blur(12px)",
+                      WebkitBackdropFilter: "blur(12px)",
+                      color: settings.cursorModel === model.value ? "var(--accent-primary)" : "var(--text-secondary)",
+                      fontWeight: settings.cursorModel === model.value ? 700 : 500,
+                      fontSize: 13,
+                      cursor: "pointer",
+                      transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+                      textAlign: "center",
+                    }}
+                  >
+                    {model.label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="text"
                 value={settings.cursorModel}
-                onChange={(e) => onChange({ ...settings, cursorModel: e.target.value })}
-                placeholder="e.g. gpt-5.2"
+                onChange={(e) => onChange({ ...settings, cursorModel: e.target.value.trim() })}
+                placeholder="claude-4-sonnet-thinking"
                 style={{
                   width: "100%",
                   padding: "10px 14px",

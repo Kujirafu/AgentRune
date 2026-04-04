@@ -1,6 +1,6 @@
 // web/components/PlanPanel.tsx — Plan panel (multi-PRD + Standards)
 import React, { useState, useEffect, useCallback } from "react"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import type { PrdItem, PrdSummary, PrdPriority, Task } from "../types"
 import { StandardsContent } from "./StandardsPage"
@@ -64,11 +64,11 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
     // Fetch PRD details + standalone tasks in parallel
     Promise.all([
       // Fetch all PRD details for their tasks
-      fetch(`${base}/api/prd/${encodeURIComponent(projectId)}`).then(r => r.json()).then(async (list: PrdSummary[]) => {
+      authedFetch(`${base}/api/prd/${encodeURIComponent(projectId)}`).then(r => r.json()).then(async (list: PrdSummary[]) => {
         if (!Array.isArray(list) || list.length === 0) return []
         const details = await Promise.all(
           list.filter(p => p.tasksTotal > 0).map(p =>
-            fetch(`${base}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(p.id)}`).then(r => r.json()).catch(() => null)
+            authedFetch(`${base}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(p.id)}`).then(r => r.json()).catch(() => null)
           )
         )
         return details.filter((d): d is PrdItem => d?.id && d?.tasks?.length > 0).map(d => ({
@@ -76,7 +76,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
         }))
       }).catch(() => [] as { prdId: string; prdTitle: string; priority: PrdPriority; tasks: Task[] }[]),
       // Fetch standalone tasks
-      fetch(`${base}/api/tasks/${encodeURIComponent(projectId)}`).then(r => r.json()).then((data: any) => data?.tasks || []).catch(() => []),
+      authedFetch(`${base}/api/tasks/${encodeURIComponent(projectId)}`).then(r => r.json()).then((data: any) => data?.tasks || []).catch(() => []),
     ]).then(([groups, standalone]) => {
       setPrdTaskGroups(groups)
       setStandaloneTasks(standalone)
@@ -84,7 +84,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
   }, [projectId])
 
   const updateStandaloneTask = useCallback((taskId: number, body: Record<string, unknown>) => {
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}/${taskId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(() => fetchAllTasks()).catch(() => {})
@@ -92,7 +92,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
 
   const deleteStandaloneTask = useCallback((taskId: number) => {
     const remaining = standaloneTasks.filter(t => t.id !== taskId)
-    fetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`, {
+    authedFetch(`${getApiBase()}/api/tasks/${encodeURIComponent(projectId)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tasks: remaining }),
     }).then(() => fetchAllTasks()).catch(() => {})
@@ -100,7 +100,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
 
   const fetchPrdList = useCallback(() => {
     setLoading(true)
-    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}`)
+    authedFetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}`)
       .then(r => r.json())
       .then(data => { if (Array.isArray(data)) setPrdList(data) })
       .catch(() => {})
@@ -109,7 +109,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
 
   const fetchPrdDetail = useCallback((prdId: string) => {
     setDetailLoading(true)
-    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`)
+    authedFetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`)
       .then(r => r.json())
       .then(data => { if (data?.id) setSelectedPrd(data) })
       .catch(() => {})
@@ -153,7 +153,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
 
   // ── PRD actions ──
   const updatePrdField = useCallback((prdId: string, body: Record<string, unknown>) => {
-    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`, {
+    authedFetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(r => r.json()).then(data => {
@@ -163,7 +163,7 @@ export const PlanPanel = React.memo(function PlanPanel({ projectId, send }: Plan
   }, [projectId, fetchPrdList])
 
   const updateTaskStatus = useCallback((prdId: string, taskId: number, status: string) => {
-    fetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}/tasks/${taskId}`, {
+    authedFetch(`${getApiBase()}/api/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(prdId)}/tasks/${taskId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     }).then(r => r.json()).then(data => {

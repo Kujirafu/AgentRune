@@ -1,6 +1,6 @@
 {
   "name": "agentrune-desktop",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "AgentRune desktop app — AI agent control panel",
   "author": "Kujirafu",
@@ -10,7 +10,7 @@
     "dev": "tsup && electron .",
     "build": "tsup",
     "rebuild-pty": "node ./scripts/rebuild-pty.cjs",
-    "package": "npm run build && electron-builder --win",
+    "package": "npm run build && node ./scripts/package-win.cjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-04-04
+- Release line now advances to `0.3.6`, because `v0.3.5` already points at an older commit and this bugfix batch needs a new publish tag instead of a rewritten release.
+- Added a root `release:assets` staging step that copies the desktop updater payload under the exact `latest.yml` filenames plus the website aliases `agentrune-desktop.exe`, `agentrune.apk`, and `agentrune.aab` into `.release-assets`, so both auto-update and AgentLore's fixed GitHub latest-download URLs stay valid after each publish.
+- Added ignore rules for `.release-assets/`, desktop release output folders, Android bundles, and local QA PDFs so public release commits do not accidentally include generated binaries or audit artifacts.
+- Desktop release packaging now starts `electron-builder` via an explicit Windows command wrapper instead of `shell: true`, removing the child-process security warning from packaging runs.
 - Fixed double-tap-to-send when picking images from gallery: `InputBar` now tracks active `FileReader` instances via `fileLoadingCountRef`. Tapping Send while the reader is still loading sets `pendingSendRef = true` and auto-fires `handleSendInner` once all readers complete, so the image is always sent in a single tap.
 - Improved image instruction sent to agent: `appendInlineImagePaths` now uses a clearer "Please use your View/Read tool to open this image file before responding:" format and converts Windows backslash paths to forward slashes inside the instruction, so Claude Code reliably invokes the View tool.
 - Improved FileBrowser error handling: network/timeout errors now show the localized `file.loadError` message, while unexpected server errors show the raw message, making it easier to diagnose 401 vs. network issues.

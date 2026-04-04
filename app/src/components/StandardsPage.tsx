@@ -1,6 +1,6 @@
 // web/components/StandardsPage.tsx
 import { useState, useEffect, useCallback } from "react"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useLocale } from "../lib/i18n/index.js"
 import { SpringOverlay } from "./SpringOverlay"
 
@@ -130,7 +130,7 @@ export function StandardsContent() {
 
   const fetchStandards = useCallback(() => {
     setLoading(true)
-    fetch(`${getApiBase()}/api/standards`)
+    authedFetch(`${getApiBase()}/api/standards`)
       .then(r => r.json())
       .then(data => setStandards(data))
       .catch(() => {})
@@ -141,7 +141,7 @@ export function StandardsContent() {
 
   const runValidation = useCallback(() => {
     setValidating(true)
-    fetch(`${getApiBase()}/api/standards/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    authedFetch(`${getApiBase()}/api/standards/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(r => r.json())
       .then(report => { setValidationReport(report); setValidating(false) })
       .catch(() => setValidating(false))
@@ -149,19 +149,19 @@ export function StandardsContent() {
 
   const toggleRule = useCallback((categoryId: string, rule: StandardRule) => {
     const updated = { ...rule, enabled: !rule.enabled }
-    fetch(`${getApiBase()}/api/standards/rules`, {
+    authedFetch(`${getApiBase()}/api/standards/rules`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categoryId, rule: updated }),
     }).then(() => fetchStandards()).catch(() => {})
   }, [fetchStandards])
 
   const handleDeleteRule = useCallback((categoryId: string, ruleId: string) => {
-    fetch(`${getApiBase()}/api/standards/rules/${encodeURIComponent(categoryId)}/${encodeURIComponent(ruleId)}`, { method: "DELETE" })
+    authedFetch(`${getApiBase()}/api/standards/rules/${encodeURIComponent(categoryId)}/${encodeURIComponent(ruleId)}`, { method: "DELETE" })
       .then(() => fetchStandards()).catch(() => {})
   }, [fetchStandards])
 
   const handleSaveRule = useCallback((categoryId: string, rule: StandardRule) => {
-    fetch(`${getApiBase()}/api/standards/rules`, {
+    authedFetch(`${getApiBase()}/api/standards/rules`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categoryId, rule }),
     }).then(() => { fetchStandards(); setEditingRule(null) }).catch(() => {})
@@ -378,7 +378,7 @@ export function StandardsPage({ open, onClose }: StandardsPageProps) {
   // Fetch standards
   const fetchStandards = useCallback(() => {
     setLoading(true)
-    fetch(`${getApiBase()}/api/standards`)
+    authedFetch(`${getApiBase()}/api/standards`)
       .then(r => r.json())
       .then(data => setStandards(data))
       .catch(() => {})
@@ -406,7 +406,7 @@ export function StandardsPage({ open, onClose }: StandardsPageProps) {
   // Run validation
   const runValidation = useCallback(() => {
     setValidating(true)
-    fetch(`${getApiBase()}/api/standards/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    authedFetch(`${getApiBase()}/api/standards/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(r => r.json())
       .then(report => { setValidationReport(report); setValidating(false) })
       .catch(() => setValidating(false))
@@ -415,7 +415,7 @@ export function StandardsPage({ open, onClose }: StandardsPageProps) {
   // Toggle rule
   const toggleRule = useCallback((categoryId: string, rule: StandardRule) => {
     const updated = { ...rule, enabled: !rule.enabled }
-    fetch(`${getApiBase()}/api/standards/rules`, {
+    authedFetch(`${getApiBase()}/api/standards/rules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categoryId, rule: updated }),
@@ -424,14 +424,14 @@ export function StandardsPage({ open, onClose }: StandardsPageProps) {
 
   // Delete rule
   const handleDeleteRule = useCallback((categoryId: string, ruleId: string) => {
-    fetch(`${getApiBase()}/api/standards/rules/${encodeURIComponent(categoryId)}/${encodeURIComponent(ruleId)}`, { method: "DELETE" })
+    authedFetch(`${getApiBase()}/api/standards/rules/${encodeURIComponent(categoryId)}/${encodeURIComponent(ruleId)}`, { method: "DELETE" })
       .then(() => fetchStandards())
       .catch(() => {})
   }, [fetchStandards])
 
   // Save rule from editor
   const handleSaveRule = useCallback((categoryId: string, rule: StandardRule) => {
-    fetch(`${getApiBase()}/api/standards/rules`, {
+    authedFetch(`${getApiBase()}/api/standards/rules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ categoryId, rule }),

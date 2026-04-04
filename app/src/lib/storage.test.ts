@@ -5,6 +5,8 @@ import {
   getRecentCommands,
   addRecentCommand,
   getApiBase,
+  getApiAuthToken,
+  authedFetch,
   canUseApi,
   buildApiUrl,
   getVolumeKeysEnabled,
@@ -21,6 +23,8 @@ import { DEFAULT_SETTINGS } from "../types"
 
 beforeEach(() => {
   localStorage.clear()
+  vi.mocked(global.fetch).mockReset()
+  vi.mocked(global.fetch).mockResolvedValue(new Response(null, { status: 204 }))
 })
 
 // ── getSettings ──────────────────────────────────────────────────
@@ -191,6 +195,37 @@ describe("buildApiUrl / canUseApi", () => {
     expect(canUseApi()).toBe(true)
     expect(buildApiUrl("/api/project-summary")).toBe("/api/project-summary")
     delete (window as any).Capacitor
+  })
+})
+
+describe("getApiAuthToken / authedFetch", () => {
+  it("prefers the current api token over the legacy cloud token", async () => {
+    localStorage.setItem("agentrune_cloud_token", "cloud-token")
+    localStorage.setItem("agentrune_api_token", "api-token")
+    expect(getApiAuthToken()).toBe("api-token")
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+    await authedFetch("/api/projects")
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/projects",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    )
+    const [, init] = vi.mocked(global.fetch).mock.calls.at(-1)!
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer api-token")
+  })
+
+  it("falls back to the cloud token when no api token is stored", async () => {
+    localStorage.setItem("agentrune_cloud_token", "cloud-token")
+    expect(getApiAuthToken()).toBe("cloud-token")
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+    await authedFetch("/api/tasks")
+
+    const [, init] = vi.mocked(global.fetch).mock.calls.at(-1)!
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer cloud-token")
   })
 })
 

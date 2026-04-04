@@ -6,7 +6,7 @@ import type { Project } from "../types"
 import { AGENTS } from "../types"
 import { FileBrowser } from "./FileBrowser"
 import { useLocale } from "../lib/i18n"
-import { getApiBase } from "../lib/storage"
+import { getApiBase, authedFetch } from "../lib/storage"
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss"
 
 interface AgentSession {
@@ -39,6 +39,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
   const [newCwd, setNewCwd] = useState("")
   const [showBrowser, setShowBrowser] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState("")
 
   // Resume session state
   const [showResume, setShowResume] = useState(false)
@@ -60,6 +61,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
       setShowAddProject(false)
       setNewName("")
       setNewCwd("")
+      setCreateError("")
       setShowResume(false)
       setAgentSessions([])
       setPreviewSession(null)
@@ -81,7 +83,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
   useEffect(() => {
     if (!showResume || !projectId || !supportsResume) return
     setLoadingSessions(true)
-    fetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}`)
+    authedFetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}`)
       .then(r => r.json())
       .then((data: AgentSession[]) => setAgentSessions(Array.isArray(data) ? data : []))
       .catch(() => setAgentSessions([]))
@@ -92,7 +94,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
   useEffect(() => {
     if (!previewSession || !projectId) return
     setLoadingPreview(true)
-    fetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}/${previewSession.sessionId}/messages`)
+    authedFetch(`${getApiBase()}/api/agent-sessions/${projectId}/${agentId}/${previewSession.sessionId}/messages`)
       .then(r => r.json())
       .then((data: { role: string; text: string; timestamp?: string }[]) => setPreviewMessages(Array.isArray(data) ? data : []))
       .catch(() => setPreviewMessages([]))
@@ -102,11 +104,14 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
   const handleCreateProject = async () => {
     if (!newName.trim() || !newCwd.trim() || !onNewProject) return
     setCreating(true)
+    setCreateError("")
     try {
       await onNewProject(newName.trim(), newCwd.trim())
       setShowAddProject(false)
       setNewName("")
       setNewCwd("")
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Failed to create project")
     } finally {
       setCreating(false)
     }
@@ -356,7 +361,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                   ))}
                   {onNewProject && (
                     <button
-                      onClick={() => { setShowAddProject(true); setShowProjectPicker(false) }}
+                      onClick={() => { setShowAddProject(true); setShowProjectPicker(false); setCreateError("") }}
                       style={{
                         width: "100%",
                         padding: "12px 16px",
@@ -379,7 +384,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <input
                 value={newName}
-                onChange={(e) => setNewName(e.target.value)}
+                onChange={(e) => { setNewName(e.target.value); if (createError) setCreateError("") }}
                 placeholder={t("newSession.projectName")}
                 style={{
                   width: "100%", padding: "12px 16px", borderRadius: 14,
@@ -391,7 +396,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
               <div style={{ display: "flex", gap: 8 }}>
                 <input
                   value={newCwd}
-                  onChange={(e) => setNewCwd(e.target.value)}
+                  onChange={(e) => { setNewCwd(e.target.value); if (createError) setCreateError("") }}
                   placeholder={t("newSession.projectPath")}
                   style={{
                     flex: 1, padding: "12px 16px", borderRadius: 14,
@@ -433,7 +438,7 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                   {creating ? t("newSession.creating") : t("newSession.create")}
                 </button>
                 <button
-                  onClick={() => { setShowAddProject(false); setNewName(""); setNewCwd("") }}
+                  onClick={() => { setShowAddProject(false); setNewName(""); setNewCwd(""); setCreateError("") }}
                   style={{
                     padding: "10px 16px", borderRadius: 12,
                     border: "1px solid var(--glass-border)",
@@ -445,6 +450,19 @@ export function NewSessionSheet({ open, projects, selectedProject, onClose, onLa
                   {t("newSession.cancel")}
                 </button>
               </div>
+              {createError && (
+                <div style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(248,113,113,0.24)",
+                  background: "rgba(248,113,113,0.08)",
+                  color: "#f87171",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}>
+                  {createError}
+                </div>
+              )}
             </div>
           )}
         </div>
