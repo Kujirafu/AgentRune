@@ -1,9 +1,17 @@
 import { test, expect } from "@playwright/test"
+import { mkdirSync } from "node:fs"
 import { resolve } from "node:path"
 
 const TMP_DIR = resolve(process.cwd(), "../tmp")
 
 test.describe("Mobile daemon regressions", () => {
+  test.beforeAll(() => {
+    // Ensure the fixture dir exists for create-project and mkdir specs.
+    // Daemon rejects paths outside $HOME, and this resolves under it.
+    mkdirSync(TMP_DIR, { recursive: true })
+  })
+
+
   test("default theme follows system color scheme", async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.removeItem("agentrune_theme")
