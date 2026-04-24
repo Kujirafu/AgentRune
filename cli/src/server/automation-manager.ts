@@ -56,6 +56,23 @@ import {
 import type { PtyManager } from "./pty-manager.js"
 import type { Project } from "../shared/types.js"
 
+/**
+ * Validate a git branch name so it cannot be parsed as a CLI flag by `git checkout`.
+ * Rules (conservative subset of git check-ref-format):
+ *   - 1-128 chars
+ *   - no leading `-` (would be treated as a flag)
+ *   - no leading `.`
+ *   - only `[A-Za-z0-9_/.@-]`
+ * Used at API ingress and right before any `execFile("git", [..., name])` so an
+ * attacker cannot smuggle `--upload-pack=...` or similar through `crew.targetBranch`.
+ */
+export function isSafeBranchName(name: unknown): name is string {
+  if (typeof name !== "string") return false
+  if (name.length < 1 || name.length > 128) return false
+  if (name.startsWith("-") || name.startsWith(".")) return false
+  return /^[A-Za-z0-9_/.@-]+$/.test(name)
+}
+
 /** Kill a child process and its entire tree (Windows: taskkill /T, POSIX: negative PID for detached) */
 function killProcessTree(proc: ChildProcess): void {
   if (!proc.pid || proc.killed) return
@@ -1859,17 +1876,23 @@ export class AutomationManager {
     let execCwd = project.cwd
     if (crew.targetBranch) {
       const branchName = crew.targetBranch.replace("YYYY-MM-DD", new Date().toISOString().slice(0, 10))
-      try {
-        execFileSync("git", ["checkout", "-b", branchName], { cwd: project.cwd, stdio: "pipe" })
-        report.targetBranch = branchName
-        log.info(`[Crew] Created target branch: ${branchName}`)
-      } catch (err) {
-        // Branch might already exist — try checkout
+      if (!isSafeBranchName(branchName)) {
+        // Reject branch names that could be parsed as git CLI flags (e.g. "--upload-pack=…").
+        // Skip branch creation and fall through to run on project.cwd's current branch.
+        log.warn(`[Crew] Rejected unsafe target branch "${branchName}" — skipping branch creation`)
+      } else {
         try {
-          execFileSync("git", ["checkout", branchName], { cwd: project.cwd, stdio: "pipe" })
+          execFileSync("git", ["checkout", "-b", branchName], { cwd: project.cwd, stdio: "pipe" })
           report.targetBranch = branchName
-        } catch {
-          log.warn(`[Crew] Failed to create/checkout branch "${branchName}": ${err}`)
+          log.info(`[Crew] Created target branch: ${branchName}`)
+        } catch (err) {
+          // Branch might already exist — try checkout
+          try {
+            execFileSync("git", ["checkout", branchName], { cwd: project.cwd, stdio: "pipe" })
+            report.targetBranch = branchName
+          } catch {
+            log.warn(`[Crew] Failed to create/checkout branch "${branchName}": ${err}`)
+          }
         }
       }
     }

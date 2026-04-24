@@ -24,7 +24,7 @@ import { detectAgents } from "./agent-detect.js"
 import { VaultSync } from "./vault-sync.js"
 import { ProgressInterceptor } from "./progress-interceptor.js"
 import { WorktreeManager } from "./worktree-manager.js"
-import { AutomationManager, ADMIN_LIMITS } from "./automation-manager.js"
+import { AutomationManager, ADMIN_LIMITS, isSafeBranchName } from "./automation-manager.js"
 import { buildPlanningConstraints } from "./planning-constraints.js"
 import { createFromTrustProfile, grantPermission } from "./authority-map.js"
 import { SkillMonitor } from "./skill-monitor.js"
@@ -3813,6 +3813,11 @@ export function createServer(portOverride?: number) {
     if (!name || !schedule || (!command && !prompt && !crew)) {
       return res.status(400).json({ error: "name, schedule, and (prompt or command or crew) are required" })
     }
+    // Reject crew.targetBranch that could be parsed as a git flag by execFileSync
+    // (e.g. "--upload-pack=..."). Template tokens like YYYY-MM-DD are allowed.
+    if (crew?.targetBranch !== undefined && crew.targetBranch !== "" && !isSafeBranchName(String(crew.targetBranch).replace("YYYY-MM-DD", "2000-01-01"))) {
+      return res.status(400).json({ error: "Invalid crew.targetBranch" })
+    }
     const auto = automationManager.add({
       projectId: req.params.projectId,
       name,
@@ -3834,6 +3839,10 @@ export function createServer(portOverride?: number) {
   })
 
   app.patch("/api/automations/:projectId/:id", express.json(), (req, res) => {
+    const incomingCrew = req.body?.crew as { targetBranch?: unknown } | undefined
+    if (incomingCrew?.targetBranch !== undefined && incomingCrew.targetBranch !== "" && !isSafeBranchName(String(incomingCrew.targetBranch).replace("YYYY-MM-DD", "2000-01-01"))) {
+      return res.status(400).json({ error: "Invalid crew.targetBranch" })
+    }
     const auto = automationManager.update(req.params.id, req.body)
     if (!auto) return res.status(404).json({ error: "Automation not found" })
     res.json(auto)

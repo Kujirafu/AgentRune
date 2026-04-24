@@ -26,6 +26,7 @@ const {
       send: vi.fn(),
       reloadIgnoringCache: vi.fn(),
       toggleDevTools: vi.fn(),
+      setWindowOpenHandler: vi.fn(),
     },
     once: vi.fn(),
     on: vi.fn(),
@@ -77,6 +78,7 @@ vi.mock("electron", () => ({
   nativeTheme: mockNativeTheme,
   ipcMain: mockIpcMain,
   session: mockSession,
+  shell: { openExternal: vi.fn(() => Promise.resolve()) },
 }))
 
 vi.mock("./tray.js", () => ({ setupTray: mockSetupTray }))

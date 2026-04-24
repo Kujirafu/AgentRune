@@ -1,5 +1,5 @@
 // desktop/src/main.ts — AgentRune Electron main process
-import { app, BrowserWindow, nativeTheme, ipcMain, session } from "electron"
+import { app, BrowserWindow, nativeTheme, ipcMain, session, shell } from "electron"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { logRuntime } from "./runtime-log.js"
@@ -96,6 +96,25 @@ function createWindow(): BrowserWindow {
     if (input.key === "F12" || (input.control && input.shift && input.key === "I")) {
       win.webContents.toggleDevTools()
     }
+  })
+
+  // Block in-app navigation to non-local URLs; hand external http(s) links to the OS browser.
+  // Uses URL parsing (not startsWith) so `http://localhost:3457.evil.com` cannot slip through.
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      const u = new URL(url)
+      if (u.protocol === "http:" && u.hostname === "localhost" && u.port === String(PORT)) return
+    } catch { /* unparseable URL — fall through to block */ }
+    event.preventDefault()
+    logRuntime(`[Electron] Blocked in-window navigation: ${url}`)
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {})
+  })
+
+  // Deny window.open; external http(s) links go to the OS browser, everything else is refused
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {})
+    else logRuntime(`[Electron] Refused window.open for non-http url: ${url}`)
+    return { action: "deny" }
   })
 
   win.once("ready-to-show", () => {
