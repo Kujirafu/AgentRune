@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-04-24
+- Synced mobile app-side `buildProtocol` in `app/src/types.ts` to the v5 memory-index protocol. Previously it still told agents "`agentlore.md` IS your memory — read on start, write when you learn", which contradicts the daemon-side v5 text and the current `rules.md` (index + `context/*.md` sections). `full` and `short` outputs now match `cli/src/server/automation-manager.ts`; `prdHint` is intentionally omitted because the app-side builder has no `projectId`. All 434 app tests still pass; app `typecheck` clean.
+
 ## 2026-04-04
 - Release line now advances to `0.3.6`, because `v0.3.5` already points at an older commit and this bugfix batch needs a new publish tag instead of a rewritten release.
 - Added a root `release:assets` staging step that copies the desktop updater payload under the exact `latest.yml` filenames plus the website aliases `agentrune-desktop.exe`, `agentrune.apk`, and `agentrune.aab` into `.release-assets`, so both auto-update and AgentLore's fixed GitHub latest-download URLs stay valid after each publish.
