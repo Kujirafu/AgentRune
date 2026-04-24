@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentrune": {
+      "command": "node",
+      "args": ["cli/dist/bin.js", "mcp"]
+    }
+  }
+}
