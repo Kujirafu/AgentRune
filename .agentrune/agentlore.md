@@ -4,7 +4,7 @@
 AgentRune 是手機與桌面的 AI agent 控制台，負責啟動、監控、恢復與排程多個 agent session。專案採 monorepo，核心重點是手機與桌面可對同一批 session / agent 無縫切換，並透過 CLI daemon 提供 WebSocket、REST API、PTY 管理與 AgentLore 整合。
 
 ## Current Snapshot
-- Release target is `0.3.6`, not `0.3.5`: `v0.3.5` is already tagged on an older commit, so the current desktop plus Android bugfix batch must ship under the next patch version.
+- Release target is `0.3.7` (desktop-only patch on top of `v0.3.6`): mobile app code only changed in protocol text + e2e fixture, so Android keeps shipping `0.3.6` (versionCode 14) until the next batch — `v0.3.7` will be tagged with `--latest=false` so AgentLore's `releases/latest/download/agentrune.apk` link continues to resolve to the `0.3.6` Android artifact.
 - Shared terminal input is now less latent across desktop and mobile: daemon-side queued sends can fall back to stabilized scrollback instead of waiting for a strict prompt marker, Codex multiline submit delay is much shorter, and mobile no longer stacks an extra client-side delayed Enter on top.
 - Desktop Quick Launch now attaches new sessions immediately, so opening a second desktop session no longer waits for a manual Terminal click before its first `/qa` or skill-chain command can start.
 - Desktop left-bottom widget is now a message center, not a permission-only shield: use it for approvals plus completed-session summaries and next steps.
